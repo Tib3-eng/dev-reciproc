@@ -1,0 +1,35 @@
+# Build / artefatos (recursivo)
+**/build/
+**/out/
+**/bin/
+**/obj/
+**/Debug/
+**/Release/
+**/x64/
+**/x86/
+*.obj
+*.pdb
+*.ilk
+*.idb
+*.pch
+*.exp
+*.lib
+*.dll
+*.exe
+*.log
+
+# VS / VSCode
+**/.vs/
+**/.vscode/ipch/
+**/.vscode/.cmake/
+
+# CMake temporarios
+**/CMakeFiles/
+**/CMakeCache.txt
+**/cmake_install.cmake
+**/install_manifest.txt
+**/Makefile
+
+# SO
+Thumbs.db
+.DS_Store
