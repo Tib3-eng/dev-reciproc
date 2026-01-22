@@ -1,13 +1,14 @@
 cmake_minimum_required(VERSION 3.20)
-project(DriveA5 C)
-
-set(CMAKE_C_STANDARD 11)
 
 # --- vcpkg toolchain ----
 if (NOT DEFINED CMAKE_TOOLCHAIN_FILE)
   set(CMAKE_TOOLCHAIN_FILE "${CMAKE_SOURCE_DIR}/vcpkg/scripts/buildsystems/vcpkg.cmake" CACHE STRING "")
 endif()
 set(VCPKG_TARGET_TRIPLET "x64-windows" CACHE STRING "")
+
+project(DriveA5 C)
+
+set(CMAKE_C_STANDARD 11)
 
 # --- libmodbus via vcpkg ----
 find_package(libmodbus CONFIG REQUIRED)

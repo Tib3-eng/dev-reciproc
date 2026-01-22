@@ -1,0 +1,369 @@
+﻿$100B   pcDLGAcqData          Pacote de dados da aquisição de sinais                              PC→DLG
+$2000   pcDLGGetChConfig      Solicita a configuração do canal                                    PC → DLG
+$2001   pcDLGGetChConfigR     Resposta ao pcDLGGetChConfig                                        DLG → PC
+$2000   pcDLGGetChConfig      Solicita a configuração do canal                                    PC → DLG
+$2001   pcDLGGetChConfigR     Resposta ao pcDLGGetChConfig                                        DLG → PC
+$2002   pcDLGSetChConfig      Programa a configuração do canal                                    PC → DLG
+$2003   pcDLGSetChConfigR     Resposta ao pcDLGSetChConfig                                        DLG → PC
+$2004   pcDLGShuntCal         Programa o resistor de shunt cal                                    PC → DLG
+$2005   pcDLGShuntCalR        Resposta ao pcDLGShuntCal                                           DLG → PC
+$2006   pcDLGShuntCal         Programa o resistor de shunt cal                                    PC → DLG
+$2007   pcDLGShuntCalR        Resposta ao pcDLGShuntCal                                           DLG → PC
+$2008   pcDLGGetUserGain      Solicita o ganho de usuário                                         PC → DLG
+$2009   pcDLGGetUserGainR     Resposta ao pcDLGGetUserGain                                        DLG → PC
+$200A   pcDLGSetUserGain      Programa o ganho de usuário                                         PC → DLG
+$200B   pcDLGSetUserGainR     Resposta ao pcDLGSetUserGain                                        DLG → PC
+$200C   pcDLGGetUserVexc      Solicita a tensão de excitação de usuário                           PC → DLG
+$200D   pcDLGGetUserVexcR     Resposta ao pcDLGGetUserVexc                                        DLG → PC
+$200E   pcDLGSetUserVexc      Programa a tensão de excitação de usuário                           PC → DLG
+$200F   pcDLGSetUserVexcR     Resposta ao pcDLGSetUserVexc                                        DLG → PC
+$2100   pcDLGSaveSetup        Salva configuração (dos canais) na memória não volátil              PC → DLG
+$2101   pcDLGSaveSetupR       Resposta ao pcDLGSaveSetup                                          DLG → PC
+$2106   pcDLGResetFlash       Carrega Todas as Configs Default do Sistema e as Salva na           PC → DLG
+                              memória não volátil
+$2107   pcDLGResetFlashR      Resposta ao pcDLGResetFlash                                         DLG → PC
+$3000   pcDLGGetAiSetup       Leitura da configuração dos canais para aquisição                   PC → DLG
+$3001   pcDLGGetAiSetupR      Resposta ao pcDLGGetAiSetup                                         DLG → PC
+$3002   pcDLGSetAiSetup       Escrita da configuração dos canais para aquisição                   PC → DLG
+$3003   pcDLGSetAiSetupR      Resposta ao pcDLGSetAiSetup                                         DLG → PC
+$3004   pcDLGGetProgDLog      Leitura da programação da aquisição de sinais do coletor de dados   PC → DLG
+$3005   pcDLGGetProgDLogR     Resposta ao pcDLGSetAiSetup                                         DLG → PC
+$3006   pcDLGSetProgDLog      Programação da aquisição de sinais do coletor de dados              PC → DLG
+$3007   pcDLGSetProgDLogR     Resposta ao pcDLGSetProgDLog                                        DLG → PC
+$3008   pcDLGCommandDLog      Comando para o coletor de dados                                     PC → DLG
+$3009   pcDLGCommandDLogR     Resposta ao pcDLGCommandDLog                                        DLG → PC
+$300A   pcDLGGetGPS_Setup     Leitura da configuração da operação do GPS                          PC → DLG
+$300B    pcDLGGetGPS_SetupR           Resposta ao pcDLGGetGPS_Setup                                       DLG → PC
+$300C    pcDLGSetGPS_Setup            Escrita da configuração da operação do GPS                          PC → DLG
+$300D    pcDLGSetGPS_SetupR           Resposta ao pcDLGSetGPS_Setup                                       DLG → PC
+$300C    pcDLGSetGPS_Setup            Escrita da configuração da operação do GPS                          PC → DLG
+$300D    pcDLGSetGPS_SetupR           Resposta ao pcDLGSetGPS_Setup                                       DLG → PC
+
+                        mensagem pcDLGAcqData).
+
+
+#define             N_MAX_CHAN           8
+//------------------------------------ Tipo para a mensagem pcDLGAcqSetup --
+typedef struct _TpPcDLGAcqSetup {
+       uint16_t            PacketCode; // Código do pacote
+       uint16_t            Reserved;     // reservado
+       float32_t           SampleFreq; // Freqüência de amostragem em Hz
+       uint16_t            ClockDiv;     // Clock divider do SSC clock mode
+register (0..4095) – Ignorado
+       uint16_t            Period;              // Receive clock divider do SSC
+clock mode register - Ignorado
+                                  // (0..255)
+       uint16_t            PreScSw;      // Prescaler de software - Ignorado
+       uint16_t            fUseAiAdjust;        // <> 0: deve efetuar o ajuste do
+A/D por software
+        int16_t           nBurstsPack; // Número de amotragens por pacote por
+canal
+       int16_t            nSignals;    // Número de canais habilitados
+       int16_t            ICM[N_MAX_CHAN];          // Memória de canais a serem
+aquistados
+} TpPcDLGAcqSetup, *PTpPcDLGAcqSetup;
+
+//------------------------------------ Tipo para a mensagem pcDLGAcqSetup --
+typedef struct _TpPcDLGAcqSetupR {
+       uint16_t           PacketCode; // Código do pacote
+       uint16_t           Reserved;    // reservado
+       uint16_t           Error;
+       float32_t          SampleFreq; // Freqüência de amostragem Real do
+aparelho em Hz
+} TpPcDLGAcqSetup, *PTpPcDLGAcqSetup;
+
+
+
+Mensagem de Início de Aquisição (pcDLGAcqStart)
+
+Propósito:              A aplicação do microcomputador envia essa mensagem para o coletor de
+                        dados iniciar a aquisição de sinais em tempo real.
+
+Formato da Mensagem:    TpPcDLGGeneric
+Pacote de Dados da Aquisição (pcDLGAcqData)
+Propósito:               O pacote de dados da aquisição é enviado constantemente pelo coletor de
+                         dados após a habilitação da aquisição de sinais em tempo real.
+
+Formato da Mensagem:     TpPcDLGAcqSetup
+
+Packet Code:             pcDLGAcqData
+
+Observações:             O campo FrameNo é zerado pelo coletor de dados no início da aquisição de
+                         sinais aquisição e deve ser automaticamente incrementado a cada pacote
+                         “aquisitado”. Note que esse campo contabiliza o número de pacotes
+                         aquisitados e não o número de pacotes enviados.
+
+                         Os campos SampleFreq, nSignals e nBurstsPack devem ser iguais aos
+                         respectivos valores passados pela aplicação do microcomputador na
+                         mensagem pcDLGAcqSetup.
+
+                         O número total de amostras passadas, no campo Samples, em cada pacote
+                         pcDLGAcqData é igual a nSignals vezes nBusrtsPack. As amostras são
+                         dispostas no vetor Samples na ordem em que elas são aquisitadas. No
+                         começo de vetor Samples são armazenadas as amostras correspondentes
+                         ao primerio burst de leitura dos canais A/D habilitados. Segue-se a essas
+                         amostras o segundo burst e assim sucessivamente até completar o número
+                         de bursts especificados em nBurstsPack.
+
+
+//------------------------------------- Tipo para a mensagem pcDLGAcqData --
+typedef struct _TpPcDLGAcqData {
+       uint16_t           PacketCode; // Código do pacote
+       uint16_t           Reserved;     // reservado
+       int32_t            FrameNo;      // Número do pacotes de dados
+       int32_t            TimeStamp;    // Time        stamp em ms
+       float32_t          SampleFreq; // Freqüência de amostragem em Hz
+       int16_t            nBurstsPack; // Número de amotragens por pacote por
+canal
+       int16_t            nSignals;     // Número de canais habilitados
+       int32_t            ReservedL2; // reservado
+       int32_t            ReservedL3; // reservado
+       int32_t            ReservedL4; // reservado
+       int16_t            Samples[720];        // Amostras aquisitadas analógicas
+} TpPcDLGAcqData, *PTpPcDLGAcqData;
+Propósito:               O pacote de dados da aquisição é enviado constantemente pelo coletor de
+                         dados após a habilitação da aquisição de sinais em tempo real.
+
+Formato da Mensagem:     TpPcDLGAcqSetup
+
+Packet Code:             pcDLGAcqData
+
+Observações:             O campo FrameNo é zerado pelo coletor de dados no início da aquisição de
+                         sinais aquisição e deve ser automaticamente incrementado a cada pacote
+                         “aquisitado”. Note que esse campo contabiliza o número de pacotes
+                         aquisitados e não o número de pacotes enviados.
+
+                         Os campos SampleFreq, nSignals e nBurstsPack devem ser iguais aos
+                         respectivos valores passados pela aplicação do microcomputador na
+                         mensagem pcDLGAcqSetup.
+
+                         O número total de amostras passadas, no campo Samples, em cada pacote
+                         pcDLGAcqData é igual a nSignals vezes nBusrtsPack. As amostras são
+                         dispostas no vetor Samples na ordem em que elas são aquisitadas. No
+                         começo de vetor Samples são armazenadas as amostras correspondentes
+                         ao primerio burst de leitura dos canais A/D habilitados. Segue-se a essas
+                         amostras o segundo burst e assim sucessivamente até completar o número
+                         de bursts especificados em nBurstsPack.
+
+
+//------------------------------------- Tipo para a mensagem pcDLGAcqData --
+typedef struct _TpPcDLGAcqData {
+       uint16_t           PacketCode; // Código do pacote
+       uint16_t           Reserved;     // reservado
+       int32_t            FrameNo;      // Número do pacotes de dados
+       int32_t            TimeStamp;    // Time        stamp em ms
+       float32_t          SampleFreq; // Freqüência de amostragem em Hz
+       int16_t            nBurstsPack; // Número de amotragens por pacote por
+canal
+       int16_t            nSignals;     // Número de canais habilitados
+       int32_t            ReservedL2; // reservado
+       int32_t            ReservedL3; // reservado
+       int32_t            ReservedL4; // reservado
+       int16_t            Samples[720];        // Amostras aquisitadas analógicas
+} TpPcDLGAcqData, *PTpPcDLGAcqData;
+
+Packet Code:             pcDLGAcqData
+
+Observações:             O campo FrameNo é zerado pelo coletor de dados no início da aquisição de
+                         sinais aquisição e deve ser automaticamente incrementado a cada pacote
+                         “aquisitado”. Note que esse campo contabiliza o número de pacotes
+                         aquisitados e não o número de pacotes enviados.
+
+                         Os campos SampleFreq, nSignals e nBurstsPack devem ser iguais aos
+                         respectivos valores passados pela aplicação do microcomputador na
+                         mensagem pcDLGAcqSetup.
+
+                         O número total de amostras passadas, no campo Samples, em cada pacote
+                         pcDLGAcqData é igual a nSignals vezes nBusrtsPack. As amostras são
+                         dispostas no vetor Samples na ordem em que elas são aquisitadas. No
+                         começo de vetor Samples são armazenadas as amostras correspondentes
+                         ao primerio burst de leitura dos canais A/D habilitados. Segue-se a essas
+                         amostras o segundo burst e assim sucessivamente até completar o número
+                         de bursts especificados em nBurstsPack.
+
+
+//------------------------------------- Tipo para a mensagem pcDLGAcqData --
+typedef struct _TpPcDLGAcqData {
+       uint16_t           PacketCode; // Código do pacote
+       uint16_t           Reserved;     // reservado
+       int32_t            FrameNo;      // Número do pacotes de dados
+       int32_t            TimeStamp;    // Time        stamp em ms
+       float32_t          SampleFreq; // Freqüência de amostragem em Hz
+       int16_t            nBurstsPack; // Número de amotragens por pacote por
+canal
+       int16_t            nSignals;     // Número de canais habilitados
+       int32_t            ReservedL2; // reservado
+       int32_t            ReservedL3; // reservado
+       int32_t            ReservedL4; // reservado
+       int16_t            Samples[720];        // Amostras aquisitadas analógicas
+} TpPcDLGAcqData, *PTpPcDLGAcqData;
+
+
+
+
+MENSAGENS PARA A CONFIGURAÇÃO DOS CONDICIONADORES
+Neste tópico serão descritos os formatos das mensagens utilizadas na configuração dos
+                         pcDLGAcqData é igual a nSignals vezes nBusrtsPack. As amostras são
+                         dispostas no vetor Samples na ordem em que elas são aquisitadas. No
+                         começo de vetor Samples são armazenadas as amostras correspondentes
+                         ao primerio burst de leitura dos canais A/D habilitados. Segue-se a essas
+                         amostras o segundo burst e assim sucessivamente até completar o número
+                         de bursts especificados em nBurstsPack.
+
+
+//------------------------------------- Tipo para a mensagem pcDLGAcqData --
+typedef struct _TpPcDLGAcqData {
+       uint16_t           PacketCode; // Código do pacote
+       uint16_t           Reserved;     // reservado
+       int32_t            FrameNo;      // Número do pacotes de dados
+       int32_t            TimeStamp;    // Time        stamp em ms
+       float32_t          SampleFreq; // Freqüência de amostragem em Hz
+       int16_t            nBurstsPack; // Número de amotragens por pacote por
+canal
+       int16_t            nSignals;     // Número de canais habilitados
+       int32_t            ReservedL2; // reservado
+       int32_t            ReservedL3; // reservado
+       int32_t            ReservedL4; // reservado
+       int16_t            Samples[720];        // Amostras aquisitadas analógicas
+} TpPcDLGAcqData, *PTpPcDLGAcqData;
+
+
+
+
+MENSAGENS PARA A CONFIGURAÇÃO DOS CONDICIONADORES
+Neste tópico serão descritos os formatos das mensagens utilizadas na configuração dos
+condicionadores de sinais.
+
+
+
+Configura o Condicionador de Sinais (pcDLGSetChConfig)
+
+Propósito:               Esta mensagem é utilizada pela aplicação do microcomputador para
+                         configurar o canal do condicionador de sinais.
+Formato da Mensagem:    TpPcDLGSetChConfig
+
+Packet Code:            pcDLGSetChConfig
+
+//------------------------------------- Tipo para a mensagem pcDLGAcqData --
+typedef struct _TpPcDLGAcqData {
+       uint16_t           PacketCode; // Código do pacote
+       uint16_t           Reserved;     // reservado
+       int32_t            FrameNo;      // Número do pacotes de dados
+       int32_t            TimeStamp;    // Time        stamp em ms
+       float32_t          SampleFreq; // Freqüência de amostragem em Hz
+       int16_t            nBurstsPack; // Número de amotragens por pacote por
+canal
+       int16_t            nSignals;     // Número de canais habilitados
+       int32_t            ReservedL2; // reservado
+       int32_t            ReservedL3; // reservado
+       int32_t            ReservedL4; // reservado
+       int16_t            Samples[720];        // Amostras aquisitadas analógicas
+} TpPcDLGAcqData, *PTpPcDLGAcqData;
+
+
+
+
+MENSAGENS PARA A CONFIGURAÇÃO DOS CONDICIONADORES
+Neste tópico serão descritos os formatos das mensagens utilizadas na configuração dos
+condicionadores de sinais.
+
+
+
+Configura o Condicionador de Sinais (pcDLGSetChConfig)
+
+Propósito:               Esta mensagem é utilizada pela aplicação do microcomputador para
+                         configurar o canal do condicionador de sinais.
+Formato da Mensagem:    TpPcDLGSetChConfig
+
+Packet Code:            pcDLGSetChConfig
+
+Formato da Resposta:    TpPcDLGGenericResp
+
+Packet Code:            pcDLGSetChConfigR
+
+Observações:            Veja os comentários referentes aos campos da estrutura de dados
+                        tSensor:
+                                    0. tensão
+                                    1. corrente
+typedef struct _TpPcDLGAcqData {
+       uint16_t           PacketCode; // Código do pacote
+       uint16_t           Reserved;     // reservado
+       int32_t            FrameNo;      // Número do pacotes de dados
+       int32_t            TimeStamp;    // Time        stamp em ms
+       float32_t          SampleFreq; // Freqüência de amostragem em Hz
+       int16_t            nBurstsPack; // Número de amotragens por pacote por
+canal
+       int16_t            nSignals;     // Número de canais habilitados
+       int32_t            ReservedL2; // reservado
+       int32_t            ReservedL3; // reservado
+       int32_t            ReservedL4; // reservado
+       int16_t            Samples[720];        // Amostras aquisitadas analógicas
+} TpPcDLGAcqData, *PTpPcDLGAcqData;
+
+
+
+
+MENSAGENS PARA A CONFIGURAÇÃO DOS CONDICIONADORES
+Neste tópico serão descritos os formatos das mensagens utilizadas na configuração dos
+condicionadores de sinais.
+
+
+
+Configura o Condicionador de Sinais (pcDLGSetChConfig)
+
+Propósito:               Esta mensagem é utilizada pela aplicação do microcomputador para
+                         configurar o canal do condicionador de sinais.
+Formato da Mensagem:    TpPcDLGSetChConfig
+
+Packet Code:            pcDLGSetChConfig
+
+Formato da Resposta:    TpPcDLGGenericResp
+
+Packet Code:            pcDLGSetChConfigR
+
+Observações:            Veja os comentários referentes aos campos da estrutura de dados
+                        tSensor:
+                                    0. tensão
+                                    1. corrente
+                                    2. ponte completa
+} TpPcDLGAcqData, *PTpPcDLGAcqData;
+
+
+
+
+MENSAGENS PARA A CONFIGURAÇÃO DOS CONDICIONADORES
+Neste tópico serão descritos os formatos das mensagens utilizadas na configuração dos
+condicionadores de sinais.
+
+
+
+Configura o Condicionador de Sinais (pcDLGSetChConfig)
+
+Propósito:               Esta mensagem é utilizada pela aplicação do microcomputador para
+                         configurar o canal do condicionador de sinais.
+Formato da Mensagem:    TpPcDLGSetChConfig
+
+Packet Code:            pcDLGSetChConfig
+
+Formato da Resposta:    TpPcDLGGenericResp
+
+Packet Code:            pcDLGSetChConfigR
+
+Observações:            Veja os comentários referentes aos campos da estrutura de dados
+                        tSensor:
+                                    0. tensão
+                                    1. corrente
+                                    2. ponte completa
+                                    3. ¼ de ponte
+                                    4. ½ ponte
+                                    5. ICP
+                                    6. termopar E
+                                    7. termopar J
+                                    8. termopar K
+                                    9. termopar T
+                                    10. termopar S
+                                    11. termopar B
+                                    12. termopar N
+                                    13. termopar R
+                                    14. PT100
+                                    15. tensão + offset

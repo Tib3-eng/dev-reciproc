@@ -1,0 +1,15 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "calibradlg",
+      "displayName": "CalibraDLG",
+      "binaryDir": "${sourceDir}/../build/CalibraDLG"
+    }
+  ]
+}
