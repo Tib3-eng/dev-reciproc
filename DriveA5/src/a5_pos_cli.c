@@ -31,6 +31,10 @@
 #define REG_P11_15 0x110F
 #define REG_P11_16 0x1110
 
+#define REG_P0B_09 0x0B09
+#define REG_P0C_00 0x0C00
+#define REG_P0C_02 0x0C02
+#define REG_P0C_03 0x0C03
 #define REG_P0C_09 0x0C09
 #define REG_P0C_26 0x0C26
 
@@ -86,6 +90,7 @@ typedef struct {
     int speed;
     int accel;
     int wait_ms;
+    bool diag;
 } args_t;
 
 static void trim(char *s){
@@ -155,14 +160,16 @@ static void com_list_print(const com_list_t *L){
 }
 
 static void print_usage(void){
-    puts("Usage:");
+    puts("Uso:");
     puts("  a5_pos_cli COMx <pos> [--abs|--rel] [--speed <rpm>] [--accel <ms>] [--wait <ms>]");
     puts("             [--setup] [--slave <id>] [--baud <n>] [--parity N|E|O] [--dry-run]");
+    puts("  a5_pos_cli COMx --diag [--slave <id>] [--baud <n>] [--parity N|E|O]");
     puts("");
-    puts("Notes:");
-    puts("  - Uses internal multi-segment position (P05-00=2) and segment 1 (P11-12).");
-    puts("  - Position unit is \"command unit\" (depends on encoder and electronic gear).");
-    puts("  - --setup configures VDI mapping (VDI1=S-ON, VDI2..5=CMD1..CMD4, VDI6=PosInSen).");
+    puts("Notas:");
+    puts("  - Usa posicao interna multi-segmento (P05-00=2) e segmento 1 (P11-12).");
+    puts("  - Posicao em \"command unit\" (depende do encoder e da engrenagem eletronica).");
+    puts("  - --setup configura VDI: VDI1=S-ON, VDI2..5=CMD1..CMD4, VDI6=PosInSen.");
+    puts("  - --diag faz testes de leitura (P0C e P0B-09) para validar comunicacao.");
 }
 
 static void set_timeouts_us(modbus_t *ctx, int resp_us, int byte_us){
@@ -179,7 +186,9 @@ static void make_port_path(const char *shortName, char *out, size_t outsz){
 
 static int write_u16(modbus_t *ctx, int reg, uint16_t v){
     if(modbus_write_register(ctx, reg, v) == -1){
-        fprintf(stderr, "Write 0x%04X failed: %s\n", reg, modbus_strerror(errno));
+        int err = errno;
+        fprintf(stderr, "Falha ao escrever 0x%04X (errno=%d): %s\n",
+                reg, err, modbus_strerror(err));
         return -1;
     }
     return 0;
@@ -250,6 +259,7 @@ static int parse_args(int argc, char **argv, args_t *out){
             if(strcmp(a,"--abs")==0){ out->abs_mode = true; continue; }
             if(strcmp(a,"--rel")==0){ out->abs_mode = false; continue; }
             if(strcmp(a,"--setup")==0){ out->setup_vdi = true; continue; }
+            if(strcmp(a,"--diag")==0){ out->diag = true; continue; }
             if(strcmp(a,"--dry-run")==0){ out->dry_run = true; continue; }
             if(strcmp(a,"--speed")==0 && i+1<argc){
                 out->speed = atoi(argv[++i]);
@@ -294,7 +304,53 @@ static int parse_args(int argc, char **argv, args_t *out){
             }
         }
     }
+    if(out->diag){
+        return (positional >= 1) ? 0 : -1;
+    }
     return (positional >= 2) ? 0 : -1;
+}
+
+static int run_diag(const args_t *args){
+    char port_path[64];
+    make_port_path(args->port, port_path, sizeof(port_path));
+
+    modbus_t *ctx = modbus_new_rtu(port_path, args->baud, args->parity, args->databits, args->stopbits);
+    if(!ctx){
+        fprintf(stderr,"modbus_new_rtu failed\n");
+        return 1;
+    }
+    modbus_set_slave(ctx, args->slave);
+    modbus_set_error_recovery(ctx, MODBUS_ERROR_RECOVERY_LINK | MODBUS_ERROR_RECOVERY_PROTOCOL);
+    set_timeouts_us(ctx, CMD_RESP_US, CMD_BYTE_US);
+
+    if(modbus_connect(ctx)==-1){
+        fprintf(stderr,"connect failed: %s\n", modbus_strerror(errno));
+        modbus_free(ctx);
+        return 1;
+    }
+
+    puts("Diagnostico Modbus (leitura):");
+    printf("Porta=%s | Slave=%d | %d %c %d\n", port_path, args->slave,
+           args->baud, args->parity, args->stopbits);
+
+    uint16_t v = 0;
+    if(read_u16(ctx, REG_P0C_00, &v) == 0) printf("P0C-00 (addr): %u\n", v);
+    if(read_u16(ctx, REG_P0C_02, &v) == 0) printf("P0C-02 (baud idx): %u\n", v);
+    if(read_u16(ctx, REG_P0C_03, &v) == 0) printf("P0C-03 (parity idx): %u\n", v);
+    if(read_u16(ctx, REG_P0C_26, &v) == 0) printf("P0C-26 (word order): %u\n", v);
+
+    uint16_t pos = 0;
+    if(modbus_read_registers(ctx, REG_P0B_09, 1, &pos) == 1){
+        printf("P0B-09 (FC03): %u\n", pos);
+    }else if(modbus_read_input_registers(ctx, REG_P0B_09, 1, &pos) == 1){
+        printf("P0B-09 (FC04): %u\n", pos);
+    }else{
+        fprintf(stderr, "Falha lendo P0B-09 via FC03/FC04.\n");
+    }
+
+    modbus_close(ctx);
+    modbus_free(ctx);
+    return 0;
 }
 
 static int run_command(const args_t *args){
@@ -390,6 +446,23 @@ static void print_header(void){
     puts("==============================================");
 }
 
+static int ask_int_range(const char *prompt, int min_v, int max_v, int *out){
+    char buf[64];
+    for(;;){
+        if(!ask_line(prompt, buf, sizeof(buf))) return 0;
+        if(buf[0] == 0) return 0;
+        char *e = NULL;
+        long v = strtol(buf, &e, 10);
+        if(e == buf || *e) { puts("Entrada invalida."); continue; }
+        if(v < min_v || v > max_v){
+            printf("Fora do limite (%d..%d).\n", min_v, max_v);
+            continue;
+        }
+        *out = (int)v;
+        return 1;
+    }
+}
+
 static int interactive_mode(void){
     args_t args;
     memset(&args, 0, sizeof(args));
@@ -406,7 +479,7 @@ static int interactive_mode(void){
     com_list_print(&L);
 
     char buf[128];
-    if(!ask_line("COM port (ex: COM3): ", buf, sizeof(buf))){
+    if(!ask_line("Porta COM (ex: COM3): ", buf, sizeof(buf))){
         com_list_free(&L);
         return 1;
     }
@@ -425,41 +498,93 @@ static int interactive_mode(void){
     args.port[sizeof(args.port)-1] = 0;
     com_list_free(&L);
 
-    if(!ask_line("Position (command unit): ", buf, sizeof(buf))) return 1;
-    if(buf[0] == 0) return 1;
-    args.pos = (int32_t)strtol(buf, NULL, 10);
+    puts("");
+    puts("Limites sugeridos pelo manual:");
+    puts("  Posicao (P11-12): -1073741824 .. 1073741824");
+    puts("  Velocidade max (P11-14): 1 .. 6000 rpm");
+    puts("  Acel/Desac (P11-15): 0 .. 65535 ms");
+    puts("  Tempo espera (P11-16): 0 .. 10000 ms");
+    puts("");
 
-    if(ask_line("Mode [A]bs or [R]el (A): ", buf, sizeof(buf))){
-        if(buf[0]=='r' || buf[0]=='R') args.abs_mode = false;
+    if(!ask_line("Rodar diagnostico de comunicacao? [s/N]: ", buf, sizeof(buf))) return 1;
+    if(buf[0]=='s' || buf[0]=='S'){
+        args.diag = true;
+        (void)run_diag(&args);
+        args.diag = false;
+        puts("");
     }
 
-    (void)ask_int_default("Max speed rpm (enter to skip): ", &args.speed, &args.set_speed);
-    (void)ask_int_default("Accel/Decel time ms (enter to skip): ", &args.accel, &args.set_accel);
-    (void)ask_int_default("Wait time after move ms (enter to skip): ", &args.wait_ms, &args.set_wait);
+    if(!ask_line("Configurar VDI agora? (P17) [s/N]: ", buf, sizeof(buf))) return 1;
+    if(buf[0]=='s' || buf[0]=='S') args.setup_vdi = true;
 
-    if(ask_line("Run --setup (configure VDI mapping)? [y/N]: ", buf, sizeof(buf))){
-        if(buf[0]=='y' || buf[0]=='Y') args.setup_vdi = true;
+    for(;;){
+        int pos_i = 0;
+        if(!ask_int_range("Posicao (command unit): ", -1073741824, 1073741824, &pos_i)){
+            puts("Saindo.");
+            return 0;
+        }
+        args.pos = (int32_t)pos_i;
+
+        if(ask_line("Modo [A]bsoluto / [R]elativo (A): ", buf, sizeof(buf))){
+            if(buf[0]=='r' || buf[0]=='R') args.abs_mode = false;
+            else args.abs_mode = true;
+        }
+
+        (void)ask_int_default("Velocidade max rpm (enter = manter): ", &args.speed, &args.set_speed);
+        if(args.set_speed && (args.speed < 1 || args.speed > 6000)){
+            puts("Velocidade fora do limite (1..6000). Ignorando.");
+            args.set_speed = false;
+        }
+
+        (void)ask_int_default("Acel/Desac ms (enter = manter): ", &args.accel, &args.set_accel);
+        if(args.set_accel && (args.accel < 0 || args.accel > 65535)){
+            puts("Acel/Desac fora do limite (0..65535). Ignorando.");
+            args.set_accel = false;
+        }
+
+        (void)ask_int_default("Espera apos movimento ms (enter = manter): ", &args.wait_ms, &args.set_wait);
+        if(args.set_wait && (args.wait_ms < 0 || args.wait_ms > 10000)){
+            puts("Espera fora do limite (0..10000). Ignorando.");
+            args.set_wait = false;
+        }
+
+        printf("\nAlvo: pos=%ld (%s), COM=%s, slave=%d\n",
+               (long)args.pos, args.abs_mode ? "abs":"rel", args.port, args.slave);
+        puts("Digite GO para enviar, ou Enter para cancelar.");
+        if(!ask_line("Confirmar: ", buf, sizeof(buf))) return 1;
+        if(strcmp(buf, "GO") != 0){
+            puts("Cancelado.");
+        }else{
+            int rc = run_command(&args);
+            if(rc != 0){
+                puts("Falha ao enviar comando.");
+                if(args.setup_vdi){
+                    puts("Possiveis causas do erro no P17 (VDI):");
+                    puts("- Servo habilitado (S-ON ativo) ou drive em RUN; P17 e efetivo em STOP.");
+                    puts("- Parametro travado ou protegido por senha.");
+                    puts("- Endereco Modbus diferente no firmware.");
+                    puts("Tente desabilitar S-ON fisico e executar novamente, ou rode sem setup.");
+                }
+            }
+        }
+
+        if(!ask_line("\nEnviar outra posicao? [S/n]: ", buf, sizeof(buf))) break;
+        if(buf[0]=='n' || buf[0]=='N') break;
+        args.setup_vdi = false; // setup so uma vez
     }
 
-    printf("\nTarget: pos=%ld (%s), COM=%s, slave=%d\n",
-           (long)args.pos, args.abs_mode ? "abs":"rel", args.port, args.slave);
-    puts("Type GO to send command, or press Enter to cancel.");
-    if(!ask_line("Confirm: ", buf, sizeof(buf))) return 1;
-    if(strcmp(buf, "GO") != 0){
-        puts("Cancelled.");
-        return 0;
-    }
-
-    int rc = run_command(&args);
-    puts("Press Enter to exit.");
+    puts("Pressione Enter para sair.");
     (void)fgets(buf, sizeof(buf), stdin);
-    return rc;
+    return 0;
 }
 
 int main(int argc, char **argv){
     args_t args;
     if(parse_args(argc, argv, &args) != 0){
         return interactive_mode();
+    }
+    if(args.diag){
+        return run_diag(&args);
     }
     return run_command(&args);
 }

@@ -60,7 +60,8 @@ CalibraDLG_UI (WinForms):
 DriveA5 (Modbus RTU / libmodbus):
 - a5_cli: RUN/STOP, set RPM (P06-03), read P0B-09. Try FC03, fallback FC04.
 - a5_pos_cli: position command via internal multi-segment (P05-00=2, P11-12) and VDI (P31-00).
-- a5_pos_cli opens an interactive console when no args are provided.
+- a5_pos_cli opens an interactive console when no args are provided (PT-BR prompts).
+- a5_pos_cli has --diag to read P0C/P0B and validate Modbus comms.
 - VDI mapping for position control uses P17 (VDI1=S-ON, VDI2..5=CMD1..CMD4, VDI6=PosInSen).
 - Standard test: 10 rpm, 120 s, ~200 Hz. CSV: t_s,pos,rev.
 - Revolution count: detect robust wrap (prev > 60000 and pos < 5000).
