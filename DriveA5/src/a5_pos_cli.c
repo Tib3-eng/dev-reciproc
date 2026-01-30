@@ -88,6 +88,72 @@ typedef struct {
     int wait_ms;
 } args_t;
 
+static void trim(char *s){
+    size_t n = strlen(s);
+    while(n && (s[n-1]=='\n'||s[n-1]=='\r'||s[n-1]==' '||s[n-1]=='\t')) s[--n]=0;
+    char *p = s; while(*p && isspace((unsigned char)*p)) p++;
+    if(p!=s) memmove(s,p,strlen(p)+1);
+}
+
+static int ask_line(const char *prompt, char *out, size_t outsz){
+    printf("%s", prompt);
+    if(!fgets(out, (int)outsz, stdin)) return 0;
+    trim(out);
+    return 1;
+}
+
+static int ask_int_default(const char *prompt, int *out, bool *is_set){
+    char buf[64];
+    if(!ask_line(prompt, buf, sizeof(buf))) return 0;
+    if(buf[0] == 0){
+        *is_set = false;
+        return 1;
+    }
+    char *e = NULL;
+    long v = strtol(buf, &e, 10);
+    if(e == buf || *e) return 0;
+    *out = (int)v;
+    *is_set = true;
+    return 1;
+}
+
+// ----------------- COM list (QueryDosDevice)
+typedef struct { char **items; int count; } com_list_t;
+
+static void com_list_free(com_list_t *L){
+    if(!L) return;
+    for(int i=0;i<L->count;++i) free(L->items[i]);
+    free(L->items);
+    L->items = NULL;
+    L->count = 0;
+}
+
+static com_list_t com_list_detect(void){
+    com_list_t L = {0};
+    DWORD cap = 64*1024;
+    char *buf = (char*)malloc(cap);
+    if(!buf) return L;
+
+    DWORD n = QueryDosDeviceA(NULL, buf, cap);
+    if(n==0){ free(buf); return L; }
+
+    for(char *p=buf; *p; p += strlen(p)+1){
+        if(strncmp(p,"COM",3)==0 && isdigit((unsigned char)p[3])){
+            L.items = (char**)realloc(L.items, (L.count+1)*sizeof(char*));
+            L.items[L.count] = _strdup(p);
+            L.count++;
+        }
+    }
+    free(buf);
+    return L;
+}
+
+static void com_list_print(const com_list_t *L){
+    if(!L || !L->count){ puts("No COM ports found."); return; }
+    puts("Detected COM ports:");
+    for(int i=0;i<L->count;++i) printf("  [%d] %s\n", i+1, L->items[i]);
+}
+
 static void print_usage(void){
     puts("Usage:");
     puts("  a5_pos_cli COMx <pos> [--abs|--rel] [--speed <rpm>] [--accel <ms>] [--wait <ms>]");
@@ -231,28 +297,22 @@ static int parse_args(int argc, char **argv, args_t *out){
     return (positional >= 2) ? 0 : -1;
 }
 
-int main(int argc, char **argv){
-    args_t args;
-    if(parse_args(argc, argv, &args) != 0){
-        print_usage();
-        return 1;
-    }
-
+static int run_command(const args_t *args){
     char port_path[64];
-    make_port_path(args.port, port_path, sizeof(port_path));
+    make_port_path(args->port, port_path, sizeof(port_path));
 
-    if(args.dry_run){
+    if(args->dry_run){
         printf("DRY RUN: port=%s slave=%d pos=%ld mode=%s\n",
-               port_path, args.slave, (long)args.pos, args.abs_mode ? "abs":"rel");
+               port_path, args->slave, (long)args->pos, args->abs_mode ? "abs":"rel");
         return 0;
     }
 
-    modbus_t *ctx = modbus_new_rtu(port_path, args.baud, args.parity, args.databits, args.stopbits);
+    modbus_t *ctx = modbus_new_rtu(port_path, args->baud, args->parity, args->databits, args->stopbits);
     if(!ctx){
         fprintf(stderr,"modbus_new_rtu failed\n");
         return 1;
     }
-    modbus_set_slave(ctx, args.slave);
+    modbus_set_slave(ctx, args->slave);
     modbus_set_error_recovery(ctx, MODBUS_ERROR_RECOVERY_LINK | MODBUS_ERROR_RECOVERY_PROTOCOL);
     set_timeouts_us(ctx, CMD_RESP_US, CMD_BYTE_US);
 
@@ -263,7 +323,7 @@ int main(int argc, char **argv){
     }
 
     // Optional VDI setup
-    if(args.setup_vdi){
+    if(args->setup_vdi){
         if(configure_vdi(ctx) != 0){
             modbus_close(ctx);
             modbus_free(ctx);
@@ -290,11 +350,11 @@ int main(int argc, char **argv){
     if(write_u16(ctx, REG_P05_00, 2) != 0) goto done;
     if(write_u16(ctx, REG_P11_00, 0) != 0) goto done; // single operation
     if(write_u16(ctx, REG_P11_01, 1) != 0) goto done; // 1 segment
-    if(write_u16(ctx, REG_P11_04, args.abs_mode ? 1 : 0) != 0) goto done;
+    if(write_u16(ctx, REG_P11_04, args->abs_mode ? 1 : 0) != 0) goto done;
 
-    if(args.set_speed && write_u16(ctx, REG_P11_14, (uint16_t)args.speed) != 0) goto done;
-    if(args.set_accel && write_u16(ctx, REG_P11_15, (uint16_t)args.accel) != 0) goto done;
-    if(args.set_wait && write_u16(ctx, REG_P11_16, (uint16_t)args.wait_ms) != 0) goto done;
+    if(args->set_speed && write_u16(ctx, REG_P11_14, (uint16_t)args->speed) != 0) goto done;
+    if(args->set_accel && write_u16(ctx, REG_P11_15, (uint16_t)args->accel) != 0) goto done;
+    if(args->set_wait && write_u16(ctx, REG_P11_16, (uint16_t)args->wait_ms) != 0) goto done;
 
     // Determine 32-bit word order (P0C-26). Default is low-first (1).
     uint16_t order = 1;
@@ -302,7 +362,7 @@ int main(int argc, char **argv){
         order = 1;
     }
 
-    if(write_s32(ctx, REG_P11_12, args.pos, (order != 0)) != 0) goto done;
+    if(write_s32(ctx, REG_P11_12, args->pos, (order != 0)) != 0) goto done;
 
     // Servo enable (VDI1)
     uint16_t vdi = (uint16_t)(1u << VDI_SON_BIT);
@@ -315,10 +375,91 @@ int main(int argc, char **argv){
     Sleep(50);
     (void)write_u16(ctx, REG_P31_00, vdi);
 
-    printf("Position command sent: %ld (%s).\n", (long)args.pos, args.abs_mode ? "abs":"rel");
+    printf("Position command sent: %ld (%s).\n", (long)args->pos, args->abs_mode ? "abs":"rel");
 
 done:
     modbus_close(ctx);
     modbus_free(ctx);
     return 0;
+}
+
+static void print_header(void){
+    puts("==============================================");
+    puts("  Lichuan A5 - Position CLI (Modbus RTU)      ");
+    puts("  Internal multi-segment, VDI trigger         ");
+    puts("==============================================");
+}
+
+static int interactive_mode(void){
+    args_t args;
+    memset(&args, 0, sizeof(args));
+    args.slave = DEFAULT_SLAVE;
+    args.baud = DEFAULT_BAUD;
+    args.parity = DEFAULT_PARITY;
+    args.databits = DEFAULT_DATABITS;
+    args.stopbits = DEFAULT_STOPBITS;
+    args.abs_mode = true;
+
+    print_header();
+
+    com_list_t L = com_list_detect();
+    com_list_print(&L);
+
+    char buf[128];
+    if(!ask_line("COM port (ex: COM3): ", buf, sizeof(buf))){
+        com_list_free(&L);
+        return 1;
+    }
+    if(isdigit((unsigned char)buf[0]) && L.count > 0){
+        int idx = atoi(buf);
+        if(idx >= 1 && idx <= L.count){
+            strncpy(args.port, L.items[idx-1], sizeof(args.port)-1);
+        }else{
+            com_list_free(&L);
+            puts("Invalid index.");
+            return 1;
+        }
+    }else{
+        strncpy(args.port, buf, sizeof(args.port)-1);
+    }
+    args.port[sizeof(args.port)-1] = 0;
+    com_list_free(&L);
+
+    if(!ask_line("Position (command unit): ", buf, sizeof(buf))) return 1;
+    if(buf[0] == 0) return 1;
+    args.pos = (int32_t)strtol(buf, NULL, 10);
+
+    if(ask_line("Mode [A]bs or [R]el (A): ", buf, sizeof(buf))){
+        if(buf[0]=='r' || buf[0]=='R') args.abs_mode = false;
+    }
+
+    (void)ask_int_default("Max speed rpm (enter to skip): ", &args.speed, &args.set_speed);
+    (void)ask_int_default("Accel/Decel time ms (enter to skip): ", &args.accel, &args.set_accel);
+    (void)ask_int_default("Wait time after move ms (enter to skip): ", &args.wait_ms, &args.set_wait);
+
+    if(ask_line("Run --setup (configure VDI mapping)? [y/N]: ", buf, sizeof(buf))){
+        if(buf[0]=='y' || buf[0]=='Y') args.setup_vdi = true;
+    }
+
+    printf("\nTarget: pos=%ld (%s), COM=%s, slave=%d\n",
+           (long)args.pos, args.abs_mode ? "abs":"rel", args.port, args.slave);
+    puts("Type GO to send command, or press Enter to cancel.");
+    if(!ask_line("Confirm: ", buf, sizeof(buf))) return 1;
+    if(strcmp(buf, "GO") != 0){
+        puts("Cancelled.");
+        return 0;
+    }
+
+    int rc = run_command(&args);
+    puts("Press Enter to exit.");
+    (void)fgets(buf, sizeof(buf), stdin);
+    return rc;
+}
+
+int main(int argc, char **argv){
+    args_t args;
+    if(parse_args(argc, argv, &args) != 0){
+        return interactive_mode();
+    }
+    return run_command(&args);
 }
