@@ -36,7 +36,7 @@ static const uint16_t DLG_PORT = 41401;
 #define DEFAULT_SENSPWR_IDX 0
 
 static const int gain_values[] = { 1, 3, 10, 30, 100, 300, 1000, 3000 };
-static const double vexc_values[] = { 1.0, 2.5, 3.3, 5.0 };
+static const double vexc_values[] = { 1.0, 2.5, 3.3, 5.0, 0.0 };
 
 /* ---------- Protocol ---------- */
 #pragma pack(push,1)
@@ -197,6 +197,25 @@ static int ensure_out_dir(void) {
     return 0;
 }
 
+static int ensure_out_dir_for_path(const char *path) {
+    const char *a = strrchr(path, '\\');
+    const char *b = strrchr(path, '/');
+    const char *last = a;
+    if (b && (!last || b > last)) last = b;
+    if (!last) return 0;
+
+    size_t len = (size_t)(last - path);
+    if (len == 0) return 0;
+
+    char dir[260];
+    if (len >= sizeof(dir)) return -1;
+    memcpy(dir, path, len);
+    dir[len] = '\0';
+
+    if (_mkdir(dir) != 0 && errno != EEXIST) return -1;
+    return 0;
+}
+
 static int read_line(char *buf, size_t size) {
     if (!fgets(buf, (int)size, stdin)) return 0;
     size_t len = strlen(buf);
@@ -302,8 +321,264 @@ static void print_gain_menu(void) {
 static void print_vexc_menu(void) {
     printf("Tensao de excitacao (iSensPwr):\n");
     for (int i = 0; i < (int)(sizeof(vexc_values) / sizeof(vexc_values[0])); ++i) {
-        printf(" %d - %.1f V\n", i + 1, vexc_values[i]);
+        if (i == 4) {
+            printf(" %d - user\n", i + 1);
+        } else {
+            printf(" %d - %.1f V\n", i + 1, vexc_values[i]);
+        }
     }
+}
+
+static void compute_fit(int npoints, const double *raw, const double *ref,
+                        double *slope, double *intercept, double *r2) {
+    double sum_x = 0.0, sum_y = 0.0, sum_xx = 0.0, sum_xy = 0.0, sum_yy = 0.0;
+    for (int i = 0; i < npoints; ++i) {
+        sum_x += raw[i];
+        sum_y += ref[i];
+        sum_xx += raw[i] * raw[i];
+        sum_xy += raw[i] * ref[i];
+        sum_yy += ref[i] * ref[i];
+    }
+
+    double n = (double)npoints;
+    double denom = n * sum_xx - sum_x * sum_x;
+    double s = 0.0;
+    double b = 0.0;
+    if (fabs(denom) > 1e-12) {
+        s = (n * sum_xy - sum_x * sum_y) / denom;
+        b = (sum_y - s * sum_x) / n;
+    }
+    double ss_tot = sum_yy - (sum_y * sum_y) / n;
+    double ss_reg = s * (sum_xy - sum_x * sum_y / n);
+    double r = 0.0;
+    if (ss_tot > 0.0) {
+        r = ss_reg / ss_tot;
+        if (r < 0.0) r = 0.0;
+        if (r > 1.0) r = 1.0;
+    }
+
+    if (slope) *slope = s;
+    if (intercept) *intercept = b;
+    if (r2) *r2 = r;
+}
+
+static int json_get_string(const char *line, const char *key, char *out, size_t outsz) {
+    const char *p = strstr(line, key);
+    if (!p) return 0;
+    p = strchr(p, ':');
+    if (!p) return 0;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != '\"') return 0;
+    p++;
+    size_t i = 0;
+    while (*p && *p != '\"' && i + 1 < outsz) {
+        out[i++] = *p++;
+    }
+    out[i] = '\0';
+    return (*p == '\"') ? 1 : 0;
+}
+
+static int json_get_double(const char *line, const char *key, double *out) {
+    const char *p = strstr(line, key);
+    if (!p) return 0;
+    p = strchr(p, ':');
+    if (!p) return 0;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+    char *end = NULL;
+    double v = strtod(p, &end);
+    if (end == p) return 0;
+    *out = v;
+    return 1;
+}
+
+static int json_get_int(const char *line, const char *key, int *out) {
+    const char *p = strstr(line, key);
+    if (!p) return 0;
+    p = strchr(p, ':');
+    if (!p) return 0;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+    char *end = NULL;
+    long v = strtol(p, &end, 10);
+    if (end == p) return 0;
+    *out = (int)v;
+    return 1;
+}
+
+static void ipc_send_error(const char *msg) {
+    printf("{\"op\":\"error\",\"message\":\"%s\"}\n", msg);
+    fflush(stdout);
+}
+
+static void ipc_send_ok(const char *op) {
+    printf("{\"op\":\"%s\"}\n", op);
+    fflush(stdout);
+}
+
+static int run_ipc(void) {
+    char line[512];
+    int configured = 0;
+
+    int ch = 0;
+    int tSensor = 0;
+    int iLPF = DEFAULT_ILPF;
+    int iGainIdx = DEFAULT_IGAIN_IDX;
+    int iSensPwr = DEFAULT_SENSPWR_IDX;
+    double gain_nom = gain_values[DEFAULT_IGAIN_IDX];
+    double vexc_nom = vexc_values[DEFAULT_SENSPWR_IDX];
+    char out_path[256] = "out/calib.json";
+
+    WSADATA w;
+    if (WSAStartup(MAKEWORD(2, 2), &w)) {
+        ipc_send_error("wsa_startup_failed");
+        return 1;
+    }
+
+    SOCKET s = INVALID_SOCKET;
+    struct sockaddr_in addr;
+
+    double *raw = NULL;
+    double *ref = NULL;
+    size_t cap = 0;
+    size_t npoints = 0;
+
+    while (read_line(line, sizeof(line))) {
+        char op[32] = {0};
+        if (!json_get_string(line, "\"op\"", op, sizeof(op))) {
+            ipc_send_error("missing_op");
+            continue;
+        }
+
+        if (strcmp(op, "config") == 0) {
+            if (!json_get_int(line, "\"ch\"", &ch) || ch < 1 || ch > 8) {
+                ipc_send_error("invalid_ch");
+                continue;
+            }
+            if (!json_get_int(line, "\"tSensor\"", &tSensor)) {
+                ipc_send_error("missing_tSensor");
+                continue;
+            }
+            json_get_int(line, "\"iLPF\"", &iLPF);
+            json_get_int(line, "\"iGain\"", &iGainIdx);
+            json_get_int(line, "\"iSensPwr\"", &iSensPwr);
+            json_get_string(line, "\"out_path\"", out_path, sizeof(out_path));
+
+            if (iGainIdx < 0 || iGainIdx > 7) iGainIdx = DEFAULT_IGAIN_IDX;
+            if (iSensPwr < 0 || iSensPwr > 4) iSensPwr = DEFAULT_SENSPWR_IDX;
+            gain_nom = gain_values[iGainIdx];
+            vexc_nom = vexc_values[iSensPwr];
+
+            if (open_udp(&s, &addr) != 0) {
+                ipc_send_error("socket_open_failed");
+                continue;
+            }
+            if (!test_comm(s, &addr, ch, tSensor, iLPF, iGainIdx, iSensPwr)) {
+                closesocket(s);
+                s = INVALID_SOCKET;
+                ipc_send_error("test_comm_failed");
+                continue;
+            }
+
+            configured = 1;
+            ipc_send_ok("config_ok");
+            continue;
+        }
+
+        if (!configured) {
+            ipc_send_error("not_configured");
+            continue;
+        }
+
+        if (strcmp(op, "point") == 0) {
+            double ref_val = 0.0;
+            if (!json_get_double(line, "\"ref\"", &ref_val)) {
+                ipc_send_error("missing_ref");
+                continue;
+            }
+
+            stop_acq(s, &addr);
+            acq_setup_single(s, &addr, IDX_FREQ, ch);
+            acq_start(s, &addr);
+
+        drain_socket(s);
+        if (restart_stream(s, &addr, ch) != 0) {
+            stop_acq(s, &addr);
+            ipc_send_error("stream_inactive");
+            continue;
+        }
+
+            double avg = 0.0;
+            int samples = 0;
+        if (!capture_average_1s(s, &addr, ch, &avg, &samples)) {
+            stop_acq(s, &addr);
+            ipc_send_error("no_samples");
+            continue;
+        }
+            stop_acq(s, &addr);
+
+            if (npoints + 1 > cap) {
+                size_t new_cap = (cap == 0) ? 8 : cap * 2;
+                double *new_raw = (double *)realloc(raw, new_cap * sizeof(double));
+                double *new_ref = (double *)realloc(ref, new_cap * sizeof(double));
+                if (!new_raw || !new_ref) {
+                    free(new_raw);
+                    free(new_ref);
+                    ipc_send_error("out_of_memory");
+                    continue;
+                }
+                raw = new_raw;
+                ref = new_ref;
+                cap = new_cap;
+            }
+            raw[npoints] = avg;
+            ref[npoints] = ref_val;
+            npoints++;
+
+            printf("{\"op\":\"point_result\",\"ref\":%.10g,\"raw\":%.10g,\"samples\":%d}\n",
+                   ref_val, avg, samples);
+            fflush(stdout);
+            continue;
+        }
+
+        if (strcmp(op, "finish") == 0) {
+            if (npoints < 2) {
+                ipc_send_error("need_at_least_2_points");
+                continue;
+            }
+
+            double slope = 0.0, intercept = 0.0, r2 = 0.0;
+            compute_fit((int)npoints, raw, ref, &slope, &intercept, &r2);
+
+            if (!write_json(out_path, ch, tSensor, iLPF, iGainIdx, iSensPwr,
+                            gain_nom, vexc_nom, (int)npoints, raw, ref, slope, intercept, r2)) {
+                ipc_send_error("write_failed");
+                continue;
+            }
+
+            printf("{\"op\":\"done\",\"slope\":%.10g,\"intercept\":%.10g,\"r2\":%.6f,\"out_path\":\"%s\"}\n",
+                   slope, intercept, r2, out_path);
+            fflush(stdout);
+            break;
+        }
+
+        if (strcmp(op, "cancel") == 0) {
+            ipc_send_ok("cancelled");
+            break;
+        }
+
+        ipc_send_error("unknown_op");
+    }
+
+    if (s != INVALID_SOCKET) {
+        stop_acq(s, &addr);
+        closesocket(s);
+    }
+    WSACleanup();
+    free(raw);
+    free(ref);
+    return 0;
 }
 
 static int capture_average_1s(SOCKET s, const struct sockaddr_in *addr, int ch,
@@ -361,7 +636,7 @@ static int write_json(const char *path, int ch, int tSensor, int iLPF,
                       int iGainIdx, int iSensPwr, double gain_nom, double vexc_nom,
                       int npoints, const double *raw, const double *ref,
                       double slope, double intercept, double r2) {
-    if (ensure_out_dir() != 0) return 0;
+    if (ensure_out_dir_for_path(path) != 0) return 0;
     FILE *f = fopen(path, "w");
     if (!f) return 0;
 
@@ -392,7 +667,7 @@ static int write_json(const char *path, int ch, int tSensor, int iLPF,
     return 1;
 }
 
-int main(void) {
+static int run_interactive(void) {
     if (!ensure_console()) {
         MessageBoxA(NULL,
                     "Nao foi possivel abrir o console.\n"
@@ -440,7 +715,7 @@ int main(void) {
     }
     print_vexc_menu();
     int opt_vexc = 0;
-    if (!ask_int("Escolha a tensao de excitacao (1-4): ", 1, 4, &opt_vexc)) return exit_with_pause(1);
+    if (!ask_int("Escolha a tensao de excitacao (1-5): ", 1, 5, &opt_vexc)) return exit_with_pause(1);
     iSensPwr = opt_vexc - 1;
     vexc_nom = vexc_values[iSensPwr];
     if (!ask_int("Quantos pontos de calibracao (2-20): ", 2, 20, &npoints)) return exit_with_pause(1);
@@ -512,31 +787,8 @@ int main(void) {
     closesocket(s);
     WSACleanup();
 
-    double sum_x = 0.0, sum_y = 0.0, sum_xx = 0.0, sum_xy = 0.0, sum_yy = 0.0;
-    for (int i = 0; i < npoints; ++i) {
-        sum_x += raw[i];
-        sum_y += ref[i];
-        sum_xx += raw[i] * raw[i];
-        sum_xy += raw[i] * ref[i];
-        sum_yy += ref[i] * ref[i];
-    }
-
-    double n = (double)npoints;
-    double denom = n * sum_xx - sum_x * sum_x;
-    double slope = 0.0;
-    double intercept = 0.0;
-    if (fabs(denom) > 1e-12) {
-        slope = (n * sum_xy - sum_x * sum_y) / denom;
-        intercept = (sum_y - slope * sum_x) / n;
-    }
-    double ss_tot = sum_yy - (sum_y * sum_y) / n;
-    double ss_reg = slope * (sum_xy - sum_x * sum_y / n);
-    double r2 = 0.0;
-    if (ss_tot > 0.0) {
-        r2 = ss_reg / ss_tot;
-        if (r2 < 0.0) r2 = 0.0;
-        if (r2 > 1.0) r2 = 1.0;
-    }
+    double slope = 0.0, intercept = 0.0, r2 = 0.0;
+    compute_fit(npoints, raw, ref, &slope, &intercept, &r2);
 
     printf("\nAjuste: y = slope * raw + intercept\n");
     printf("slope=%.10g  intercept=%.10g  r2=%.6f\n", slope, intercept, r2);
@@ -556,4 +808,15 @@ int main(void) {
     free(ref);
     if (g_allocated_console) wait_before_exit();
     return 0;
+}
+
+int main(int argc, char **argv) {
+    int ipc = 0;
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--ipc") == 0) {
+            ipc = 1;
+        }
+    }
+    if (ipc) return run_ipc();
+    return run_interactive();
 }

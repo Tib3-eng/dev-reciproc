@@ -9,7 +9,7 @@
     {
       "name": "calibradlg",
       "displayName": "CalibraDLG",
-      "binaryDir": "${sourceDir}/../build/CalibraDLG"
+      "binaryDir": "${sourceDir}/build"
     }
   ]
 }

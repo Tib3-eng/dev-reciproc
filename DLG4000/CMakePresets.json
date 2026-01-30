@@ -9,7 +9,7 @@
     {
       "name": "dlg4000",
       "displayName": "DLG4000",
-      "binaryDir": "${sourceDir}/../build/DLG4000"
+      "binaryDir": "${sourceDir}/build"
     }
   ]
 }

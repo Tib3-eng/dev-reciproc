@@ -44,7 +44,7 @@ static const uint16_t DLG_PORT      = 41401;
 #define DEFAULT_SENSPWR_IDX 0
 
 static const int gain_values[] = { 1, 3, 10, 30, 100, 300, 1000, 3000 };
-static const double vexc_values[] = { 1.0, 2.5, 3.3, 5.0 };
+static const double vexc_values[] = { 1.0, 2.5, 3.3, 5.0, 0.0 };
 
 /* Timeouts and retries */
 #define TIMEOUT_MS     1000         /* recvfrom timeout */
@@ -233,9 +233,13 @@ static int gain_index_from_value(int value) {
 
 static int load_calib_for_channel(int ch, double* slope, double* intercept,
                                   int* tSensor, int* iLPF, int* iGainIdx, int* iSensPwr) {
-    const char* paths[] = { "calib.json", "calib" };
+    char path_ch[64];
+    char path_out_ch[80];
+    _snprintf(path_ch, sizeof(path_ch), "calib_CH%d.json", ch);
+    _snprintf(path_out_ch, sizeof(path_out_ch), "out\\calib_CH%d.json", ch);
+    const char* paths[] = { "calib.json", "calib", path_ch, path_out_ch };
     char* buf = NULL;
-    for (int i = 0; i < 2 && !buf; ++i) {
+    for (int i = 0; i < 4 && !buf; ++i) {
         buf = read_text_file(paths[i], NULL);
     }
     if (!buf) return 0;
