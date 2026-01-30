@@ -17,6 +17,9 @@ find_package(libmodbus CONFIG REQUIRED)
 add_executable(a5_cli src/a5_cli.c)
 target_link_libraries(a5_cli PRIVATE modbus ws2_32)
 
+add_executable(a5_pos_cli src/a5_pos_cli.c)
+target_link_libraries(a5_pos_cli PRIVATE modbus ws2_32)
+
 # --- copiar DLL (Debug/Release) p/ pasta do exe ----
 file(GLOB_RECURSE MODBUS_DLL
   "${VCPKG_INSTALLED_DIR}/x64-windows/bin/modbus*.dll"
@@ -24,4 +27,8 @@ file(GLOB_RECURSE MODBUS_DLL
 add_custom_command(TARGET a5_cli POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
           ${MODBUS_DLL} "$<TARGET_FILE_DIR:a5_cli>"
+)
+add_custom_command(TARGET a5_pos_cli POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${MODBUS_DLL} "$<TARGET_FILE_DIR:a5_pos_cli>"
 )
