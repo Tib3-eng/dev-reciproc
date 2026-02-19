@@ -20,6 +20,11 @@ target_link_libraries(a5_cli PRIVATE modbus ws2_32)
 add_executable(a5_pos_cli src/a5_pos_cli.c)
 target_link_libraries(a5_pos_cli PRIVATE modbus ws2_32)
 
+add_executable(a5_speed_logger src/a5_speed_logger.c)
+target_link_libraries(a5_speed_logger PRIVATE modbus ws2_32)
+
+add_executable(merge_logs src/merge_logs.c)
+
 # --- copiar DLL (Debug/Release) p/ pasta do exe ----
 file(GLOB_RECURSE MODBUS_DLL
   "${VCPKG_INSTALLED_DIR}/x64-windows/bin/modbus*.dll"
@@ -31,4 +36,8 @@ add_custom_command(TARGET a5_cli POST_BUILD
 add_custom_command(TARGET a5_pos_cli POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
           ${MODBUS_DLL} "$<TARGET_FILE_DIR:a5_pos_cli>"
+)
+add_custom_command(TARGET a5_speed_logger POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${MODBUS_DLL} "$<TARGET_FILE_DIR:a5_speed_logger>"
 )

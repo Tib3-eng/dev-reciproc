@@ -40,8 +40,8 @@ static const uint16_t DLG_PORT      = 41401;
 /* Default channel config (used when no calibration file is present) */
 #define DEFAULT_TSENSOR 4
 #define DEFAULT_ILPF    0
-#define DEFAULT_IGAIN_IDX 4
-#define DEFAULT_SENSPWR_IDX 0
+#define DEFAULT_IGAIN_IDX 5
+#define DEFAULT_SENSPWR_IDX 2
 
 static const int gain_values[] = { 1, 3, 10, 30, 100, 300, 1000, 3000 };
 static const double vexc_values[] = { 1.0, 2.5, 3.3, 5.0, 0.0 };

@@ -97,7 +97,7 @@ namespace CalibraDLG_UI
 
             _gain = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
             _gain.Items.AddRange(new object[] { "1", "3", "10", "30", "100", "300", "1000", "3000" });
-            _gain.SelectedIndex = 4;
+            _gain.SelectedIndex = 5;
 
             _lpf = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
             _lpf.Items.AddRange(new object[]
@@ -119,7 +119,7 @@ namespace CalibraDLG_UI
                 "5.0 V",
                 "Usuario"
             });
-            _sensPwr.SelectedIndex = 0;
+            _sensPwr.SelectedIndex = 2;
 
             _points = new NumericUpDown
             {

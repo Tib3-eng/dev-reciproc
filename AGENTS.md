@@ -31,6 +31,7 @@ DLG4000 (UDP/WinSock2):
 - CSV: include elapsed time, frame, raw channels; inject NULL on losses.
 - Channel config uses index values from the manual: iGain index 0..7 => [1,3,10,30,100,300,1000,3000].
 - Excitation uses iSensPwr index 0..4 => [1V, 2.5V, 3.3V, 5V, user].
+- Current default front-end for DLG tools: iGain index 5 (300) and iSensPwr index 2 (3.3V).
 - Channels are numbered 1..8 (not 0..7).
 - DLGlogger and CalibraDLG are a paired workflow: CalibraDLG writes calibration JSON, DLGlogger consumes it.
 - DLGlogger calibration search: calib.json, calib, calib_CHn.json, out/calib_CHn.json.
@@ -41,6 +42,10 @@ DLG4000 (UDP/WinSock2):
 - CalibraDLG stops/starts acquisition per point to avoid stream stalls between user inputs.
 - CalibraDLG and DLGlogger are not run simultaneously. CalibraDLG writes calibration data to disk; DLGlogger loads and applies it on startup and keeps using it until recalibrated.
 - Bug history: calibration stalled after point 1/2 because wait_first_packet always re-sent ACQSETUP with channel 1, and the stream could stall during long user input; fixed by using the selected channel and restarting ACQ per point with socket drain.
+- dlg_logger_ipc: headless logger (8 canais) com CSV fixo (idx,t_qpc,t_s,ch1..ch8,err). Usa --ipc e espera "START" via stdin.
+- dlg_logger_ipc grava numero fixo de linhas (duracao * taxa) e injeta NULL quando faltar amostra.
+- dlg_logger_ipc aplica calibracao por canal quando calib.json/calib_CHn.json estiver presente; se nao houver, loga bruto.
+- dlg_logger_ipc espera 3 amostras validas (DATA_OK) antes de iniciar o tempo; o supervisório so inicia o Drive depois disso.
 
 CalibraDLG (UDP/WinSock2):
 - Modes: interactive console (default) or --ipc (JSON lines over STDIN/STDOUT).
@@ -57,14 +62,42 @@ CalibraDLG_UI (WinForms):
 - RMSE label shows percent relative to reference span; Finish button now reports status if process is missing or point pending.
 - Finish/Cancel set "Finalizando/Cancelando" and status auto-resets on process end if no final message arrives.
 
+Supervisório (Python/Tk):
+- novo_tribometro.py is the main UI; novo_tribometro.exe is the packaged app.
+- orchestrator_runtime.py launches dlg_logger_ipc + a5_speed_logger in background and merges logs with merge_logs.
+- Outputs go to Desktop\\Repositorio\\<Nome do ensaio - Estudo> with info.csv, schedule.csv, dlg.csv, drive.csv, merge.csv.
+- Check status: DLG uses UDP ACQSTOP/SETCH/SETUP/START (8 canais) and waits for ACQDATA (no ICMP ping).
+- Check status bind: tenta 41402 (mesma do logger); se falhar, usa porta efemera e registra no log.
+- Pending: If DLG check still fails, suspect DLG busy in another app or firewall/route issues.
+
 DriveA5 (Modbus RTU / libmodbus):
 - a5_cli: RUN/STOP, set RPM (P06-03), read P0B-09. Try FC03, fallback FC04.
 - a5_pos_cli: position command via internal multi-segment (P05-00=2, P11-12) and VDI (P31-00).
 - a5_pos_cli opens an interactive console when no args are provided (PT-BR prompts).
-- a5_pos_cli has --diag to read P0C/P0B and validate Modbus comms.
-- VDI mapping for position control uses P17 (VDI1=S-ON, VDI2..5=CMD1..CMD4, VDI6=PosInSen).
+- a5_pos_cli auto-runs a comms probe on startup and defaults to COM4 in interactive mode.
+- a5_pos_cli has --diag to read P0C/P0B plus position/VDI config and warn on mismatches; it prints DI status, command/deviation counters, and fault codes (P0B-33/34).
+- a5_pos_cli keeps PosInSen level when P17-03=0 (VDI2 logic) and watches P0B-07/P0B-13/P0B-15 with a verify window (tol/timeout); it auto-expands timeout based on P05-02 and speed when needed.
+- VDI mapping for position control uses P17 (VDI1=S-ON, VDI2=PosInSen) per position-parameter doc; P11-00 is set to 2 (DI switching).
+- a5_pos_cli logs each parameter write (with readback) before RUN to help diagnose write order issues.
+- a5_pos_cli forces P31-00=0 (STOP) before parameter writes for consistent quick-mode behavior.
+- a5_pos_cli retries parameter writes (with readback fallback) to handle intermittent Modbus errors.
+- a5_pos_cli has oscillation mode (--osc or interactive) that alternates 0 and 15000 with cycles/dwell.
+- a5_pos_cli has "Testa posicao" mode that does one full parameter write, then updates only P11-12 for subsequent positions (with STOP + VDI re-trigger).
+- a5_pos_cli has "zerar agora" (P05-30=6) to set current position as home; if that fails it falls back to a software zero offset.
+- a5_pos_cli caches P0C-26 word order to avoid bad 32-bit reads when P0C-26 read fails.
+- a5_pos_cli logs position checks to out/a5_pos_log.csv (raw + logical P0B-07, error, dev, cmd) and caches P05-02 (units/rev) when readable.
 - Standard test: 10 rpm, 120 s, ~200 Hz. CSV: t_s,pos,rev.
 - Revolution count: detect robust wrap (prev > 60000 and pos < 5000).
+- a5_speed_logger: headless logger para modo velocidade (RPM) com schedule CSV (rpm,duration_s). Loga P0B-09 em 200 Hz (idx,t_qpc,t_s,pos,err); se P05-02 estiver disponivel, escala para 0..(P05-02-1); caso contrario usa valor bruto 0..65535.
+- a5_speed_logger --setup: escreve P02-00=0, P06-02=2, P03-02=0, P0C-09=1 e P31-00=0 para aceitar comando de RPM via Modbus.
+- merge_logs: junta dlg.csv + drive.csv por indice de linha e gera merge.csv.
+Field notes (DriveA5, based on recent tests):
+- Relative mode (P11-04=0) is more consistent than absolute, but still drifts if completion threshold is loose.
+- P05-21 (positioning completion threshold) around 20 caused ~20 count residual; lowering to 5 or 2 is recommended for tighter closure.
+- P11-15=0 is unstable; use non-zero accel/decel (e.g., 50-150 ms) and small wait (P11-16=10-20 ms) to reduce settling error.
+- P05-30=6 (home=current pos) frequently fails to write over Modbus; software zero offset is used when this happens.
+- Modbus intermittency: many read/write failures show errno=17 ("File exists"). Expect retries; cached P0C-26 is required when reads fail.
+- Verification tolerance in CLI is separate from drive completion; CLI tolerance should be <= P05-21.
 
 Operational constraints
 - Windows only (VS2022 + CMake). Use PowerShell at repo root.
@@ -77,6 +110,8 @@ CSV conventions
 - ASCII logs and CSV only.
 - Fixed headers and units. Use "NULL" rows only for real losses.
 - Write outputs into out/ subfolders (gitignored) when creating artifacts.
+- Supervisor (novo_tribometro.py) grava em: Desktop\\Repositorio\\<Nome do ensaio - Estudo>.
+  Arquivos padrao: info.csv, schedule.csv, dlg.csv, drive.csv, merge.csv.
 
 Roadmap (short)
 - Load calibration (a,b) from file and apply on-the-fly in DLG logger.

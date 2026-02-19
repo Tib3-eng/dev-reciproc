@@ -1,0 +1,13691 @@
+LC10 Series AC Servo Drive
+User's Manual
+
+Shenzhen Xinlichuan Electric Co., Ltd.
+
+Contents
+Chapter I Safety Precautions ...............................................................................................................................................1
+Chapter II Electrical Specifications ....................................................................................................................................1
+2.1 Specifications ...........................................................................................................................................................1
+2.2 Drive model ............................................................................................................................................................. 2
+Chapter III Installation ........................................................................................................................................................3
+3.1 Installation of servo drive unit .............................................................................................................................. 3
+3.1.1 Installation environment ................................................................................................................................3
+3.1.2 Installation method ........................................................................................................................................ 3
+3.1.3 Installation dimensions ..................................................................................................................................4
+3.2
+Servo motor installation ...............................................................................................................................4
+3.2.1 Installation environment ................................................................................................................................4
+3.2.2 Installation method ........................................................................................................................................ 4
+Chapter IV Wiring ................................................................................................................................................................5
+4.1
+Terminal description .................................................................................................................................... 5
+4.2
+Main circuit wiring .......................................................................................................................................6
+4.2.1 Definition of main circuit terminals .............................................................................................................. 6
+4.2.2 How to use the main circuit power terminal (spring type) ........................................................................... 6
+4.2.3 Drive wiring diagram .................................................................................................................................... 7
+4.3
+Definition of wiring terminal .......................................................................................................................8
+4.3.1 Definition of communication terminals (CN1/CN2) .................................................................................... 8
+4.3.2 Definition of control terminals (CN1) ...........................................................................................................8
+4.3.3 Encoder terminal definition (CN2) ............................................................................................................... 9
+4.4
+Control signal terminal wiring .................................................................................................................. 11
+4.4.1 DI input circuit .............................................................................................................................................11
+4.4.2 High-speed pulse input circuit .....................................................................................................................11
+4.4.3 DO output circuit .........................................................................................................................................13
+4.4.4 Analog input circuit ..................................................................................................................................... 13
+4.4.5 Pulse feedback output circuit ...................................................................................................................... 13
+Chapter V Panel Display and Operation ..........................................................................................................................14
+5.1
+Panel introduction and description .......................................................................................................... 14
+5.1.1 Description of panel keys ............................................................................................................................ 14
+5.1.2 How to operate keys on the panel ............................................................................................................... 14
+5.1.3 Status display ...............................................................................................................................................14
+5.1.4 Display of parameter number ......................................................................................................................15
+5.1.5 Parameter value display ...............................................................................................................................15
+5.1.6 Monitor parameter display (P0B set parameters) ....................................................................................... 15
+5.2
+Common operations ................................................................................................................................... 17
+5.2.1 JOG mode operation ....................................................................................................................................17
+5.2.2 Internal power-up enable .............................................................................................................................17
+5.2.3 Initialization parameters .............................................................................................................................. 17
+5.2.4 Manual reset alarm ...................................................................................................................................... 17
+Chapter VI Control Mode Description .............................................................................................................................18
+6.1
+Location mode description ........................................................................................................................ 18
+6.1.1 Position mode wiring diagram .................................................................................................................... 18
+
+Version No.: V1.0
+
+6.1.2 Parameters related to external pulse control ............................................................................................... 19
+6.1.3 Parameters related to internal multi-segment position control ................................................................... 19
+6.2
+Speed mode description ............................................................................................................................. 21
+6.2.1 Speed mode wiring diagram ........................................................................................................................21
+6.2.2 Functions related to external speed mode ................................................................................................... 22
+6.2.3 Internal multi-speed related functions .........................................................................................................23
+6.3
+Torque mode description ........................................................................................................................... 24
+6.3.1 Torque mode wiring diagram ...................................................................................................................... 24
+6.3.2 Functions related to external torque mode .................................................................................................. 25
+6.4
+Detailed description of DI/DO port function configuration ...................................................................27
+6.4.1 DI function description ................................................................................................................................27
+6.4.2 DO function description .............................................................................................................................. 30
+Chapter VII Parameter Description ................................................................................................................................. 32
+7.1
+P01 set drive parameters ........................................................................................................................... 32
+7.2
+P02 set basic control parameters .............................................................................................................. 32
+7.3
+P03 set terminal input parameters ........................................................................................................... 33
+7.4
+P04 set terminal output parameters ......................................................................................................... 34
+7.5
+P05 set position control parameters ......................................................................................................... 34
+7.6
+P06 set speed control parameters ............................................................................................................. 37
+7.7
+P07 set torque control parameters ............................................................................................................38
+7.8
+P08 set gain parameters ............................................................................................................................. 39
+7.9
+P09 set self-tuning parameters .................................................................................................................. 40
+7.10
+P0A set fault and protection parameters ................................................................................................. 40
+7.11
+P0B set monitoring parameters ................................................................................................................ 41
+7.12
+P0C set communication parameters .........................................................................................................42
+7.13
+P0D set auxiliary function parameters .....................................................................................................43
+7.14
+P11 set multi-segment position function parameters ..............................................................................44
+7.15
+P12 set multi-segment speed parameters ................................................................................................. 46
+7.16
+P17 set virtual DIDO parameters ............................................................................................................. 48
+7.17
+P30 set communication reading servo related variables ........................................................................ 50
+7.18
+P31 set communication given servo related variables ............................................................................ 51
+Chapter VIII Troubleshooting ...........................................................................................................................................51
+8.1
+Fault and Warning Code List ....................................................................................................................51
+8.1.1 Fault code table (to reset the fault, you need to cancel the enable first) .....................................................51
+8.1.2 Warning code table (warnings can be reset directly, no need to disable) ................................................... 54
+Chapter IX MODBUS Communication ........................................................................................................................... 55
+9.1
+Wiring and Setup ........................................................................................................................................55
+9.1.1 Topology structure .......................................................................................................................................55
+9.1.2 Related parameters ...................................................................................................................................... 55
+9.1.3 Communication address description ........................................................................................................... 56
+9.2
+MODBUS communication protocol ..........................................................................................................56
+9.2.1 Read register command (0x06) ................................................................................................................... 56
+9.2.2 Write single-register command (0x06) ........................................................................................................57
+9.2.3 Write muiti-register command (0x10) .........................................................................................................58
+9.2.4 Response exception and error codes ........................................................................................................... 59
+9.2.5 CRC check ...................................................................................................................................................59
+
+Digital Servo Drive User Manual
+
+Chapter I Safety Precautions
+Before using the servo drive system, please read the related precautions carefully, and be
+sure to abide by the safety precautions and operating procedures for installation and
+commissioning. The company is not responsible for any equipment damage or personal
+injury caused by not operating in accordance with the requirements.
+◆ This product is a general industrial product and is not intended for use in machines and
+systems that are related to human life.
+◆ Only qualified personnel are allowed to perform wiring, running, maintenance,
+inspection and other operations.
+◆ Safety devices must be equipped if it is used on devices that may cause serious
+accidents or losses.
+◆ Although this product is perfectly sound in terms of quality control, the noise, static
+electricity, input power supply, wiring, parts and other factors may cause unexpected
+actions. Please fully consider mechanical safety measures to ensure safety within the
+possible range of motion
+
+Chapter II Electrical Specifications
+2.1 Specifications
+Input power
+
+Single-phase 220VAC
+
+Working
+environment
+
+Temperature
+Humidity
+Elevation
+Installation
+environment
+Installation mode
+
+Encoder
+Output power
+Control signal
+Pulse signal
+
+Analog signal
+
+24V voltage output
+Digital input
+Digital output
+Input
+Output
+Input
+
+Output
+Communication function
+Display panel and key operation
+Braking resistor
+-1-
+
+0～45℃
+≤90%RH, no condensation
+Altitude ≤1000m
+No corrosive gas, flammable gas, oil mist or dust.
+Vertical
+Support
+17-bit
+incremental/absolute
+value
+encoder,
+23-bit
+incremental/absolute value encoder
+100mA, supply power to DI port and pulse port.
+8-channel common digital input, function can be configured.
+6-channel digital output, function can be configured.
+2-channel high-speed input: support up to 1MHz pulse, duty cycle 50%.
+Support pulse input mode: PULS+DIR, A+B, CW+CCW
+3-channel high-speed pulse output, output signal form: 5V differential signal.
+1 channel Z signal single-ended output signal.
+2-channel analog input, 12-bit resolution, input range -9.5 ~ +9.5V. Among
+them, AI2 is fixed as the torque limit input.
+None
+RS485 communication, ModbusRTU protocol.
+5 keys (Mode, Set, Left, Up, Down) and 6 nixie tubes
+Built-in 50W 40Ω braking resistor. For frequent braking occasions, an
+external braking resistor is required.
+
+Digital Servo Drive User Manual
+
+2.2 Drive model
+
+Drive series
+
+P: Pulse type
+E: Ether CAT bus type
+
+Motor power
+50:50W
+100:100W
+200:200W
+400:400W
+750:750W
+1000:1KW
+
+2.3 Motor model
+
+Product
+information
+
+Motor speed:
+10:1000RPM
+15:1500RPV
+25:2500RPV
+30:3000RPM
+
+Drive power:
+02:02KW
+04:0.4KW
+S: 5 pairs of
+poles
+Motor inertia:
+LB: 220V low
+inertia
+MB: 220V medium
+inertia
+
+Motor torque
+Encoder type:
+C17: 17-bit magnetic encoder incremental
+RI7: 17-bit magnetic encoder absolute value
+G17: 17-bit optical encoder absolute value
+C23: 23-bit magnetic encoder incremental
+R23: 23-bit magnetic encoder absolute value
+G23: 23-bit optical encoder absolute value
+
+N: without
+brake
+Z: with brake
+
+A: with oil seal, no keyway
+B: with oil seal and keyway
+C: with oil seal, no keyway
+
+Motor flange:
+6:60 flange
+8:80 flange
+
+-2-
+
+Digital Servo Drive User Manual
+
+Chapter III Installation
+Warning
+● The storage and installation of the product must meet the environmental conditions.
+● Damaged or incomplete products should not be installed and used.
+● The product requires fireproof materials for installation, and must not be installed on or near flammable
+materials to prevent fire.
+● The servo drive unit must be installed in the electric cabinet to prevent the intrusion of dust, corrosive
+gas, conductive objects, liquids, and inflammables.
+● Servo drive unit and servo motor should be protected from vibration and shock.
+● It is strictly forbidden to drag the servo motor wires and encoder lines.
+
+3.1 Installation of servo drive unit
+Note
+● The servo drive unit must be installed in a well-protected electric cabinet.
+● The servo drive unit must be installed in the specified direction and interval, and ensure good heat
+dissipation conditions.
+● Do not install on or near flammable objects to prevent fire.
+
+3.1.1 Installation environment
+
+
+
+
+
+
+
+Operating temperature/humidity: 0~55℃ (no frost), < 90%RH (no condensation).
+Storage temperature/humidity: -20~65℃ (no frost), < 90%RH (no condensation).
+Atmospheric environment: inside the control cabinet, without corrosive or flammable gas, oil mist, dust, etc.
+Elevation: below 1000m above sea level.
+Vibration: < 0.5G (4.9m/s2), 10~60 Hz (non-continuous operation).
+Protection: The servo drive itself has no protection, so it must be installed in a well-protected electrical cabinet, and
+protected from the intrusion of corrosive or flammable gases, conductive objects, metal dust, oil mist and liquids.
+
+3.1.2 Installation method
+
+ The servo drive of our company is in vertical structure, so please install it vertically. The installation direction
+should be upwards perpendicular to the installation surface.
+ The installation layout of single or multiple servo drives is shown in the figure below.
+
+Installation interval of a single servo drive unit
+
+-3-
+
+Installation interval of multiple servo units
+
+Digital Servo Drive User Manual
+
+3.1.3 Installation dimensions
+
+3.2 Servo motor installation
+Warning
+● It is strictly forbidden to knock the shaft end of the motor, or the motor encoder may be damaged.
+
+3.2.1 Installation environment
+ Operating temperature/humidity: 5~40℃ (no frost), < 90%RH (no condensation).
+ Storage temperature/humidity: -20~55℃ (no frost), < 80%RH (no condensation).
+ Atmospheric environment: indoor (no exposure), without corrosive or flammable gas, oil mist, dust, etc.
+ Elevation: below 1000m above sea level.
+ Vibration: < 0.5G (4.9m/s2), 10~60 Hz (non-continuous operation).
+ Protection level: IP54
+
+3.2.2 Installation method
+ Installation direction: To prevent water, oil and other liquids from flowing into the motor from the motor outlet,
+please place the cable outlet at the bottom. If the motor shaft is installed upwards and a reducer is attached, it is
+necessary to prevent oil stains in the reducer from penetrating into the motor from the motor shaft.
+ Concentric: When connecting with the machine, please use the coupling, and keep the axle center of the servo
+motor and the axle center of the machine in a straight line.
+ Cable: Do not "bend" or put "tension" on the cables, do not over-tension the cable when wiring (using).
+ Fixing: The motor installation must be firm, and there should be anti-loosening measures.
+-4-
+
+Digital Servo Drive User Manual
+
+Chapter IV Wiring
+Warning
+
+● The power supply of this series of drives is single-phase 220V. The power supply must be identified
+when wiring.
+● When using this product, the user must consider safety protection measures in the design and assembly
+to prevent accidents caused by wrong operations.
+● The drive terminals U, V and W must correspond to the motor U, V and W, or it may cause a crash.
+● The drive and motor must be well grounded.
+● The power must be turned off at least 5 minutes before disassembling the drive.
+● It is forbidden to turn on/off the power frequently. When the power is off, you need to wait for the nixie
+tube to go out before powering on again.
+● When using the internal braking resistor, the short-circuit wire must be connected between terminals B2
+and B3. It is forbidden to connect the wire between B1 and B2 directly.
+
+4.1 Terminal description
+Nixie tube
+Key
+
+Control signal
+terminal
+
+Encoder terminal
+
+Power terminal
+Braking resistor
+terminal
+Motor power
+cable terminal
+Earth wire
+terminal
+
+-5-
+
+Digital Servo Drive User Manual
+
+4.2 Main circuit wiring
+4.2.1 Definition of main circuit terminals
+ Input power terminal
+No.
+
+Signal definition
+
+1
+
+L
+
+2
+
+N
+
+Functions
+Power terminal, can be connected to AC single-phase 220V
+
+ Braking resistor terminal
+Pin
+
+Signal definition
+
+1
+
+B1
+
+2
+
+B3
+
+3
+
+B2
+
+Functions
+
+Description
+
+DC bus positive terminal The positive terminal of the built-in
+output DCP
+
+resistor is connected to B1. When
+
+Built-in braking resistor
+
+using the built-in resistor, please
+
+negative output.
+
+short-circuit B2 and B3. When using
+
+Brake transistor collector
+output
+
+external resistor, please connect the
+resistor between B1 and B2 (B2 and
+B3 must be disconnected).
+
+ Motor terminal
+Socket No.
+
+Signal definition
+
+Functions
+
+1
+
+U
+
+Connect to motor phase U
+
+2
+
+V
+
+Connect to motor phase V
+
+3
+
+W
+
+Connect to motor phase W
+
+4
+
+PE
+
+Connect to motor housing
+
+4.2.2 How to use the main circuit power terminal (spring type)
+1. Strip the outer sheath of the wire to expose 8-9mm bare copper wire.
+2. The pressing method is as follows:
+● Use the control bar provided with the servo drive to pry up the slot (as shown in Fig. A);
+● Insert a slotted screwdriver into the terminal opening (3.0~3.5mm width at the end), then press
+firmly to open the slot (as shown in Fig. B).
+3. The pressing method is as follows:
+
+Fig. A
+
+Fig. B
+-6-
+
+Digital Servo Drive User Manual
+
+4.2.3 Drive wiring diagram
+
+Servo driver
+USB-to-485
+communication cable
+
+PLC or motion
+controller
+
+The filter is selectively installed according
+to the site environment
+
+Filter
+
+External braking resistor
+①When using the internal braking resistor,
+short-circuit B2 and B3;
+②When using external braking resistor, B2 and B3
+must be disconnected, and the resistor must be
+connected to B1 and B3.
+
+Motor
+
+Note: When using the internal braking resistor, short-circuit B2 and B3 (connected at the factory); when using the
+external braking resistor, disconnect B2 and B3, and connect the external braking resistor between B1 and B2.
+
+-7-
+
+Digital Servo Drive User Manual
+
+4.3 Definition of wiring terminal
+4.3.1 Definition of communication terminals (CN1/CN2)
+Pin
+
+Network cable color
+
+Signal definition
+
+1
+
+White/orange
+
+NC
+
+2
+
+Orange
+
+NC
+
+3
+
+White/green
+
+NC
+
+4
+
+Blue
+
+485+
+
+5
+
+White/blue
+
+485-
+
+6
+
+Green
+
+NC
+
+7
+
+White/brown
+
+NC
+
+8
+
+Brown
+
+GND
+
+Pin 1
+
+Pin 8
+
+RJ45
+connector
+
+Registered jack pin order
+
+4.3.2 Definition of control terminals (CN1)
+
+Terminal welding surface
+
+Pin
+
+Signal name
+
+Function name
+
+42
+
+PUL+
+
+41
+
+PUL-
+
+40
+
+DIR+
+
+39
+
+DIR-
+
+38
+3
+4
+5
+6
+18
+19
+
+OPC
+DI1
+DI2
+DI3
+DI4
+DI5
+DI6
+
+Pulse input PUL negative terminal,
+5V interface.
+Pulse input PUL positive terminal,
+5V interface.
+Pulse direction DIR negative
+terminal, 5V interface.
+Pulse direction DIR positive
+terminal, 5V interface.
+24V pulse input common terminal
+Digital input 1
+Digital input 2
+Digital input 3
+Digital input 4
+Digital input 5
+Digital input 6
+
+20
+
+DI7
+
+Digital input 7
+
+21
+
+DI8
+
+Digital input 8
+
+10
+
+DICOM
+
+DI port common terminal
+
+44
+
++24VO
+
+24V power output positive terminal
+
+11
+
+COM-
+
+12
+
+COM-
+
+24V power output negative terminal
+
+Notes or supplementary instructions
+When the 5V pulse interface is connected to 12V or
+24V pulse, an external resistor needs to be connected
+in series;
+When using the 24V pulse input common terminal
+OPC, the 24V pulse signal can be directly connected.
+At this moment, PUL+ and DIR+ are not connected.
+Up to 1MHz frequency is supported.
+
+For detailed description of parameter configuration,
+please refer to chapter 6.4.1.
+
+DICOM can be connected to +24V or 0V
+The maximum output current of 24V is 100mA,
+which can only be used as power supply for the DI
+port. It is forbidden to drive external loads.
+-8-
+
+Digital Servo Drive User Manual
+
+8
+
+DO1A
+
+Terminal A of digital output 1
+
+7
+6
+5
+4
+3
+2
+1
+25
+9
+27
+26
+
+DO1B
+DO2A
+DO2B
+DO3A
+DO3B
+DO4A
+DO4B
+DO5A
+DO5B
+DO6A
+DO6B
+
+28
+
+OA+
+
+13
+
+OA-
+
+29
+
+OB+
+
+14
+
+OB-
+
+30
+
+OZ+
+
+15
+20
+37
+36
+16
+17
+18
+19
+
+OZGND
+CZ+
+CZAGND
+AI2
+AGND
+AI1
+
+Terminal B of digital output 1
+Terminal A of digital output 2
+Terminal B of digital output 2
+Terminal A of digital output 3
+Terminal B of digital output 3
+Terminal A of digital output 4
+Terminal B of digital output 4
+Terminal A of digital output 5
+Terminal B of digital output 5
+Terminal A of digital output 6
+Terminal B of digital output 6
+Encoder frequency division output
+A+
+Encoder frequency division output AEncoder frequency division output
+B+
+Encoder frequency division output BEncoder frequency division output
+Z+
+Encoder frequency division output ZDigital signal ground
+Z signal collector output +
+Z signal collector output Analog input AGND
+Analog input AI2
+Analog input AGND
+Analog input AI1
+
+For detailed description of parameter configuration,
+please refer to chapter 6.4.2.
+Note: The output port allows a maximum current of
+200mA. It can't directly drive a large current load
+such as a motor brake. External relay is required.
+
+P05-17: The number of encoder frequency division
+pulses, used to set the number of pulses output by the
+drive for each rotation of the motor.
+
+This pin is not currently available
+All can be used for speed or torque command input,
+which can be selected by parameter setting of P6 and
+P7
+
+4.3.3 Encoder terminal definition (CN2)
+ Schematic diagram of drive encoder terminals
+
+Encoder terminal pin diagram
+ Drive encoder pin definition
+Servo side
+
+-9-
+
+Name
+
+Wire color
+
+1
+
+VCC
+
+Encoder power supply +5V
+
+Red
+
+2
+
+GND
+
+Encoder power ground
+
+Yellow
+
+3
+
+/
+
+/
+
+4
+
+/
+
+/
+
+5
+
+SD+
+
+Encoder signal+
+
+Blue
+
+6
+
+SD-
+
+Encoder signal-
+
+Black
+
+/
+/
+
+Digital Servo Drive User Manual
+
+ Schematic diagram of motor terminals
+
+9-pin Amp plug male
+
+7-pin aviation plug
+
+4-pin Amp plug
+
+4-pin aviation plug
+
+ Motor encoder terminal pin definition (Amp plug is the same as the aviation plug)
+Motor side
+
+Name
+
+Wire color
+
+1
+
+PE
+
+Shielded cable
+
+2
+
+E-
+
+Battery
+power
+supply negative
+
+White
+
+3
+
+E+
+
+Battery power
+supply positive
+
+Green
+
+4
+
+SD-
+
+Encoder signal-
+
+Black
+
+5
+
+GND
+
+Encoder
+ground
+
+power
+
+Yellow
+
+6
+
+SD+
+
+Encoder signal+
+
+Blue
+
+7
+
+VCC
+
+Encoder power
+supply +5V
+
+Red
+
+ Motor power line pin definition
+Motor side (Amp plug)
+
+Name
+
+Wire color
+
+1
+
+U
+
+Motor phase U
+
+Brown
+
+2
+
+V
+
+Motor phase V
+
+Blue
+
+3
+
+W
+
+Motor phase W
+
+Yellow
+
+4
+
+PE
+
+Motor housing
+
+Green
+
+Motor side (aviation plug)
+
+Name
+
+Wire color
+
+1
+
+PE
+
+Motor housing
+
+Yellow/green
+
+2
+
+U
+
+Motor phase U
+
+Black
+
+3
+
+V
+
+Motor phase V
+
+Grey
+
+4
+
+W
+
+Motor phase W
+
+Brown
+
+-10-
+
+Digital Servo Drive User Manual
+
+4.4 Control signal terminal wiring
+4.4.1 DI input circuit
+ NPN type input wiring
+Switch
+
+ PNP type input wiring
+Switch
+
+ Switch input wiring
+Switch
+
+Servo
+
+4.4.2 High-speed pulse input circuit
+ 5V differential pulse input wiring
+
+-11-
+
+Digital Servo Drive User Manual
+
+ 24V NPN pulse wiring (built-in resistor)
+
+ 24V PNP pulse wiring (built-in resistor)
+
+ NPN pulse wiring (external resistor)
+
+ PNP pulse wiring (external resistor)
+
+Note: With external resistor wiring, when signal voltage VCC=24V, R=1.5KΩ; when signal voltage VCC=12V,
+R=1KΩ;
+When signal voltage VCC=5V, R=0Ω.
+
+-12-
+
+Digital Servo Drive User Manual
+
+4.4.3 DO output circuit
+ DO output wiring (connect to optocoupler)
+Switch
+
+Switch
+
+Low level output wiring
+
+High level output wiring
+
+ DO output wiring (connect to relay)
+Switch
+
+Relay NO contact
+
+Motor brake
+
+Relay coil
+
+The brake output signal controls the motor brake through the relay
+
+4.4.4 Analog input circuit
+
+4.4.5 Pulse feedback output circuit
+26LS32 or equivalent
+
+-13-
+
+High-speed
+optocoupler
+
+Digital Servo Drive User Manual
+
+Chapter V Panel Display and Operation
+5.1 Panel introduction and description
+
+Left key
+
+SET key
+
+Up key
+
+Down key
+
+Mode key
+
+5.1.1 Description of panel keys
+
+Name
+
+General function
+
+M
+
+Switch between modes, return to the previous menu
+Increase the value of the blinking digit of the LED
+nixie tube
+Decrease the value of the blinking digit of the LED
+nixie tube
+Change the blinking position of the LED nixie tube
+View the high-order value of data longer than 5
+digits
+
+SET
+
+Go to next level menu
+Execute commands such as storing parameter values
+
+5.1.2 How to operate keys on the panel
+Servo power
+on
+
+Status
+display
+
+Parameter set
+P00
+
+Parameter set
+P01
+
+Parameter
+P01.02
+
+Parameter value
+
+Parameter set
+P31
+
+5.1.3 Status display
+Display
+
+Name
+Reset
+Servo initializes
+Nrd
+Servo not ready
+
+Occasion
+
+Meaning
+
+The moment the
+servo is powered
+on.
+Servo
+initialization is
+complete, but the
+drive is not ready.
+
+The drive is in initialization or reset state.
+When the initialization or reset completes, switch to
+other states automatically.
+The servo is inoperable because the main circuit is
+not powered on.
+
+-14-
+
+Digital Servo Drive User Manual
+Rdy
+Servo ready
+
+The drive is ready.
+
+The servo drive is in operable state, waiting for the
+servo enable signal from the host computer.
+
+Run
+Servo is running
+
+The servo enable
+signal is active.
+(S-ON is ON)
+
+The servo drive is running.
+
+Jog
+Jog running
+
+The servo drive is
+in the jog running
+state.
+
+Jog operation settings can be made.
+
+5.1.4 Display of parameter number
+The servo parameter number of this series consists of two parts: the parameter set and the number in the parameter set,
+as shown in the figure below:
+
+Parameter set
+
+Set
+number
+
+5.1.5 Parameter value display
+Signed number with no more than 4 digits or unsigned numbers with no more than 5 digits
+Displayed on a single page (5-digit nixie tube); for signed numbers, the highest digit of the data "-" represents a negative
+sign.
+Example: -9999 is displayed as follows:
+
+
+Example: 65535 is displayed as follows:
+
+Signed numbers with more than 4 digits or unsigned numbers with more than 5 digits
+Displayed in pages from low to high digits, and every 5 digits is a page. Display method: current page + current page
+
+
+value, as shown in the figure below, press and hold the "
+Example: -268435456 is displayed as follows:
+
+" key for more than 2 seconds to switch the current page.
+
+The flashing bit indicates the number of pages
+
+2
+seconds
+
+Page 3
+
+Page 2
+
+2
+seconds
+
+Page 1
+
+5.1.6 Monitor parameter display (P0B set parameters)
+Functional
+code
+
+Name
+
+Unit
+
+P0B-00
+
+Actual motor speed
+
+rpm
+
+P0B-01
+
+Speed command
+
+rpm
+
+P0B-02
+
+Internal torque command
+
+0.1%
+
+P0B-03
+
+DI signal monitoring
+
+-
+
+P0B-05
+
+DO signal monitoring
+
+-
+
+-15-
+
+Meaning
+The actual running speed of the servo motor, which is rounded to the nearest
+1rpm
+The current speed command of the drive
+The percentage of the actual output torque of the servo motor to the rated
+torque of the motor
+Corresponding level status of the 9 DI terminals: the upper half of the nixie
+tube lights up to indicate a high level; the lower half lights up to indicate a
+low level
+Corresponding level status of the 6 DO terminals: the upper half of the nixie
+tube lights up to indicate a high level; the lower half lights up to indicate a
+low level
+
+Digital Servo Drive User Manual
+P0B-07
+
+Absolute position counter
+(32-bit decimal display)
+
+Command
+unit
+
+P0B-09
+
+Mechanical angle (number
+of pulses from the home)
+
+p
+
+P0B-10
+
+Current absolute position of the motor (command unit)
+Current mechanical angle of the motor 0 corresponds to the mechanical
+angle of 0°
+P0B-09 maximum value: 65535
+Actual mechanical angle =
+
+Rotation angle
+Corresponding
+speed
+information
+of
+input
+position command
+Average load ratio
+Input position command
+count
+Encoder position deviation
+value
+
+°
+
+Current electrical angle of the motor
+
+rpm
+
+Corresponding speed value of the position command of a single control cycle
+of the drive
+
+P0B-17
+
+Feedback pulse counter
+
+p
+
+P0B-19
+
+0.1s
+0.01V
+
+Voltage value input by analog channel 1
+
+0.01V
+
+Voltage value input by analog channel 2
+
+P0B-24
+
+Total power-on time
+AI1 sampling voltage
+value
+AI2 sampling voltage
+value
+Phase current rms value
+
+Encoder position deviation = total number of input position commands - total
+number of encoder feedback pulses
+Count and display the number of pulses fed back by the servo motor encoder
+(encoder unit)
+Count and display the power-on time of the servo drive
+
+0.01A
+
+P0B-26
+
+Bus voltage value
+
+0.1V
+
+P0B-27
+
+Module temperature value
+
+℃
+
+P0B-33
+
+Fault recording
+
+-
+
+P0B-34
+
+Fault code of selected time
+
+-
+
+P0B-35
+
+Selected fault timestamp
+
+s
+
+P0B-37
+
+Motor speed at selected
+fault
+
+rpm
+
+P0B-38
+
+Motor U-phase current at
+the selected fault
+
+0.01A
+
+P0B-39
+
+Motor V-phase current at
+the selected fault
+
+0.01A
+
+P0B-40
+
+Bus voltage at selected
+fault
+
+V
+
+P0B-41
+
+Input terminal status at
+selected fault
+
+-
+
+P0B-42
+
+Output terminal status at
+selected fault
+
+-
+
+P0B-53
+
+Position deviation counter
+(32-bit decimal display)
+
+Command
+unit
+
+Servo motor phase current rms value
+The DC bus voltage value of the main circuit, that is, the voltage between the
+drive P⊕, ﹣
+Servo drive internal power module temperature
+Set the number of times to view historical faults
+0 - current fault
+1- Last fault
+2- Last two faults
+……
+9- Last 9 faults
+P0B-33 selected fault code
+When there is no fault, the displayed value of P0B-34 is "Er.000"
+P0B-34 shows the total servo running time when the fault occurs
+When there is no fault, the displayed value of P0B-35 is "0"
+The servo motor speed when the fault displayed by P0B-34 occurs
+When there is no fault, the displayed value of P0B-37 is "0"
+The rms value of the U-phase winding current of the servo motor when the
+fault displayed by P0B-34 occurs
+When there is no fault, the displayed value of P0B-38 is "0"
+The rms value of the V-phase winding current of the servo motor when the
+fault displayed by P0B-34 occurs
+When there is no fault, the displayed value of P0B-39 is "0"
+The DC bus voltage value of the main circuit when the fault displayed by
+P0B-34 occurs
+When there is no fault, the displayed value of P0B-40 is "0"
+The corresponding high and low level status of 9 DI terminals when the fault
+displayed by P0B-34 occurs
+Viewing method is the same as P0B-03
+When no fault occurs, P0B-41 shows that all DI terminals are low level, and
+the corresponding decimal value is "0"
+The corresponding high and low level status of 5 DO terminals when the
+fault displayed by P0B-34 occurs
+Viewing method is the same as P0B-05
+When no fault occurs, P0B-42 shows that all DO terminals are low level, and
+the corresponding decimal value is "0"
+Position deviation = total number of input position commands - total number
+of encoder feedback pulses
+Note: The position deviation (command unit) is the value converted from the
+encoder position deviation. When doing division, there is a loss of precision.
+
+P0B-11
+P0B-12
+P0B-13
+P0B-15
+
+P0B-21
+P0B-22
+
+0.1%
+Command
+unit
+P
+
+The percentage of average load torque to motor rated torque
+Display the number of input position commands
+
+-16-
+
+Digital Servo Drive User Manual
+P0B-55
+
+Actual motor speed
+
+0.1rpm
+
+P0B-64
+
+Real-time input position
+command counter
+
+Command
+unit
+
+The actual running speed of the servo motor, accurate to 0.1rpm
+Display the position command counter before the electronic gear ratio
+frequency multiplication, regardless of the current state of the servo and the
+control mode
+
+5.2 Common operations
+Warning
+● Please check whether the wiring of the drive is correct before powering on.
+● Make sure that the motor is not loaded to prevent collision or other hazards.
+
+5.2.1 JOG mode operation
+When using the jog function, you need to cancel the servo enable first, or you can't enter the JOG state!
+Power
+on
+
+JOG speed can be modified by Up and
+Down keys
+2 seconds
+
+Press
+
+to rotate the motor
+forward
+
+Press
+
+to rotate the motor
+reversely
+
+5.2.2 Internal power-up enable
+If you want to power on and enable the motor when the DI1 terminal is not connected externally, you can set
+P03-03 (DI1 level logic) to 1, and the motor will be enabled by default after the power is turned on again.
+
+5.2.3 Initialization parameters
+Set P02-31 to 1 to initialize the drive parameters, and the drive needs to be restarted after the setting is completed.
+
+5.2.4 Manual reset alarm
+Set P0D-01 to 1 to clear the resettable alarms;
+For multi-turn absolute encoder power failure alarm (Er.731), first set P0D-20 to 2, and then set P0D-01 to 1 to
+clear the alarm.
+-17-
+
+Digital Servo Drive User Manual
+
+Chapter VI Control Mode Description
+6.1 Location mode description
+6.1.1 Position mode wiring diagram
+The internal 24V output
+can only supply power
+to the DI port. It is
+forbidden to supply
+power to external
+loads!!! It may cause
+damage to the internal
+power supply.
+Servo enabled
+
+Upper computer
+
+A-phase feedback
+
+Positive limit switch
+Negative limit switch
+
+B-phase feedback
+
+Alarm reset
+Speed direction setting
+
+Z-phase feedback
+
+Emergency shutdown
+Home switch
+Homing start
+
+Servo ready
+Positioning
+completed
+
+Zero-velocity
+reached
+Fault output
+
+Use 5V differential input
+connection
+Controller
+
+Home output
+
+Brake output
+For other wiring methods, refer to
+chapter 4.4.2
+
+-18-
+
+Digital Servo Drive User Manual
+
+6.1.2 Parameters related to external pulse control
+1. Pulse pin
+Signal name
+PUL+
+PULDIR+
+DIROPC
+
+Corresponding CN1
+pin number
+42
+41
+40
+39
+38
+
+Name
+
+Note or supplementary instructions
+
+Pulse input positive
+Pulse input negative
+Pulse direction negative
+Pulse direction positive
+24V pulse common terminal
+
+1.Please read chapter 4.4.2 carefully
+before wiring to prevent wrong wiring
+from damaging the drive.
+2.The maximum pulse frequency is
+1MHz, and the duty cycle is 50%.
+
+2. Related parameters
+No.
+P02-00
+P02-01
+P2-02
+P02-03
+P05-00
+P05-02
+P05-07
+
+P05-09
+
+Parameter name
+Control mode selection
+Absolute value system
+selection
+Rotation
+direction
+rotation
+Output pulse phase
+Position command source
+The number of pulses per
+motor rotation
+Electronic gear ratio 1
+(numerator)
+Electronic gear ratio 1
+(denominator)
+
+Setting range
+0~6
+
+Functions
+Corresponding to position mode when set to 1
+
+0~2
+
+0: Incremental encoder, 1: Absolute value encoder
+
+0~1
+
+0: Forward; 1: Reverse
+
+0~1
+0~2
+
+Feedback pulse direction, 0: Forward; 1: Reverse
+When set to 0, it is controlled by external pulse command
+
+0 ~1048576
+1~1073741824
+
+The gear ratio takes effect only when P05-02 is set to 0
+Number of pulses per revolution
+Encoder resolution x Denominator of electronic gear ratio
+
+1~1073741824
+
+=
+
+Numerator of electronic gear ratio
+
+17-bit encoder is 131072 pulses/revolution;
+23-bit encoder is 8388608 pulses/revolution.
+
+0: Pulse + direction, positive logic:
+1: Pulse + direction, negative logic:
+3: A-phase + B-phase quadrature pulse, quadruplicated
+frequency
+4：CW+CCW
+
+P05-15
+
+Pulse command form
+
+P05-17
+
+Encoder
+frequency
+division pulse number
+
+35 ~32767
+
+P05-38
+
+Servo pulse output source
+selection
+
+0~2
+
+0: Encoder frequency division output; 1: Pulse command
+synchronous output; 2: Frequency division or
+synchronous output prohibited
+
+0~1
+
+0: Active on falling edge; 1: Active on rising edge
+
+0~4
+
+When set to 1, the default is power-on enable state
+
+P05-43
+P03-03
+
+Position
+pulse
+selection
+DI1
+terminal
+selection
+
+edge
+logic
+
+6.1.3 Parameters related to internal multi-segment position control
+1. Related DI functions can be controlled by external DI, or through virtual VDI for communication control
+DI function
+code
+
+Symbol
+
+FunIN.4
+
+CMD-SEL
+
+FunIN.6
+
+CMD1
+
+FunIN.7
+
+CMD2
+
+FunIN.8
+
+CMD3
+
+FunIN.9
+
+CMD4
+
+FunIN.27
+
+POSDirSel
+
+-19-
+
+Function name
+
+Function description
+
+Main and auxiliary running
+command switching
+Multi-segment
+running
+command switching 1
+Multi-segment
+running
+command switching 2
+Multi-segment
+running
+command switching 3
+Multi-segment
+running
+command switching 4
+Position command direction
+setting
+
+Inactive - the current running command is A;
+Active - the current running command is B
+16-segment command selection.
+16-segment command selection.
+16-segment command selection.
+16-segment command selection.
+Active - the actual direction is opposite to the
+set direction;
+
+FunIN.28
+
+PosInSen
+
+Digital Servo Drive User Manual
+position Active - enable internal multi-segment
+position.
+
+Multi-segment
+command enable
+
+2. Related parameters
+No.
+
+Parameter name
+
+Setting range
+
+P05-00
+
+Position command source
+
+0~2
+
+P11-00
+
+Multi-segment position operation
+mode
+
+0~3
+
+P11-01
+
+Number of segments at end point
+of displacement command
+
+1~16
+
+P11-02
+
+Margin processing method
+
+0~1
+
+P11-03
+
+Time unit
+Displacement command type
+selection
+Sequential operation start segment
+selection
+1st
+segment
+movement
+displacement
+The maximum running speed of
+the 1st segment displacement
+1st segment displacement
+acceleration and deceleration time
+Waiting time after the 1st segment
+displacement is completed
+
+0~1
+
+P11-04
+P11-05
+P11-12
+P11-14
+P11-15
+P11-16
+
+Functions
+When set to 2, it is internal multi-segment
+position control mode
+0: Stop after a single operation;
+1: Cyclic operation;
+2: DI switching operation;
+3: Sequential operation
+
+0: Continue to run the unfinished segment;
+1: Restart operation
+
+0:ms; 1: s
+
+0~1
+
+0: Relative displacement command;
+1: Absolute displacement command
+
+0~16
+
+Select the start segment of internal position
+sequence operation
+
+-1073741824
+~1073741824
+
+1~6000
+0~65535
+0~10000
+
+1st segment movement displacement
+The maximum running speed of the 1st segment
+displacement
+1st segment displacement acceleration and
+deceleration time
+Waiting time after the 1st segment displacement is
+completed
+
+……
+P11-87
+P11-89
+P11-90
+P11-91
+P0C-09
+
+-1073741824
+~1073741824
+
+16th segment movement displacement
+The maximum running speed of the
+16th segment displacement
+16th
+segment
+displacement
+acceleration and deceleration time
+Waiting time after the 16th segment
+displacement is completed
+
+1~6000
+0~65535
+0~10000
+
+Communication VDI
+
+0~1
+
+16th segment movement displacement
+The maximum running speed of the 16th segment
+displacement
+16th segment displacement acceleration and
+deceleration time
+Waiting time after the 16th segment displacement
+is completed
+0: Disable;
+1: Enable
+
+3. The combination method when using the DI port to switch the internal multi-segment position
+DI port combination mode
+
+Segment
+No.
+
+CMD1
+
+CMD2
+
+CMD3
+
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+
+0
+0
+0
+0
+0
+0
+0
+0
+1
+1
+1
+1
+1
+
+0
+0
+0
+0
+1
+1
+1
+1
+0
+0
+0
+0
+1
+
+0
+0
+1
+1
+0
+0
+1
+1
+0
+0
+1
+1
+0
+
+CMD4
+
+Movement
+displacement
+
+Max
+speed
+
+0
+1
+0
+1
+0
+1
+0
+1
+0
+1
+0
+1
+0
+
+P11-12
+P11-17
+P11-22
+P11-27
+P11-32
+P11-37
+P11-42
+P11-47
+P11-52
+P11-57
+P11-62
+P11-67
+P11-72
+
+P11-14
+P11-19
+P11-24
+P11-29
+P11-34
+P11-39
+P11-44
+P11-49
+P11-54
+P11-59
+P11-64
+P11-69
+P11-74
+
+Acceleration
+and
+deceleration
+Time
+P11-15
+P11-20
+P11-25
+P11-30
+P11-35
+P11-40
+P11-45
+P11-50
+P11-55
+P11-60
+P11-65
+P11-70
+P11-75
+
+Wait time
+after
+segment
+P11-16
+P11-21
+P11-26
+P11-31
+P11-36
+P11-41
+P11-46
+P11-51
+P11-56
+P11-61
+P11-66
+P11-71
+P11-76
+-20-
+
+Digital Servo Drive User Manual
+
+14
+15
+16
+
+1
+1
+1
+
+1
+1
+1
+
+0
+1
+1
+
+1
+0
+1
+
+P11-77
+P11-82
+P11-87
+
+P11-79
+P11-84
+P11-89
+
+P11-80
+P11-85
+P11-90
+
+P11-81
+P11-86
+P11-91
+
+6.2 Speed mode description
+6.2.1 Speed mode wiring diagram
+The internal 24V output
+can only supply power to
+the DI port. It is
+forbidden to supply
+power to external loads!!!
+It may cause damage to
+the internal power supply.
+
+Upper computer
+
+Servo enabled
+Positive limit switch
+Negative limit switch
+Alarm reset
+Speed direction setting
+Home fixed enable
+
+A-phase
+feedback
+B-phase
+feedback
+Z-phase
+feedback
+
+Servo ready
+
+Positioning
+completed
+Zero-velocity
+reached
+
+Fault output
+
+Home output
+
+Brake output
+
+-21-
+
+Digital Servo Drive User Manual
+Note: The DI and DO functions in this wiring diagram are not the default configuration, and need to be modified
+according to the parameters in the DI/DO port function configuration table in 6.2.2.
+
+6.2.2 Functions related to external speed mode
+1. DI/DO port function configuration
+No.
+P03-12
+P03-14
+P03-16
+P04-08
+
+Parameter name
+DI6
+terminal
+function
+selection
+DI7
+terminal
+function
+selection
+DI8 terminal function
+selection
+DO5 terminal function
+selection
+
+Set value
+12
+6
+7
+19
+
+Functions
+DI6 is defined as zero fixed enable
+DI7 is defined as multi-segment running command
+switching 1
+DI8 is defined as multi-segment running command
+switching 2
+DO5 is defined as speed reaching output
+
+2. Relevant pin wiring
+Signal
+name
+AGND
+AI1
+AGND
+AI2
+
+Corresponding CN1
+pin number
+18
+19
+16
+17
+
+Name
+
+Note or supplementary instructions
+
+Analog ground
+Analog input 1
+Analog ground
+Analog input 2
+
+Can input ±10V analog voltage as
+speed command input or torque limit
+command input.
+
+3. Related parameters
+No.
+P02-00
+P03-36
+P03-37
+
+Parameter name
+Control mode selection
+AI1 offset
+AI1 input filter time constant
+
+P03-39
+
+AI1 dead zone
+
+P03-40
+P03-41
+P03-42
+
+AI1 zero drift
+AI2 offset
+AI2 input filter time constant
+
+P03-44
+
+AI2 dead zone
+
+P03-45
+
+AI2 zero drift
+Corresponding speed value of
+analog 10V
+Corresponding torque value of
+analog 10V
+Main speed command A source
+Auxiliary speed command B
+source
+Speed command selection
+Speed
+command
+keyboard
+setting value
+Speed command acceleration
+ramp time constant
+Speed command deceleration
+ramp time constant
+Maximum speed threshold
+Forward speed threshold
+Reverse speed threshold
+Zero fixed speed threshold
+Motor rotation speed threshold
+Speed
+coincidence
+signal
+
+P03-51
+P03-52
+P06-00
+P06-01
+P06-02
+P06-03
+P06-05
+P06-06
+P06-07
+P06-08
+P06-09
+P06-15
+P06-16
+P06-17
+
+Setting range
+0~6
+-5000~5000
+0~655.35
+0~1000.0
+-500.0~500.0
+-5000~5000
+0~655.35
+0~1000.0
+-500.0~500.0
+0rpm~9000rpm
+1.00~8.00 times
+
+Functions
+Corresponding to speed mode when set to 0
+Set AI1 channel analog offset value, unit: mv
+Set AI1 analog average filter time constant, unit: ms
+Set AI1 channel analog dead zone value; when the input
+voltage is less than the set voltage, the motor speed is zero,
+unit: mv
+Set AI1 channel analog zero drift value, unit: mv
+Set AI2 channel analog offset value, unit: mv
+Set AI2 analog average filter time constant, unit: ms
+Set AI2 channel analog dead zone value; when the input
+voltage is less than the set voltage, the motor speed is zero,
+unit: mv
+Set AI2 channel analog zero drift value, unit: mv
+Set the corresponding motor output speed at analog 10V,
+unit: rpm
+Set the corresponding motor output torque at analog 10V
+
+0~2
+
+Select the source of main speed command A
+
+0~5
+
+Select the source of auxiliary speed command B
+
+0~4
+
+Select the source of speed command
+Set the value of the internal speed command, the precision
+is 1rpm
+Speed mode acceleration time, unit: ms (multi-speed
+command is inactive)
+Speed mode deceleration time, unit: ms (multi-speed
+command is inactive)
+Set the maximum speed threshold
+Set the forward speed threshold
+Set the reverse speed threshold
+Set zero speed signal detection threshold
+Set motor selection speed threshold
+Set speed coincidence detection signal threshold
+
+-6000~6000
+0~65535
+0~65535
+0~6000
+0~6000
+0~6000
+0~6000
+0~1000
+0~100
+
+-22-
+
+Digital Servo Drive User Manual
+threshold
+P06-18
+Speed reach signal threshold
+Zero-speed
+output
+signal
+P06-19
+threshold
+
+10~6000
+
+Set speed reach signal threshold
+
+1~6000
+
+Set zero-speed output signal threshold
+
+6.2.3 Internal multi-speed related functions
+1. Related DI functions can be controlled by external DI, or through virtual VDI for communication control
+DI function
+code
+
+Symbol
+
+FunIN.4
+
+CMD-SEL
+
+FunIN.5
+
+DIR-SEL
+
+FunIN.6
+
+CMD1
+
+FunIN.7
+
+CMD2
+
+FunIN.8
+
+CMD3
+
+FunIN.9
+
+CMD4
+
+Function name
+
+Function description
+
+Main and auxiliary running
+command switching
+Multi-speed DI switching
+direction
+Multi-segment
+running
+command switching 1
+Multi-segment
+running
+command switching 2
+Multi-segment
+running
+command switching 3
+Multi-segment
+running
+command switching 4
+
+Inactive - the current running command is A;
+Active - the current running command is B
+Active - command reverse direction
+16-segment command selection.
+16-segment command selection.
+16-segment command selection.
+16-segment command selection.
+
+2. Related parameters
+No.
+
+Parameter name
+
+Setting range
+
+P12-00
+
+Multi-segment
+speed
+command operation mode
+
+0~2
+
+Speed
+command
+end
+segment selection
+Running time unit selection
+1st
+segment
+speed
+command
+1st segment running time
+1st segment acceleration
+and deceleration time
+
+P12-01
+P12-02
+P12-20
+P12-21
+P12-22
+
+16th
+segment
+speed
+command
+16th segment running time
+16th segment acceleration
+and deceleration time
+
+P12-65
+P12-66
+P12-67
+
+Functions
+0- Stop after a single operation (P12-01 selects the number
+of segments)
+1- Cycle operation (P12-01 selects the number of
+segments)
+2- Switch via external DI
+
+1~16
+0~1
+
+0-sec； 1-min
+
+-6000~6000
+0~6553.5
+0~4
+……
+-6000~6000
+0~6553.5
+0~4
+
+3. Combination method when using DI port to switch internal multi-speed
+DI port combination mode
+Segment No.
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+
+-23-
+
+CMD1
+
+CMD2
+
+CMD3
+
+CMD4
+
+Internal
+speed
+
+0
+0
+0
+0
+0
+0
+0
+0
+1
+1
+1
+1
+
+0
+0
+0
+0
+1
+1
+1
+1
+0
+0
+0
+0
+
+0
+0
+1
+1
+0
+0
+1
+1
+0
+0
+1
+1
+
+0
+1
+0
+1
+0
+1
+0
+1
+0
+1
+0
+1
+
+P12-20
+P12-23
+P12-26
+P12-29
+P12-32
+P12-35
+P12-38
+P12-41
+P12-44
+P12-47
+P12-50
+P12-53
+
+Running
+Time
+P12-21
+P12-24
+P12-27
+P12-30
+P12-33
+P12-36
+P12-39
+P12-42
+P12-45
+P12-48
+P12-51
+P12-54
+
+Acceleration
+and
+deceleration
+Time
+P12-22
+P12-25
+P12-28
+P12-31
+P12-34
+P12-37
+P12-40
+P12-43
+P12-46
+P12-49
+P12-52
+P12-55
+
+Digital Servo Drive User Manual
+13
+14
+15
+16
+
+1
+1
+1
+1
+
+1
+1
+1
+1
+
+0
+0
+1
+1
+
+0
+1
+0
+1
+
+P12-56
+P12-59
+P12-62
+P12-65
+
+P12-57
+P12-60
+P12-63
+P12-66
+
+P12-58
+P12-61
+P12-64
+P12-67
+
+6.3 Torque mode description
+6.3.1 Torque mode wiring diagram
+
+The internal 24V output
+can only supply power to
+the DI port. It is
+forbidden to supply
+power to external loads!!!
+It may cause damage to
+the internal power supply.
+
+Upper computer
+
+Servo enabled
+Positive limit switch
+Negative limit switch
+Alarm reset
+Torque command direction
+Positive external torque
+limit
+Negative external torque limit
+
+A-phase
+feedback
+B-phase
+feedback
+
+Internal speed limit source
+Z-phase
+feedback
+Servo ready
+Positioning
+completed
+
+Torque limit
+
+Fault output
+
+Speed limit
+
+Torque reached
+
+-24-
+
+Digital Servo Drive User Manual
+
+Note: The DI and DO functions in this wiring diagram are not the default configuration, and need to be modified
+according to the parameters in the DI/DO port function configuration table in 6.3.2.
+
+6.3.2 Functions related to external torque mode
+1. DI/DO port function configuration
+No.
+P03-10
+P03-12
+P03-14
+P03-16
+P04-04
+P04-08
+P04-10
+
+Parameter name
+DI5 terminal function
+selection
+DI6 terminal function
+selection
+DI7 terminal function
+selection
+DI8 terminal function
+selection
+DO3 terminal function
+selection
+DO5 terminal function
+selection
+DO6 terminal function
+selection
+
+Set value
+
+Functions
+
+25
+
+DI5 is defined as torque command direction
+
+16
+
+DI6 is defined as positive external torque limit
+
+17
+
+DI7 is defined as negative external torque limit
+
+36
+
+DI8 is defined as internal speed limit source
+
+7
+
+DO3 is defined as torque limit output
+
+8
+
+DO5 is defined as speed limit output
+
+18
+
+DO6 is defined as torque reaching output
+
+2. Relevant pin wiring
+Signal
+name
+AGND
+AI1
+AGND
+AI2
+
+Corresponding CN1
+pin number
+18
+19
+16
+17
+
+Name
+
+Note or supplementary instructions
+
+Analog ground
+Analog input 1
+Analog ground
+Analog input 2
+
+±10V analog voltage can be input as
+torque command input or torque limit
+command input.
+
+3. Related parameters
+No.
+
+Parameter name
+
+Setting range
+
+Functions
+
+P02-00
+P03-50
+P03-51
+
+Control mode selection
+AI1 offset
+AI1 input filter time constant
+
+0~6
+-5000~5000
+0~655.35
+
+P03-53
+
+AI1 dead zone
+
+0~1000.0
+
+P03-54
+P03-55
+P03-56
+
+AI1 zero drift
+AI2 offset
+AI2 input filter time constant
+
+P03-58
+
+AI2 dead zone
+
+P03-59
+
+AI2 zero drift
+Corresponding speed value of
+analog 10V
+
+Corresponding to speed mode when set to 0
+Set AI1 channel analog offset value, unit: mv
+Set AI1 analog average filter time constant, unit: ms
+Set AI1 channel analog dead zone; when the input voltage is
+less than the set voltage, the motor speed is zero, unit: mv
+Set AI1 channel analog zero drift value, unit: mv
+Set AI1 channel analog offset value, unit: mv
+Set AI1 analog average filter time constant, unit: ms
+Set AI1 channel analog dead zone; when the input voltage is
+less than the set voltage, the motor speed is zero, unit: mv
+Set AI1 channel analog zero drift value, unit: mv
+Set the corresponding motor output speed at analog 10V,
+unit: rpm
+
+P03-80
+
+-25-
+
+-500.0~500.0
+-5000~5000
+0~655.35
+0~1000.0
+-500.0~500.0
+0rpm~9000rpm
+
+P03-81
+
+Corresponding torque value of
+analog 10V
+
+1.00 ~ 8.00
+times rated
+torque
+
+P07-00
+
+Main torque command A
+source
+
+0~2
+
+Set the corresponding motor output torque at analog 10V
+Select the source of main torque command A
+
+Digital Servo Drive User Manual
+P07-01
+P07-02
+P07-03
+
+Auxiliary torque command B
+source
+Torque command selection
+Torque command keyboard
+setting value
+
+0~2
+
+Select the source of auxiliary torque command B
+
+0~4
+
+Select the source of torque command
+
+-300~300
+
+Set the internal torque command for numerical setting
+
+0~4
+1~2
+0.0~300.0
+0.0~300.0
+0.0~300.0
+0.0~300.0
+0~2
+
+Select the torque limit source
+Select the analog input channel of the torque limit signal
+Forward torque limit when setting internal torque
+Reverse torque limit when setting internal torque
+Set the forward torque limit when setting external torque
+Set the reverse torque limit when setting external torque
+Select the source of speed limit in torque mode
+The analog channel when V-LMT is selected as the speed
+limit source
+
+Digital Servo Drive User Manual
+P07-07
+P07-08
+P07-09
+P07-10
+P07-11
+P07-12
+P07-17
+
+Torque limit source
+T-LMT selection
+Positive internal torque limit
+Negative internal torque limit
+Positive external torque limit
+Negative external torque limit
+Speed limit source selection
+
+P07-18
+
+V-LMT selection
+
+P07-19
+
+P07-20
+P07-21
+P07-22
+P07-23
+
+Torque control forward speed
+limit value/torque control
+speed limit value 1
+Negative speed limit value in
+torque control/speed limit
+value 2 in torque control
+Torque reaching reference
+value
+Torque reaching active value
+Torque reaching inactive
+value
+
+1~2
+0~6000
+
+Forward speed limit value in set torque mode/speed limit
+value 1 in set torque mode
+
+0~6000
+
+Reverse speed limit value in set torque mode/speed limit
+value 2 in set torque mode
+
+0.0~300.0
+
+Set torque reaching command reference value
+
+0.0~300.0
+
+Set the torque reaching command active offset threshold
+
+0.0~300.0
+
+Set the torque reaching command inactive offset threshold
+
+-26-
+
+6.4 Detailed description of DI/DO port function configuration
+6.4.1 DI function description
+1. DI port configuration parameters:
+Function selection
+
+DI port
+No.
+P03-02
+P03-04
+P03-06
+P03-08
+P03-10
+P03-12
+P03-14
+P03-16
+
+DI1
+DI2
+DI3
+DI4
+DI5
+DI6
+DI7
+DI8
+
+Initial value
+1
+14
+15
+2
+26
+34
+31
+32
+
+Function description
+Servo enabled
+Positive overtravel switch
+Reverse overtravel switch
+Fault and warning reset
+Speed command direction setting
+Emergency shutdown
+Home switch
+Homing enable
+
+Logic level
+No.
+P03-03
+P03-05
+P03-07
+P03-09
+P03-11
+P03-13
+P03-15
+P03-17
+
+Initial value
+0
+0
+0
+0
+0
+0
+0
+0
+
+2. DI port function command table
+Code
+
+Name
+
+Function name
+
+Description
+
+Inactive- Servo motor enable is prohibited;
+Active - Servo motor power-on enable.
+
+FunIN.1
+
+S-ON
+
+Servo enabled
+
+FunIN.2
+
+ALM-RST
+
+Fault
+and
+warning reset Inactive- disabled;
+(edge
+active Active - enabled.
+function)
+
+-27-
+
+Remarks
+The logic of the terminals must be set to:
+Active level.
+When the DI or VDI terminal
+corresponding to this function is changed,
+or the logic selection of the corresponding
+terminal is changed,
+the change will take effect after the power
+is turned on again.
+The logic of the terminal must be set to:
+Edge active. If active level is selected,
+the drive is forced to set to edge active
+internally.
+According to the alarm type, the servo can
+continue to work after some alarms are
+reset.
+For NO.1 and NO.2 resettable fault, it is
+necessary to turn off the servo enable
+signal (S-ON is set to OFF) before using
+this function.
+
+Digital Servo Drive User Manual
+
+FunIN.3
+
+GAIN-SEL
+
+FunIN.4
+
+CMD-SEL
+
+FunIN.5
+
+DIR-SEL
+
+FunIN.6
+
+CMD1
+
+FunIN.7
+
+CMD2
+
+FunIN.8
+
+CMD3
+
+FunIN.9
+
+CMD4
+
+Gain switching
+
+Main
+and
+auxiliary
+Inactive - the current running command is A;
+running
+Active - The current run command is B.
+command
+switching
+Multi-speed DI
+switching
+Inactive- Default command direction;
+Active- Command reverse direction.
+running
+direction setting
+Multi-segment
+running
+16-segment command selection.
+command
+switching 1
+Multi-segment
+running
+16-segment command selection.
+command
+switching 2
+Multi-segment
+running
+16-segment command selection.
+command
+switching 3
+Multi-segment
+running
+16-segment command selection.
+command
+switching 4
+
+FunIN.10
+
+M1-SEL
+
+FunIN.11
+
+M2-SEL
+
+FunIN.12
+
+ZCLAMP
+
+FunIN.13
+
+INHIBIT
+
+FunIN.14
+
+P-OT
+
+FunIN.15
+
+N-OT
+
+FunIN.16
+
+P-CL
+
+When P08-09=1:
+Inactive- The speed control loop is PI control;
+Active - The speed control loop is P control.
+When P08-09=2:
+Inactive- Fixed to first set of gains;
+Active - Fixed to second set of gains.
+
+The logic selection of the corresponding
+terminal is recommended to be set as:
+Active level.
+
+The logic selection of the corresponding
+terminal is recommended to be set as:
+Active level.
+The logic selection of the corresponding
+terminal is recommended to be set as:
+Active level.
+The logic selection of the corresponding
+terminal is recommended to be set as:
+Active level.
+The logic selection of the corresponding
+terminal is recommended to be set as:
+Active level.
+The logic selection of the corresponding
+terminal is recommended to be set as:
+Active level.
+The logic selection of the corresponding
+terminal is recommended to be set as:
+Active level.
+
+The logic selection of the corresponding
+Mode switching Switch among speed, position and torque
+terminal is recommended to be set as:
+1
+according to the selected control mode (3, 4, 5).
+Active level.
+The logic selection of the corresponding
+Mode switching Switch among speed, position and torque
+terminal is recommended to be set as:
+2
+according to the selected control mode (6).
+Active level.
+The logic selection of the corresponding
+Home
+fixed Active- Enable zero position fix function;
+terminal is recommended to be set as:
+enable
+Inactive- Disable zero position fix function.
+Active level.
+Internal and external position commands
+Position
+Active - Prohibit command pulse input;
+are prohibited from running. The logic
+command
+Inactive- Allow command pulse input.
+selection of the terminal must be set as:
+disable
+active level.
+When the mechanical movement exceeds
+Positive
+the movable range, it enters the overtravel
+Active- Prohibit forward drive;
+overtravel
+prevention function: the logic selection of
+Inactive- Allow forward drive.
+switch
+the
+corresponding
+terminal
+is
+recommended to set to: active level.
+Reverse
+The logic selection of the corresponding
+Active - Prohibit reverse drive;
+overtravel
+terminal is recommended to be set as:
+Inactive- Allow reverse drive.
+switch
+Active level.
+Switch the torque limit source according to
+P07-07.
+When P07-07=1:
+Active- Forward external torque limit is active ;
+Inactive- Forward internal torque limit is active .
+Positive
+The logic selection of the corresponding
+P07-07=3 and the AI limit value is greater than
+external torque
+terminal is recommended to be set as:
+the forward external limit value:
+limit
+Active level.
+Active- Forward external torque limit is active ;
+Inactive - AI torque limit is active .
+When P07-07=4:
+Active - AI torque limit is active ;
+Inactive- Forward internal torque limit is active .
+
+-28-
+
+Digital Servo Drive User Manual
+
+FunIN.17
+
+N-CL
+
+Switch the torque limit source according to
+P07-07.
+When P07-07=1:
+Active- Reverse external torque limit is active;
+Inactive- Reverse internal torque limit is active.
+Negative
+The logic selection of the corresponding
+P07-07=3 and the AI limit value is less than the
+external torque
+terminal is recommended to be set as:
+reverse external limit value:
+limit
+Active level.
+Active- Reverse external torque limit is active.
+Inactive - AI torque limit is active .
+When P07-07=4:
+Active - AI torque limit is active ;
+Inactive- Reverse internal torque limit is active.
+
+FunIN.18
+
+JOGCMD+
+
+Forward jog
+
+Active- Input according to the given command;
+Inactive- Running command stops input.
+
+FunIN.19
+
+JOGCMD-
+
+Negative jog
+
+Active- Reverse input according to the given The logic selection of the corresponding
+command;
+terminal is recommended to be set as:
+Inactive- Running command stops input.
+Active level.
+
+FunIN.20
+
+POSSTEP
+
+Active- Execute the command of step size;
+The logic selection of the corresponding
+Step size enable Inactive- The command is zero, which is the terminal is recommended to be set as:
+positioning state.
+Edge active.
+
+FunIN.21
+
+HX1
+
+FunIN.22
+
+HX2
+
+FunIN.23
+
+The logic selection of the corresponding
+terminal is recommended to be set as:
+Active level.
+
+Handwheel
+magnification
+signal 1
+Handwheel
+magnification
+signal 2
+
+*10 times: HX1 is active, HX2 is inactive
+*100 times: HX1 is inactive , HX2 is active
+
+HX_EN
+
+Handwheel
+enable signal
+
+Inactive- Select position control according to
+The logic selection of the corresponding
+P05-00;
+terminal is recommended to be set as:
+Active- Receive handwheel pulse signal
+Active level.
+in location mode for position control.
+
+FunIN.24
+
+GEAR_SEL
+
+Electronic gear Inactive- Electronic gear ratio 1;
+selection
+Active- Electronic gear ratio 2.
+
+FunIN.25
+
+TOQDirSel
+
+FunIN.26
+
+SPDDirSel
+
+FunIN.27
+
+POSDirSel
+
+FunIN.28
+
+PosInSen
+
+FunIN.29
+
+XintFree
+
+FunIN.31
+
+HomeSwitch
+
+FunIN.32
+
+HomingStart
+
+-29-
+
+Torque
+command
+direction setting
+Speed
+command
+direction setting
+
+Inactive- Positive direction;
+Active - Reverse direction.
+Inactive- Positive direction;
+Active - Reverse direction.
+
+The logic selection of the corresponding
+terminal is recommended to be set as:
+Active level.
+
+The logic selection of the corresponding
+terminal is recommended to be set as:
+Active level.
+The logic selection of the corresponding
+terminal is recommended to be set as:
+Active level.
+The logic selection of the corresponding
+terminal is recommended to be set as:
+Active level.
+
+Inactive, the actual position command direction
+Position
+is the same as the set position command The logic selection of the corresponding
+command
+direction;
+terminal is recommended to be set as:
+direction setting Active, the actual position command direction is Active level.
+opposite to the set position command direction;
+Multi-segment Edge active
+The logic selection of the corresponding
+position
+Inactive- Ignore internal multi-segment
+terminal is recommended to be set as:
+command
+commands;
+Active level.
+enable
+Active- Initiate internal multi-segment.
+Interrupt
+The logic selection of the corresponding
+Inactive- disabled;
+fixed-length
+terminal is recommended to be set to:
+Active - enabled.
+state release
+Edge active.
+The logic selection of the corresponding
+terminal must be set to: active level.
+If it is set to 2 (rising edge active), the
+drive will be forced to change to 1 (high
+level active);
+Inactive- not trigger;
+Home switch
+If it is set to 3 (falling edge active), the
+Active - Trigger.
+drive will be forced to change to 0 (low
+level active);
+If it is set to 4 (both rising edge and
+falling edge active), the drive will be
+forced to change to 0 (low level active)
+The logic selection of the corresponding
+Inactive- disabled;
+Homing enable
+terminal is recommended to be set to:
+Active - enabled.
+Edge active.
+
+Digital Servo Drive User Manual
+The logic selection of the corresponding
+terminal must be set to: active level.
+If it is set to 2 (rising edge active), the
+drive will be forced to change to 1 (high
+level active);
+Interrupt fixed Active - Prohibit interrupt fixed length;
+If it is set to 3 (falling edge active), the
+length disable
+Inactive- Allow interrupt fixed length.
+drive will be forced to change to 0 (low
+level active);
+If it is set to 4 (both rising edge and
+falling edge active), the drive will be
+forced to change to 0 (low level active)
+Active - Lock position after zero speed stop;
+The logic selection of the corresponding
+Emergency
+Inactive- Has no effect on the current running terminal is recommended to be set as:
+shutdown
+state.
+Active level.
+The logic selection of the corresponding
+terminal is recommended to be set to:
+Clear position Active - Position deviation is cleared;
+Edge active.
+deviation
+Inactive- Position deviation is not cleared.
+It is recommended to configure this DI
+function to DI8 or DI9 terminal.
+
+FunIN.33
+
+XintInhibit
+
+FunIN.34
+
+Emergency
+Stop
+
+FunIN.35
+
+ClrPosErr
+
+FunIN.36
+
+V_LmtSel
+
+Active - P07-19 is used as internal positive and
+The logic selection of the corresponding
+Internal speed negative speed limit value (P07-17=2)
+terminal is recommended to be set as:
+limit source
+Inactive- P07-20 is used as internal positive and
+Active level.
+negative speed limit value (P07-17=2)
+
+FunIN.37
+
+Pulselnhibit
+
+In position control mode, when the source of
+position command is pulse command The logic selection of the corresponding
+Pulse command
+(P05-00=0):
+terminal is recommended to be set as:
+prohibition
+Inactive- Respond to pulse commands;
+Active level.
+Active - Not respond to pulse commands;
+
+6.4.2 DO function description
+1. DO port configuration parameters:
+DI port
+
+Function selection
+
+Logic level
+
+No.
+
+Initial value
+
+No.
+
+Initial value
+
+DO1
+
+P04-00
+
+1
+
+Servo ready
+
+Function description
+
+P04-01
+
+0
+
+DO2
+
+P04-02
+
+5
+
+Positioning completed
+
+P04-03
+
+0
+
+DO3
+
+P04-04
+
+3
+
+Zero speed
+
+P04-05
+
+0
+
+DO4
+
+P04-06
+
+11
+
+Fault output
+
+P04-07
+
+0
+
+DO5
+
+P04-08
+
+16
+
+Homing output
+
+P04-09
+
+0
+
+DO6
+
+P04-10
+
+9
+
+Brake output
+
+P04-11
+
+0
+
+2. DO port function command table
+Code
+
+Name
+
+Function name
+
+FunOUT.1
+
+S-RDY
+
+Servo ready
+
+FunOUT.2
+
+TGON
+
+Motor rotation output
+
+FunOUT.3
+
+ZERO
+
+Zero speed
+
+Description
+Servo status is ready to receive S-ON active signal:
+Active - Servo is ready;
+Inactive- Servo is not ready.
+Inactive, the absolute value of the motor speed after filtering is less than the set
+value of function code P06-16;
+Active, the absolute value of the motor speed after filtering reaches the set
+value of function code P06-16.
+Inactive, when the speed feedback of the motor is greater than the value set by
+function code P06-19;
+Active, when the difference between the speed feedback of the motor and the
+given value is greater than the value set by function code P06-19.
+
+-30-
+
+Digital Servo Drive User Manual
+In speed control, it is active when the absolute value of the difference between
+the speed of the servo motor and the speed command is less than the set value
+of P06-17 speed deviation.
+In position control, it is active when the position deviation pulse reaches the
+positioning completion range P05-21.
+
+FunOUT.4
+
+V-CMP
+
+Speed coincidence
+
+FunOUT.5
+
+COIN
+
+Positioning completed
+
+FunOUT.6
+
+NEAR
+
+Positioning approach
+
+FunOUT.7
+
+C-LT
+
+Torque limit
+
+FunOUT.8
+
+V-LT
+
+Speed limit
+
+FunOUT.9
+
+BK
+
+Brake output
+
+Brake signal output:
+Valid - close, release the brake;
+Invalid - Activate the brake.
+
+FunOUT.10
+
+WARN
+
+Warning output
+
+Warning output signal is active. (On)
+
+FunOUT.11
+
+ALM
+
+Fault output
+
+Status active when a fault is detected.
+
+FunOUT.12
+
+ALMO1
+
+FunOUT.13
+
+ALMO2
+
+FunOUT.14
+
+ALMO3
+
+In position control, it is active when the position deviation pulse reaches the
+setting of the positioning approach signal amplitude P05-22.
+Confirmation signal of torque limit: Active - motor torque is limited; Inactive motor torque is not limited.
+Acknowledgement signal of speed limitation in torque control:
+Active - Motor speed is limited;
+Inactive - Motor speed is not limited.
+
+Outputs 3-digit alarm
+code
+Outputs 3-digit alarm
+code
+Outputs 3-digit alarm
+code
+
+Outputs 3-digit alarm code.
+Outputs 3-digit alarm code.
+Outputs 3-digit alarm code.
+
+FunOUT.15
+
+Xintcoin
+
+Interrupt fixed length
+completion
+
+FunOUT.16
+
+HomeAttain
+
+Homing output
+
+Homing status: Active - Homing;
+Inactive - Home is not reset.
+
+FunOUT.17
+
+ElecHome
+Attain
+
+Electrical
+output
+
+homing
+
+Electrical homing status:
+Active - Electrical home is reset;
+Inactive - Electrical home is not reset.
+
+FunOUT.18
+
+ToqReach
+
+Torque
+output
+
+reaching
+
+FunOUT.19
+
+V-Arr
+
+Speed reaching output
+
+Active - Speed feedback reaches the set value; Inactive - Speed feedback does
+not reach the set value.
+
+FunOUT.20
+
+AngIntRdy
+
+Angle
+output
+
+Active - Angle identification completed
+Inactive - Angle identification not completed
+
+FunOUT.21
+
+DB
+
+DB brake output
+
+Active - Dynamic brake relay disconnected
+Inactive - Dynamic brake relay pickup
+
+FunOUT.22
+
+CmdOk
+
+Internal
+output
+
+Active - Internal command completed
+Inactive - Internal command not completed
+
+-31-
+
+identification
+
+command
+
+Active - Interrupt fixed length positioning completed;
+Inactive - Interrupt fixed length positioning is not completed.
+
+Active - The absolute value of torque reaches the set value;
+Inactive - The absolute value of torque is less than the set value.
+
+Digital Servo Drive User Manual
+
+Chapter VII Parameter Description
+7.1 P01 set drive parameters
+Functional code
+P01-00
+P01-01
+P01-02
+
+Name
+MCU software version
+Reserved
+Servo drive number
+
+Setting range
+
+Unit
+
+0~65535
+0~65535
+0~65535
+
+-
+
+Default
+setting
+-
+
+Effective
+method
+Power on again
+
+setting
+method
+Display
+Display
+Stop setting
+
+Related
+mode
+-
+
+7.2 P02 set basic control parameters
+Functional
+code
+
+P02-00
+
+Control mode selection
+
+P02-01
+
+Encoder type selection
+
+P02-02
+
+Rotation direction selection
+
+P02-03
+
+Output pulse phase
+
+P02-05
+
+Servo enable OFF stop
+mode selection
+
+P02-06
+
+Fault No.2 stop mode
+selection
+
+P02-07
+
+Overtravel stop mode
+selection
+
+P02-08
+P02-09
+P02-10
+P02-11
+P02-12
+P02-15
+P02-18
+P02-21
+P02-22
+P02-23
+
+Unit
+
+Default
+setting
+
+Effective
+method
+
+setting
+method
+
+Related
+mode
+
+-
+
+1
+
+Effective
+immediately
+
+Stop
+setting
+
+-
+
+-
+
+0
+
+Power on again
+
+Stop
+setting
+
+ALL
+
+-
+
+0
+
+Power on again
+
+Stop
+setting
+
+PST
+
+-
+
+0
+
+Power on again
+
+Stop
+setting
+
+PST
+
+-
+
+0
+
+Effective
+immediately
+
+Stop
+setting
+
+PST
+
+-
+
+0
+
+Effective
+immediately
+
+Stop
+setting
+
+PST
+
+-
+
+1
+
+Effective
+immediately
+
+Stop
+setting
+
+PST
+
+0: Free stop, keep free running state
+
+-
+
+0
+
+0~500
+
+ms
+
+250
+
+Effective
+immediately
+Effective
+immediately
+
+Stop
+setting
+Running
+setting
+
+1~1000
+
+ms
+
+150
+
+Effective
+immediately
+
+Running
+setting
+
+PS
+
+0~3000
+
+rpm
+
+30
+
+Effective
+immediately
+
+Running
+setting
+
+PS
+
+1~1000
+
+ms
+
+500
+
+Effective
+immediately
+
+Running
+setting
+
+PS
+
+0: Output warning information
+immediately
+1: Do not output warning information
+
+-
+
+0
+
+Effective
+immediately
+
+Stop
+setting
+
+PST
+
+0~64
+
+ms
+
+0
+
+Effective
+immediately
+
+Stop
+setting
+
+PST
+
+-
+
+Ω
+
+-
+
+-
+
+Display
+
+PST
+
+-
+
+W
+
+-
+
+-
+
+Display
+
+PST
+
+-
+
+Ω
+
+-
+
+-
+
+Display
+
+PST
+
+Name
+
+Fault No.1 stop mode
+selection
+Brake output ON to
+command receiving delay
+Standstill state, delay time
+from brake output OFF to
+motor power off
+Rotating state, speed
+threshold value when brake
+output is OFF
+Rotating state, delay time
+from servo enable OFF to
+brake output OFF
+LED warning display
+selection
+Servo enable (S-ON)
+Filtering time constant
+Minimum braking
+resistance allowed by the
+drive
+Power of built-in braking
+resistor
+Resistance of built-in
+braking resistor
+
+Setting range
+0: Speed mode
+1: Position mode
+2: Torque mode
+3: Torque mode ↔ speed mode
+4: Speed mode↔position mode
+5: Torque mode↔position mode
+6: Torque↔speed↔position hybrid
+mode
+0: Incremental encoder
+1: Absolute value encoder
+0: CCW direction is the forward
+rotation direction (A leads B)
+1: CW direction is the forward rotation
+direction (A lags B)
+0: CCW direction is the forward
+rotation direction
+(A leads B)
+1: CW direction is the forward rotation
+direction
+(reverse mode, A lags B)
+0: Free stop, keep free running state
+1: Stop at zero speed, keep free
+running state
+0: Free stop, keep free running state
+1: Stop at zero speed, keep free
+running state
+0: Free stop, keep free running state
+1: Stop at zero speed, position remains
+locked
+2: Stop at zero speed, keep free
+running state
+
+PST
+PS
+
+-32-
+
+Digital Servo Drive User Manual
+P02-24
+
+P02-25
+
+P02-26
+P02-27
+P02-31
+P02-32
+P02-38
+P02-39
+P02-41
+
+Resistor heat dissipation
+coefficient
+
+Braking resistor setting
+
+Power of external braking
+resistor
+Resistance of external
+braking resistor
+Initialize system parameters
+Panel default display
+function
+Fault short circuit braking
+time
+Fault short circuit braking
+threshold
+Factory parameter password
+
+10~100
+
+%
+
+30
+
+Effective
+immediately
+
+Stop
+setting
+
+PST
+
+0: Use built-in braking resistor
+1: Use external braking resistor,
+natural cooling
+2: Use external braking resistor, forced
+air cooling
+3: No braking resistor, rely on
+capacitor absorption
+
+-
+
+0
+
+Effective
+immediately
+
+Stop
+setting
+
+PST
+
+1~65535
+
+W
+
+-
+
+1~1000
+
+Ω
+
+-
+
+0: No operation
+1: Restore default value (except
+P00/P01 set)
+2: Clear fault records
+
+Effective
+immediately
+Effective
+immediately
+
+Stop
+setting
+Stop
+setting
+
+-
+
+0
+
+Effective
+immediately
+
+Stop
+setting
+
+0~99
+
+-
+
+50
+
+0~30000
+
+ms
+
+5000
+
+0-3000
+
+0.1%
+
+1000
+
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+
+0~65535
+
+-
+
+0
+
+Running
+setting
+Running
+setting
+Running
+setting
+Stop
+setting
+
+Power on again
+
+PST
+PST
+PST
+PST
+PST
+PST
+
+7.3 P03 set terminal input parameters
+Functional
+code
+
+Name
+
+P03-00
+
+Power-on valid DI functions
+Assignment 1
+
+P03-01
+
+Power-on valid DI functions
+Assignment 2
+
+P03-02
+
+DI1 terminal function
+selection
+
+Unit
+
+Default
+setting
+
+Effective
+method
+
+Setting
+method
+
+Related
+mode
+
+-
+
+0
+
+Power on
+again
+
+Running
+setting
+
+-
+
+-
+
+0
+
+Power on
+again
+
+Running
+setting
+
+-
+
+0~37
+
+-
+
+14
+
+Effective at
+stop
+
+Running
+setting
+
+-
+
+Input polarity: 0~4
+0- Means active low
+1- Means active high
+2- Means active on rising edge
+3- Means active on falling edge
+4- Means active on both rising and falling
+edges
+
+-
+
+0
+
+Effective at
+stop
+
+Running
+setting
+
+-
+
+0~37
+
+-
+
+15
+
+Effective at
+stop
+Effective at
+stop
+Effective at
+stop
+Effective at
+stop
+Effective at
+stop
+Effective at
+stop
+Effective at
+stop
+Effective at
+stop
+Effective at
+stop
+Effective at
+stop
+Effective at
+stop
+Effective at
+stop
+Effective at
+stop
+
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+
+Setting range
+0~0xFFFF
+Bit0- Corresponding to FunIN.1
+Bit1- Corresponding to FunIN.2
+……
+Bit15- Corresponding to FunIN.16
+0~0xFFFF
+Bit0- Corresponding to FunIN.17
+Bit1- Corresponding to FunIN.18
+……
+Bit15- Corresponding to FunIN.32
+
+P03-03
+
+DI1 terminal logic selection
+
+P03-04
+
+DI2 terminal function
+selection
+
+P03-05
+
+DI2 terminal logic selection
+
+Refer to the description of P03-03
+
+-
+
+0
+
+P03-06
+
+DI3 terminal function
+selection
+
+0~37
+
+-
+
+13
+
+P03-07
+
+DI3 terminal logic selection
+
+Refer to the description of P03-03
+
+-
+
+0
+
+P03-08
+
+DI4 terminal function
+selection
+
+0~37
+
+-
+
+2
+
+P03-09
+
+DI4 terminal logic selection
+
+Refer to the description of P03-03
+
+-
+
+0
+
+P03-10
+
+DI5 terminal function
+selection
+
+0~37
+
+-
+
+1
+
+P03-11
+
+DI5 terminal logic selection
+
+Refer to the description of P03-03
+
+-
+
+0
+
+P03-12
+
+DI6 terminal function
+selection
+
+0~37
+
+-
+
+12
+
+P03-13
+
+DI6 terminal logic selection
+
+Refer to the description of P03-03
+
+-
+
+0
+
+P03-14
+
+DI7 terminal function
+selection
+
+0~37
+
+-
+
+3
+
+P03-15
+
+DI7 terminal logic selection
+
+Refer to the description of P03-03
+
+-
+
+0
+
+P03-16
+
+DI8 terminal function
+selection
+
+0~37
+
+-
+
+31
+
+-33-
+
+-
+
+Digital Servo Drive User Manual
+P03-17
+
+DI8 terminal logic selection
+
+Refer to the description of P03-03
+0~0xFFFF
+Bit0- Corresponding to FunIN.33
+Bit1- Corresponding to FunIN.34
+……
+Bit15- Corresponding to FunIN.48
+0~0xFFFF
+Bit0- Corresponding to FunIN.49
+Bit1- Corresponding to FunIN.50
+……
+Bit15- Corresponding to FunIN.64
+
+-
+
+0
+
+Effective at
+stop
+
+Running
+setting
+
+-
+
+-
+
+0
+
+Power on
+again
+
+Running
+setting
+
+-
+
+-
+
+0
+
+Power on
+again
+
+Running
+setting
+
+-
+
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Stop
+setting
+Stop
+setting
+
+P03-34
+
+Power-on valid DI functions
+Assignment 3
+
+P03-35
+
+Power-on valid DI functions
+Assignment 4
+
+P03-50
+
+AI1 offset
+
+-5000~5000
+
+mV
+
+0
+
+P03-51
+
+AI1 input filter time
+Constant
+
+0~655.35
+
+ms
+
+2.00
+
+P03-53
+
+AI1 dead zone
+
+0~1000.0
+
+mV
+
+10.0
+
+P03-54
+
+AI1 zero drift
+
+-500.0~500.0
+
+mV
+
+0.0
+
+P03-55
+
+AI2 offset
+
+-5000~5000
+
+mV
+
+0
+
+P03-56
+
+AI2 input filter time
+Constant
+
+0~655.35
+
+ms
+
+2.00
+
+P03-58
+
+AI2 dead zone
+
+0~1000.0
+
+mV
+
+10.0
+
+P03-59
+
+AI2 zero drift
+
+-500.0~500.0
+
+mV
+
+0.0
+
+0rpm~9000rpm
+
+1rpm
+
+3000rpm
+
+-
+
+1.00
+
+P03-80
+P03-81
+
+Analog 10V corresponding
+speed value
+Analog 10V corresponding
+torque value
+
+1.00 ~ 8.00 times rated torque
+
+-
+
+7.4 P04 set terminal output parameters
+Functional
+code
+P04-00
+
+P04-01
+
+DO1 terminal logic
+selection
+
+P04-02
+P04-03
+P04-04
+P04-05
+P04-06
+P04-07
+P04-08
+P04-09
+P04-10
+P04-11
+P04-22
+
+Unit
+
+Factory
+setting
+
+Effective method
+
+-
+
+1
+
+Effective at stop
+
+-
+
+0
+
+Effective at stop
+
+0~22
+
+-
+
+5
+
+Effective at stop
+
+Refer to the description of P04-01
+
+-
+
+0
+
+Effective at stop
+
+0~22
+
+-
+
+3
+
+Effective at stop
+
+Refer to the description of P04-01
+
+-
+
+0
+
+Effective at stop
+
+0~22
+
+-
+
+11
+
+Effective at stop
+
+Refer to the description of P04-01
+
+-
+
+0
+
+Effective at stop
+
+0~22
+
+-
+
+16
+
+Effective at stop
+
+Refer to the description of P04-01
+
+-
+
+0
+
+Effective at stop
+
+0~22
+
+-
+
+0
+
+Effective at stop
+
+Refer to the description of P04-01
+
+-
+
+0
+
+Effective at stop
+
+0
+
+Effective
+immediately
+
+Name
+DO1 terminal
+function selection
+
+DO2 terminal
+function selection
+DO2 terminal logic
+selection
+DO3 terminal
+function selection
+DO3 terminal logic
+selection
+DO4 terminal
+function selection
+DO4 terminal logic
+selection
+DO5 terminal
+function selection
+DO5 terminal logic
+selection
+DO6 terminal
+function selection
+DO6 terminal logic
+selection
+DO source selection
+
+Setting range
+Refer to chapter 6.4.2
+0~22
+Output polarity reversal setting: 0~1
+0- Output L low level when active
+(optocoupler is turned on)
+1- Output H high level when active
+(optocoupler is turned off)
+
+0~31, set the DO port to be controlled by
+the drive or P31-4
+
+-
+
+Setting
+method
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Stop setting
+
+Related
+mode
+-
+
+-
+
+-
+
+7.5 P05 set position control parameters
+Functional
+code
+
+Name
+
+P05-00
+
+Position command source
+
+Setting range
+012-
+
+Pulse command
+Step value given
+Multi-segment position command given
+
+Unit
+
+Default
+setting
+
+Effective
+method
+
+Setting
+method
+
+Related
+mode
+
+-
+
+0
+
+Effective
+immediately
+
+Stop
+setting
+
+P
+
+-34-
+
+Digital Servo Drive User Manual
+
+P05-02
+P05-04
+
+Number of position
+commands per motor
+rotation
+First-order low-pass filter
+time constant
+
+0 ~1048576
+
+P/r
+
+0
+
+Power on
+again
+
+Stop
+setting
+
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+
+P
+
+0~6553.5
+
+ms
+
+0.0
+
+P05-05
+
+Step amount
+
+-9999 ~9999
+
+Command
+Unit
+
+50
+
+P05-06
+
+Average filter time constant
+
+0.0~128.0
+
+ms
+
+0.0
+
+1~1073741824
+
+-
+
+1048576
+
+1~1073741824
+
+-
+
+10000
+
+1~1073741824
+
+-
+
+1048576
+
+1~1073741824
+
+-
+
+10000
+
+-
+
+0
+
+Power on
+again
+
+Stop
+setting
+
+P
+
+-
+
+0
+
+Effective
+immediately
+
+Stop
+setting
+
+P
+
+P/r
+
+2500
+
+Power on
+again
+
+Stop
+setting
+
+-
+
+-
+
+1
+
+Effective
+immediately
+
+Stop
+setting
+
+P
+
+-
+
+0
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+Effective
+immediately
+Effective
+immediately
+
+Running
+setting
+Running
+setting
+
+Effective
+immediately
+
+Running
+setting
+
+P05-07
+P05-09
+P05-11
+P05-13
+
+Electronic gear ratio 1
+(numerator)
+Electronic gear ratio 1
+(denominator)
+Electronic gear ratio 2
+(numerator)
+Electronic gear ratio 2
+(denominator)
+
+P05-15
+
+Pulse command form
+
+P05-16
+
+Clear action selection
+
+P05-17
+
+Encoder frequency division
+pulse number
+
+P05-19
+
+Speed feedforward control
+selection
+
+P05-20
+
+Positioning complete output
+condition
+
+P05-21
+P05-22
+
+P05-30
+
+-35-
+
+Positioning completion
+threshold
+Positioning proximity
+threshold
+
+Homing enable control
+
+0- Pulse + direction, positive logic
+1- Pulse + direction, negative logic
+2- A-phase + B-phase quadrature pulse,
+quadruplicated frequency
+3- CW+CCW
+0- Servo enable OFF or clear position
+deviation when fault occurs
+1- Clear position deviation pulse when
+fault or warning occurs
+2- Enable OFF and clear position
+deviation through DI input ClrPosErr signal
+35 ~32767
+0- No speed feedforward
+1- Internal speed feedforward
+2- Use AI1 as speed feedforward input
+3- Use AI2 as speed feedforward input
+0- Output when the absolute value of
+position deviation is less than P05-21
+1- Output when the absolute value of the
+position deviation is less than P05-21 and
+the position command after filtering is 0
+2- Output when the absolute value of the
+position deviation is less than P05-21 and
+the position command before filtering is 0
+3- Output when the absolute value of the
+position deviation is less than the
+positioning completion/proximity threshold
+and the position command filter is 0, active
+at least within the time set by P05-60
+1 ~65535
+1 ~65535
+0- Disable homing
+1- Input HomingStart signal through DI to
+enable homing function
+2- Input HomingStart signal through DI to
+enable electrical reset function
+3- Start homing immediately after
+power-on
+4- Start homing immediately
+5- Start homing command
+6- Use current position as the home
+8- Through the DI input signal, enable
+current position as the home
+
+Encoder
+Unit
+Encoder
+Unit
+
+-
+
+734
+65535
+
+0
+
+P
+P
+P
+P
+P
+P
+P
+
+P
+P
+
+P
+
+Digital Servo Drive User Manual
+
+P05-31
+
+P05-32
+P05-33
+P05-34
+
+Homing mode
+
+Speed of high-speed search
+home switch signal
+Speed of low-speed search
+home switch signal
+Acceleration and
+deceleration time when
+searching for home
+
+0- Positive homing, deceleration point and
+home are home switch
+1- Reverse homing, deceleration point and
+home are home switch
+2- Positive homing, deceleration point and
+home are the motor Z signal
+3- Reverse homing, deceleration point and
+home are motor Z signal
+4- Positive homing, deceleration point is
+home switch, home is motor Z signal
+5- Reverse homing, deceleration point is
+home switch, home is motor Z signal
+6- Positive homing, deceleration point and
+home are positive overtravel switch
+7- Reverse homing, deceleration point and
+home are reverse overtravel switch
+8- Positive homing, deceleration point is
+forward overtravel switch, home is motor Z
+signal
+9- Reverse homing, deceleration point is
+reverse overtravel switch, home is motor Z
+signal
+10- Positive homing, deceleration point and
+home are mechanical limit positions
+11- Reverse homing, deceleration point and
+home are mechanical limit positions
+12- Positive homing, deceleration point is
+mechanical limit position, home is the motor
+Z signal
+13- Reverse homing, deceleration point is
+mechanical limit position, home is the motor
+Z signal
+
+-
+
+0
+
+0~3000
+
+rpm
+
+100
+
+0~1000
+
+rpm
+
+10
+
+0~1000
+
+ms
+
+P05-35
+
+Limit the time to find the
+home
+
+0~65535
+
+P05-36
+
+Machine home offset
+
+-1073741824 ~1073741824
+
+P05-38
+
+Servo pulse output source
+selection
+
+P05-39
+
+Electronic gear ratio
+switching condition
+
+P05-40
+
+Offset of mechanical home
+and processing method
+when encountering limit
+
+P05-43
+P05-46
+
+Position pulse edge
+selection
+Absolute position linear
+mode position offset (lower
+32 bits)
+
+0- Encoder frequency division output
+1- Pulse command synchronous output
+2- Prohibit frequency division or
+synchronization output
+0- The position command (referring to
+only the unit) is 0, and switch after 2.5ms
+1- Real-time switching
+0- P05-36 is the coordinate after homing,
+homing enable will be re-triggered to find
+home in reverse direction in case of limit
+1- P05-36 is the relative offset after
+homing, homing enable will be re-triggered
+to find home in reverse direction in case of
+limit
+2- P05-36 is the coordinate after homing,
+it will automatically perform homing in the
+reverse direction in case of limit
+3- P05-36 is the relative offset after
+homing, it will automatically
+perform homing in the reverse direction in
+case of limit
+0- Active on falling edge
+1- Active on rising edge
+-2147483648~2147483647
+
+Effective
+immediately
+
+Stop
+setting
+
+Effective
+immediately
+Effective
+immediately
+
+Running
+setting
+Running
+setting
+
+1000
+
+Effective
+immediately
+
+Stop
+setting
+
+P
+
+10000
+
+Effective
+immediately
+
+Stop
+setting
+
+P
+
+0
+
+Effective
+immediately
+
+Stop
+setting
+
+P
+
+-
+
+0
+
+Power on
+again
+
+Stop
+setting
+
+P
+
+-
+
+0
+
+Effective
+immediately
+
+Stop
+setting
+
+P
+
+-
+
+0
+
+Effective
+immediately
+
+Stop
+setting
+
+P
+
+1
+
+0
+
+Power on
+again
+
+Running
+setting
+
+PST
+
+Encoder
+unit
+
+0
+
+Power on
+again
+
+Stop
+setting
+
+PST
+
+Through
+P5-63
+setting
+Command
+Unit
+
+P
+
+P
+P
+
+-36-
+
+Digital Servo Drive User Manual
+
+P05-48
+
+P05-50
+
+P05-51
+
+P05-52
+
+P05-54
+
+P05-56
+P05-58
+P05-59
+P05-60
+P05-61
+P05-63
+
+Absolute position linear
+mode position offset (upper
+32 bits)
+Absolute position rotation
+mode
+Mechanical gear ratio
+(numerator)
+Absolute position rotation
+mode
+Mechanical gear ratio
+(denominator)
+The number of pulses for
+one rotation of the load in
+absolute position rotation
+mode (lower 32 bits)
+The number of pulses for
+one rotation of the load in
+absolute position rotation
+mode
+(upper 32 bits)
+Trigger stop homing speed
+judgment threshold
+Trigger stop homing torque
+limit
+Positioning completion
+window time
+Positioning completion hold
+time
+Encoder frequency division
+pulse number (32 bits)
+Limit the selection of time
+unit for home search
+
+Encoder
+unit
+
+0
+
+Power on
+again
+
+Stop
+setting
+
+PST
+
+1-65535
+
+1
+
+65535
+
+Effective
+immediately
+
+Stop
+setting
+
+ALL
+
+1-65535
+
+1
+
+1
+
+Effective
+immediately
+
+Stop
+setting
+
+ALL
+
+0~ 4294967295
+
+Encoder
+unit
+
+0
+
+Effective
+immediately
+
+Stop
+setting
+
+ALL
+
+0~ 127
+
+Encoder
+unit
+
+0
+
+Effective
+immediately
+
+Stop
+setting
+
+ALL
+
+0~1000
+
+rpm
+
+2
+
+0~300.0
+
+%
+
+100.0%
+
+0~30000
+
+ms
+
+1
+
+0~30000
+
+ms
+
+1
+
+0~262143
+
+P/r
+
+0
+
+0~2
+
+-
+
+0
+
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Power on
+again
+Effective
+immediately
+
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Stop
+setting
+Stop
+setting
+
+-2147483648~2147483647
+
+P
+P
+P
+P
+-
+
+7.6 P06 set speed control parameters
+Functional
+code
+
+Name
+
+P06-00
+
+Main speed command A source
+
+P06-01
+
+Auxiliary speed command B
+source
+
+P06-02
+
+Speed command selection
+
+P06-03
+
+Speed command keyboard
+setting value
+
+P06-04
+
+Jog speed set value
+
+P06-05
+P06-06
+
+Speed command acceleration
+ramp time constant
+Speed command deceleration
+ramp time constant
+
+Unit
+
+Factory
+setting
+
+Effective method
+
+Setting
+method
+
+Related
+mode
+
+-
+
+0
+
+Effective
+immediately
+
+Stop setting
+
+S
+
+-
+
+1
+
+Effective
+immediately
+
+Stop setting
+
+S
+
+-
+
+0
+
+Effective
+immediately
+
+Stop setting
+
+S
+
+-6000~6000
+
+rpm
+
+200
+
+0~6000
+
+rpm
+
+100
+
+0~65535
+
+ms
+
+200
+
+0~65535
+
+ms
+
+200
+
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+
+Effective
+immediately
+
+Running
+setting
+
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+
+Running
+setting
+Running
+setting
+Running
+setting
+
+Setting range
+0- Given number (P06-03)
+1-AI1
+2-AI2
+0- Given number (P06-03)
+1-AI1
+2-AI2
+3-0 (no effect)
+4-0 (no effect)
+5- Multi -speed command
+0- Main speed command
+A source
+1- Auxiliary speed
+command B source
+2- A+B
+3- A/B switching
+
+P06-07
+
+Maximum speed threshold
+
+0~6000
+
+rpm
+
+5000
+
+P06-08
+
+Forward speed threshold
+
+0~6000
+
+rpm
+
+5000
+
+P06-09
+
+Reverse speed threshold
+
+0~6000
+
+rpm
+
+5000
+
+P06-11
+
+Torque feedforward control
+selection
+
+0- No torque feedforward
+0- Internal torque
+feedforward
+
+-
+
+1
+
+P06-15
+
+Zero fixed speed threshold
+
+0~6000
+
+rpm
+
+10
+
+P06-16
+
+Motor rotation speed threshold
+
+0~1000
+
+rpm
+
+20
+
+P06-17
+
+Speed coincidence signal
+threshold
+
+0~100
+
+rpm
+
+10
+
+-37-
+
+S
+S
+S
+S
+S
+S
+S
+PS
+S
+S
+S
+
+Digital Servo Drive User Manual
+P06-18
+P06-19
+
+Speed reach signal threshold
+Zero-speed output signal threshold
+
+10~6000
+1~6000
+
+rpm
+rpm
+
+1000
+10
+
+Effective immediately
+Effective immediately
+
+Running setting
+Running setting
+
+S
+S
+
+Unit
+
+Factory
+setting
+
+Effective
+method
+
+Setting
+method
+
+Related
+mode
+
+-
+
+0
+
+Effective
+immediately
+
+Stop
+setting
+
+T
+
+-
+
+1
+
+Effective
+immediately
+
+Stop
+setting
+
+T
+
+-
+
+0
+
+Effective
+immediately
+
+Stop
+setting
+
+T
+
+-300.0~300.0
+
+%
+
+0
+
+0~30.00
+
+ms
+
+0.79
+
+ms
+
+0.79
+
+Running
+setting
+Running
+setting
+Running
+setting
+
+PST
+
+0~30.00
+
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+
+-
+
+0
+
+Effective
+immediately
+
+Stop
+setting
+
+PST
+
+-
+
+2
+
+0.0~300.0
+
+%
+
+300.0
+
+0.0~300.0
+
+%
+
+300.0
+
+0.0~300.0
+
+%
+
+300.0
+
+0.0~300.0
+
+%
+
+300.0
+
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+
+Stop
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+
+-
+
+0
+
+Effective
+immediately
+
+Running
+setting
+
+T
+
+-
+
+1
+
+Effective
+immediately
+
+Running
+setting
+
+T
+
+rpm
+
+3000
+
+Effective
+immediately
+
+Running
+setting
+
+T
+
+rpm
+
+3000
+
+Effective
+immediately
+
+Running
+setting
+
+T
+
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+
+7.7 P07 set torque control parameters
+Functional
+code
+
+Name
+
+P07-00
+
+Main torque command A
+source
+
+P07-01
+
+Auxiliary torque
+command B source
+
+P07-02
+
+Torque command
+selection
+
+P07-03
+P07-05
+P07-06
+
+Torque command
+keyboard setting value
+Torque command filter
+time constant
+Second torque command
+filter time constant
+
+P07-07
+
+Torque limit source
+
+P07-08
+
+T-LMT selection
+
+P07-09
+P07-10
+P07-11
+P07-12
+
+Positive internal torque
+limit
+Negative internal torque
+limit
+Positive external torque
+limit
+Negative external torque
+limit
+
+P07-17
+
+Speed limit source
+selection
+
+P07-18
+
+V-LMT selection
+
+P07-19
+
+P07-20
+P07-21
+P07-22
+P07-23
+P07-40
+
+Torque control forward
+speed limit
+/torque control speed
+limit 1
+Torque control negative
+speed limit/torque control
+speed limit 2
+Torque reaching
+reference value
+Torque reaching active
+value
+Torque reaching inactive
+value
+Speed limit window in
+torque mode
+
+Setting range
+0- Given number (P07-03)
+1-AI1
+2-AI2
+0- Given number (P07-03)
+1-AI1
+2-AI2
+0- Main torque command A source
+1- Auxiliary torque command B source
+2- Main command A source + auxiliary
+command B source
+3- Main command A source/auxiliary command
+B source switching
+4- Communication given
+
+0- Positive and negative internal torque limit
+1- Positive and negative external torque limit
+(selected by P-CL, N-CL)
+2- T-LMT is used as external torque limit input
+3- Use the minimum value of positive and
+negative external torque and external T-LMT as
+the torque limit (selected by P-CL, N-CL)
+4- Switch between positive and negative internal
+torque limit and T-LMT torque limit (selected by
+P-CL, N-CL)
+1-AI1
+2-AI2
+
+0- Internal speed limit (speed limit during torque
+control)
+1- Use V-LMT as external speed limit input
+2- Select P07-19/ through FunIN.36(V-SEL)
+P07-20 as internal speed limit
+1-AI1
+2-AI2
+0~6000
+
+0~6000
+0.0~300.0
+
+%
+
+0.0
+
+0.0~300.0
+
+%
+
+20.0
+
+0.0~300.0
+
+%
+
+10.0
+
+0.5~30.0
+
+ms
+
+1.0
+
+T
+
+PST
+
+PST
+PST
+PST
+PST
+PST
+
+PST
+PST
+PST
+T
+
+-38-
+
+Digital Servo Drive User Manual
+
+7.8 P08 set gain parameters
+Functional
+code
+
+Name
+
+Unit
+
+Factory
+setting
+
+P08-00
+
+Speed loop gain
+
+P08-01
+
+Speed loop integral
+time constant
+
+0.1~2000.0
+
+Hz
+
+25.0
+
+P08-02
+
+Position loop gain
+
+0.15~512.00
+
+ms
+
+31.83
+
+0.0~2000.0
+
+Hz
+
+40.0
+
+P08-03
+
+2nd speed loop gain
+
+0.1~2000.0
+
+Hz
+
+40.0
+
+P08-04
+
+2nd speed loop integral
+time constant
+
+0.15~512.00
+
+ms
+
+40.00
+
+P08-05
+
+2nd position loop gain
+
+0.0~2000.0
+
+Hz
+
+64.0
+
+-
+
+P08-08
+
+Second gain mode
+setting
+
+P08-09
+
+Gain switching
+condition selection
+
+P08-10
+
+Gain switching delay
+time
+
+Setting range
+
+0- First gain fixed, use external DI for P/PI
+switching
+1- 1- Use gain switching according to the
+conditions of P08-09
+0- First gain fixed (PS)
+1- Use external DI switch (PS)
+2- Large torque command (PS)
+3- Large speed command (PS)
+4- Large rate of change in speed command (PS)
+5- Speed command high and low speed
+threshold (PS)
+6- Large position deviation (P)
+7- With position command (P)
+8- Positioning completed (P)
+9- Actual speed is high (P)
+10- With position command + actual speed (P)
+0.0~1000.0
+
+Effective
+method
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+
+Setting
+method
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+
+1
+
+Effective
+immediately
+
+Running
+setting
+
+PST
+
+-
+
+0
+
+Effective
+immediately
+
+Running
+setting
+
+PST
+
+ms
+
+5.0
+
+Effective
+immediately
+
+Running
+setting
+
+PST
+
+50
+
+Effective
+immediately
+
+Running
+setting
+
+PST
+
+30
+
+Effective
+immediately
+
+Running
+setting
+
+PST
+
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Stop
+setting
+Running
+setting
+
+According
+to
+switch
+condition
+According
+to
+switch
+condition
+
+Related
+mode
+PS
+PS
+P
+PS
+PS
+P
+
+P08-11
+
+Gain switching level
+
+0~20000
+
+P08-12
+
+Gain switching time lag
+
+0~20000
+
+P08-13
+
+Position gain switching
+time
+
+0.0~1000.0
+
+ms
+
+3.0
+
+P08-15
+
+Load inertia ratio
+
+0.00~120.00
+
+Times
+
+1.00
+
+P08-18
+
+Speed feedforward
+filter time constant
+
+0.00~64.00
+
+ms
+
+0.50
+
+P08-19
+
+Speed feedforward gain
+
+0.0~100.0
+
+%
+
+0.0
+
+0.00~64.00
+
+ms
+
+0.50
+
+0.0~200.0
+
+%
+
+0.0
+
+-
+
+0
+
+Effective
+immediately
+
+Stop
+setting
+
+PS
+
+100~4000
+
+Hz
+
+4000
+
+Effective
+immediately
+
+Running
+setting
+
+PS
+
+0.0~100.0
+
+-
+
+100.0
+
+Effective
+immediately
+
+Running
+setting
+
+PS
+
+P08-20
+P08-21
+
+P08-22
+
+P08-23
+P08-24
+
+-39-
+
+Torque feedforward
+filter time constant
+Torque feedforward
+gain
+Velocity feedback filter
+options
+Speed feedback
+low-pass filter cutoff
+frequency
+Pseudo-differential
+feedforward control
+coefficient
+
+01234-
+
+Disable speed feedback average filtering
+Speed feedback 2 times average filter
+Speed feedback 4 times average filter
+Speed feedback 8 times average filter
+Speed feedback 16 times average filter
+
+P
+PST
+P
+P
+PS
+PS
+
+Digital Servo Drive User Manual
+
+7.9 P09 set self-tuning parameters
+Functional
+code
+
+Name
+
+P09-01
+
+Rigidity grade selection
+
+Adaptive notch filter
+mode selection
+
+P09-02
+
+P09-04
+P09-05
+P09-06
+P09-07
+
+P09-08
+
+P09-09
+P09-12
+P09-13
+P09-14
+P09-15
+P09-16
+P09-17
+P09-18
+P09-19
+P09-20
+P09-21
+P09-22
+P09-23
+P09-24
+P09-30
+P09-31
+P09-38
+P09-39
+
+Unit
+
+Default
+setting
+
+Effective
+method
+Effective
+immediately
+
+Setting
+method
+Running
+setting
+
+0~31
+
+-
+
+12
+
+0- Adaptive notch filter is no longer updated
+1-1 adaptive notch filter active (3rd notch filter)
+2-2 adaptive notch filters active (3rd and 4th notch
+filters)
+3- Only test the resonance point, displayed in
+P09-24
+4- Restore the values of the 3rd and 4th notch
+filters to the default
+
+-
+
+0
+
+Effective
+immediately
+
+Running
+setting
+
+PST
+
+01-
+
+Manually set vibration frequency
+Automatically identify vibration frequency
+
+-
+
+0
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+01-
+
+Positive and negative triangle wave mode
+JOG mode
+
+-
+
+0
+
+Effective
+immediately
+
+Stop
+setting
+
+PST
+
+100~1000
+
+rpm
+
+500
+
+Effective
+immediately
+
+Stop
+setting
+
+PST
+
+20~800
+
+ms
+
+125
+
+Effective
+immediately
+
+Stop
+setting
+
+PST
+
+50~10000
+
+ms
+
+800
+
+Effective
+immediately
+
+Stop
+setting
+
+PST
+
+0.00~2.00
+
+r
+
+-
+
+-
+
+Display
+
+PST
+
+50~4000
+
+Hz
+
+4000
+
+0~20
+
+-
+
+2
+
+0~99
+
+-
+
+0
+
+50~4000
+
+Hz
+
+4000
+
+0~20
+
+-
+
+2
+
+0~99
+
+-
+
+0
+
+50~4000
+
+Hz
+
+4000
+
+0~20
+
+-
+
+2
+
+0~99
+
+-
+
+0
+
+50~4000
+
+Hz
+
+4000
+
+0~20
+
+-
+
+2
+
+0~99
+
+-
+
+0
+
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+
+0~2
+
+Hz
+
+0
+
+-
+
+Display
+
+PS
+
+0.0~100.0
+
+%
+
+0.0
+
+Effective
+immediately
+
+Running
+setting
+
+PS
+
+0.00~25.00
+
+ms
+
+0.50
+
+Effective
+immediately
+
+Running
+setting
+
+PS
+
+1.0~100.0
+
+Hz
+
+100.0
+
+0~10
+
+-
+
+2
+
+Effective
+immediately
+Effective
+immediately
+
+Running
+setting
+Running
+setting
+
+Setting range
+
+Low frequency resonance
+suppression mode
+selection
+Offline inertia
+identification mode
+selection
+Inertia identification
+maximum speed
+Time constant of
+accelerate to maximum
+speed during inertia
+identification
+Waiting time after a
+single inertia
+identification is
+completed
+Number of revolutions of
+the motor completing
+single inertia
+identification
+First notch filter
+frequency
+First notch filter width
+class
+First notch filter depth
+level
+Second notch filter
+frequency
+Second notch filter width
+level
+Second notch filter depth
+level
+Third notch filter
+frequency
+Third notch filter width
+level
+Third notch filter depth
+level
+Fourth notch filter
+frequency
+Fourth notch filter width
+class
+Fourth notch filter depth
+level
+Resonance frequency
+identification results
+Torque disturbance
+compensation gain
+Torque disturbance
+observer filter time
+constant
+Low frequency resonant
+frequency
+Low frequency resonance
+frequency filter setting
+
+Related
+mode
+PST
+
+PS
+PS
+PS
+PS
+PS
+PS
+PS
+PS
+PS
+PS
+PS
+PS
+
+P
+P
+
+7.10 P0A set fault and protection parameters
+Functional
+code
+P0A-00
+
+Name
+Power input phase
+loss protection
+selection
+
+Setting range
+012-
+
+Enable fault and disable warning
+Enable fault and warning
+Disable fault and warning
+
+Unit
+
+Factory
+setting
+
+Effective
+method
+
+Setting
+method
+
+Related
+mode
+
+-
+
+0
+
+Effective
+immediately
+
+Running
+setting
+
+-
+
+-40-
+
+Digital Servo Drive User Manual
+
+P0A-03
+P0A-04
+P0A-08
+P0A-09
+Functional
+code
+P0A-10
+
+P0A-12
+
+P0A-16
+P0A-17
+P0A-24
+P0A-25
+P0A-26
+P0A-27
+P0A-28
+P0A-30
+
+P0A-32
+
+Power-down save
+function enable
+selection
+Motor overload
+protection gain
+Overspeed fault
+threshold
+Maximum position
+pulse frequency
+Name
+Excessive position
+deviation fault
+threshold
+Overspeed
+protection function
+enable
+Low frequency
+resonance position
+deviation judgment
+threshold
+Position setting
+unit selection
+Low-speed pulse
+input pin filter time
+constant
+Speed feedback
+display value filter
+time constant
+Motor overload
+shield enable
+Speed DO filter
+time constant
+Quadrature
+encoder filter time
+constant
+High-speed pulse
+input pin filter time
+constant
+Stall
+overtemperature
+protection time
+window
+
+P0A-33
+
+Stall
+overtemperature
+protection enable
+
+P0A-36
+
+Encoder multi-turn
+overflow fault
+selection
+
+P0A-40
+P0A-41
+P0A-43
+P0A-47
+P0A-48
+
+Software limit
+setting
+Maximum value of
+software limit
+Minimum value of
+software limit
+Brake protection
+detection enable
+Gravity load
+detection value
+
+01-
+
+Do not execute power-down save
+Execute power-down save
+
+-
+
+0
+
+Effective
+immediately
+
+Running
+setting
+
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+method
+
+Stop
+setting
+Running
+setting
+Stop
+setting
+Setting
+method
+
+-
+
+50~300
+
+%
+
+100
+
+0~10000
+
+rpm
+
+0
+
+100~4000
+
+kHz
+
+4000
+
+Setting range
+
+Unit
+
+1 ~1073741824
+
+Encoder
+/
+Command
+unit
+
+Factory
+setting
+3145728
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+-
+
+1
+
+Effective
+immediately
+
+Running
+setting
+
+PST
+
+Encoder
+unit
+
+5
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+-
+
+0
+
+Effective
+immediately
+
+Stop
+setting
+
+P
+
+Stop
+setting
+
+P
+
+01-
+
+No overspeed protection
+Turn on overspeed protection
+
+1-1000
+01-
+
+Encoder unit
+Command unit
+
+PST
+P
+Related
+mode
+
+0~255
+
+25ns
+
+30
+
+Power on
+again
+
+0~5000
+
+ms
+
+50
+
+Effective
+immediately
+
+Stop
+setting
+
+-
+
+0- Turn on motor overload detection
+1- Shield motor overload warning and fault
+detection
+
+-
+
+0
+
+Effective
+immediately
+
+Stop
+setting
+
+-
+
+0~5000
+
+ms
+
+10
+
+Effective
+immediately
+
+Stop
+setting
+
+-
+
+Stop
+setting
+
+-
+
+0~255
+
+25ns
+
+30
+
+Power on
+again
+
+0~255
+
+25ns
+
+3
+
+Power on
+again
+
+Stop
+setting
+
+P
+
+10~65535
+
+ms
+
+200
+
+Effective
+immediately
+
+Running
+setting
+
+-
+
+0- Shield motor stall overtemperature
+protection detection
+1- Enable motor stall overtemperature
+protection detection
+
+-
+
+1
+
+Effective
+immediately
+
+Running
+setting
+
+-
+
+-
+
+0
+
+Effective
+immediately
+
+Shutdown
+setting
+
+ALL
+
+1
+
+0
+
+Effective
+immediately
+
+Stop
+setting
+
+PST
+
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+
+Stop
+setting
+Stop
+setting
+Running
+setting
+Running
+setting
+
+Effective
+method
+-
+
+Setting
+method
+Display
+Display
+
+Related
+mode
+PST
+PS
+
+-
+
+Display
+
+PST
+
+01-
+
+No
+Yes
+
+0- Disable software limit
+1- Enable software limit immediately after
+power on
+2- Enable software limit after homing
+-2147483648~2147483647
+-2147483648~2147483647
+01-
+
+No
+Yes
+
+0~300.0
+
+Command
+unit
+Command
+unit
+
+2147483647
+-2147483648
+
+-
+
+1
+
+%
+
+30.0
+
+PST
+PST
+ALL
+ALL
+
+7.11 P0B set monitoring parameters
+Functional
+code
+P0B-00
+P0B-01
+P0B-02
+
+-41-
+
+-
+
+rpm
+rpm
+
+Factory
+setting
+-
+
+-
+
+%
+
+-
+
+Name
+Actual motor speed
+Speed command
+Internal torque command
+(Relative to rated torque)
+
+Setting range
+
+Unit
+
+Digital Servo Drive User Manual
+
+P0B-21
+P0B-22
+P0B-24
+P0B-26
+P0B-27
+
+Input signal (DI signal)
+monitoring
+Output signal (DO signal)
+monitoring
+Absolute position counter
+(32-bit decimal display)
+Mechanical angle
+(number of pulses from the
+home)
+Electrical angle
+Corresponding speed
+information of input position
+command
+Average load ratio
+Input command pulse counter
+(32-bit decimal display)
+Encoder position deviation
+counter (32-bit decimal display)
+Feedback pulse counter (32-bit
+decimal display)
+Total power-on time
+(32-bit decimal display)
+AI1 sampling voltage value
+AI2 sampling voltage value
+Phase current rms value
+Bus voltage value
+Module temperature value
+
+P0B-33
+
+Fault recording
+
+P0B-34
+P0B-35
+P0B-37
+
+Fault code of selected time
+Selected fault timestamp
+Motor speed at selected fault
+Motor U-phase current at the
+selected fault
+Motor V-phase current at the
+selected fault
+Bus voltage at selected fault
+Input terminal status at selected
+fault
+Output terminal status at
+selected fault
+
+P0B-03
+P0B-05
+P0B-07
+P0B-09
+P0B-10
+P0B-11
+P0B-12
+P0B-13
+P0B-15
+P0B-17
+P0B-19
+
+P0B-38
+P0B-39
+P0B-40
+P0B-41
+P0B-42
+
+-
+
+-
+
+-
+
+-
+
+Display
+
+PST
+
+-
+
+-
+
+-
+
+-
+
+Display
+
+PST
+
+-
+
+Command
+unit
+
+-
+
+-
+
+Display
+
+PST
+
+-
+
+Encoder
+unit
+
+-
+
+-
+
+Display
+
+PST
+
+-
+
+°
+
+-
+
+-
+
+Display
+
+PST
+
+-
+
+rpm
+
+-
+
+-
+
+Display
+
+P
+
+-
+
+%
+Command
+unit
+Encoder
+unit
+Encoder
+unit
+
+-
+
+0-Current fault
+1-Last fault
+2-Last two faults
+……
+9- Last 9 faults
+-
+
+Display
+
+PST
+
+-
+
+-
+
+Display
+
+P
+
+-
+
+-
+
+Display
+
+P
+
+-
+
+-
+
+Display
+
+PST
+
+s
+
+-
+
+-
+
+Display
+
+PST
+
+V
+V
+A
+V
+℃
+
+-
+
+-
+
+Display
+Display
+Display
+Display
+Display
+
+PST
+PST
+PST
+PST
+PST
+
+-
+
+0
+
+Effective
+immediately
+
+Running
+setting
+
+PST
+
+s
+rpm
+
+-
+
+-
+
+Display
+Display
+Display
+
+PST
+PST
+PST
+
+-
+
+A
+
+-
+
+-
+
+Display
+
+PST
+
+-
+
+A
+
+-
+
+-
+
+Display
+
+PST
+
+-
+
+V
+
+-
+
+-
+
+Display
+
+PST
+
+-
+
+-
+
+-
+
+-
+
+Display
+
+PST
+
+-
+
+-
+
+-
+
+-
+
+Display
+
+PST
+
+-
+
+-
+
+Display
+
+P
+
+-
+
+-
+
+Display
+
+PST
+
+0
+
+-
+
+Display
+
+ALL
+
+0
+
+-
+
+Display
+
+ALL
+
+-
+
+-
+
+Display
+
+PST
+
+-
+
+P0B-53
+
+Position deviation counter
+
+-
+
+P0B-55
+
+Actual motor speed
+Mechanical absolute position
+(lower 32 bits)
+Mechanical absolute position
+(upper 32 bits)
+Real-time input position
+command counter
+Absolute value encoder rotation
+data
+Position within 1 revolution of
+absolute value encoder
+Absolute value encoder
+absolute position (lower 32
+bits)
+Absolute value encoder
+absolute position (upper 32
+bits)
+Rotating load single-turn
+position (lower 32 bits)
+Rotating load single-turn
+position (upper 32 bits)
+Rotating load single-turn
+position
+
+0.1rpm
+
+P0B-58
+P0B-60
+P0B-64
+P0B-70
+P0B-71
+P0B-77
+P0B-79
+P0B-81
+P0B-83
+P0B-85
+
+Command
+unit
+rpm
+Encoder
+unit
+Encoder
+unit
+Command
+unit
+
+-
+
+r
+
+0
+
+-
+
+Display
+
+ALL
+
+-
+
+Encoder
+Unit
+
+0
+
+-
+
+Display
+
+ALL
+
+-
+
+Encoder
+Unit
+
+0
+
+-
+
+Display
+
+ALL
+
+-
+
+Encoder
+Unit
+
+0
+
+-
+
+Display
+
+ALL
+
+0
+
+-
+
+Display
+
+ALL
+
+0
+
+-
+
+Display
+
+ALL
+
+0
+
+-
+
+Display
+
+ALL
+
+Setting
+method
+Running
+setting
+
+Related
+mode
+
+Encoder
+unit
+Encoder
+unit
+Command
+unit
+
+-
+
+7.12 P0C set communication parameters
+Functional
+code
+P0C-00
+
+Name
+Servo axis address
+
+Setting range
+
+Unit
+
+Factory
+setting
+
+1~247, 0 is the broadcast address
+
+-
+
+1
+
+Effective
+method
+Effective
+immediately
+
+PST
+
+-42-
+
+Digital Servo Drive User Manual
+
+P0C-02
+
+Serial port baud rate
+setting
+
+P0C-03
+
+Moubus data format
+
+P0C-09
+
+Communication VDI
+
+P0C-10
+
+VDI default value after
+power-on
+
+P0C-11
+P0C-12
+
+P0C-13
+
+P0C-14
+
+P0C-25
+P0C-26
+P0C-30
+
+Communication VDO
+The default level when
+the VDO function is
+selected as 0
+Whether the write
+function code of Moubus
+communication is
+updated to EEPROM
+Moubus error codes
+Moubus command
+response delay
+Moubus communication
+data high and low order
+Moubus error frame
+format selection
+
+0-2400bps 1-4800bps 2-9600bps 3-19200bps
+4-38400bps
+5-57600bps
+0- No parity, 2 stop bits
+1- Even parity, 1 stop bit
+2- Odd parity, 1 stop bit
+3- No parity, 1 stop bit
+0- Disable
+1- Yes
+Bit0-VDI1 default value
+……
+Bit15-VDI16 default value
+0- Disable
+1- Yes
+Bit0-VDO1 default value
+……
+Bit15-VDO16 default value
+01-
+
+Do not update EEPROM
+Update EEPROM except P0B set and P0D set
+
+0x0001- Illegal command code
+0x0002 - Illegal data address
+0x0003 - Illegal data
+0x0004 - Slave device failure
+0~5000
+0101-
+
+High 16 bits first, low 16 bits last
+Low 16 bits first, high 16 bits last
+Old protocol
+New protocol (standard)
+
+-
+
+5
+
+Effective
+immediately
+
+Running
+setting
+
+PST
+
+-
+
+0
+
+Effective
+immediately
+
+Running
+setting
+
+PST
+
+-
+
+0
+
+Effective
+immediately
+
+Stop
+setting
+
+PST
+
+-
+
+0
+
+Power on
+again
+
+Running
+setting
+
+PST
+
+0
+
+Effective
+immediately
+
+Stop
+setting
+
+PST
+
+-
+
+0
+
+Effective
+immediately
+
+Stop
+setting
+
+PST
+
+-
+
+1
+
+Effective
+immediately
+
+Running
+setting
+
+PST
+
+1
+
+-
+
+-
+
+Display
+
+-
+
+ms
+
+1
+
+1
+
+1
+
+1
+
+1
+
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+
+Running
+setting
+Running
+setting
+Running
+setting
+
+Unit
+
+Factory
+setting
+0
+
+Setting
+method
+Stop
+setting
+Stop
+setting
+Running
+setting
+Running
+setting
+
+Related
+mode
+
+-
+
+Effective
+method
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+
+-
+
+PST
+PST
+PST
+
+7.13 P0D set auxiliary function parameters
+Functional
+code
+
+Name
+
+P0D-00
+
+Software Reset
+
+P0D-01
+
+Fault reset
+
+P0D-03
+
+Offline inertia
+identification function
+Initial angle recognition
+
+P0D-05
+
+Emergency shutdown
+
+P0D-10
+P0D-11
+
+Reserved
+JOG test run function
+
+P0D-17
+
+DIDO force input and
+output enable
+
+P0D-02
+
+P0D-18
+P0D-19
+
+DI forced to input given
+value
+DO forced to output
+given value
+
+P0D-20
+
+Absolute encoder reset
+enable
+
+P0D-24
+
+Gravity load
+identification
+
+-43-
+
+Setting range
+0101-
+
+No operation
+Yes
+No operation
+Yes
+
+-
+
+-
+
+0
+
+-
+
+-
+
+-
+
+1: Enable
+0- No operation
+1- Enable emergency stop
+0(with built-in filter)
+0- No operation
+1- Force DI to enable, force DO to disable
+2- Force DO to enable, force DI to disable
+3- Force all DIDOs to enable
+
+-
+
+-
+
+-
+
+0
+
+-
+
+-
+
+-
+
+-
+
+-
+
+-
+
+0
+
+Effective
+immediately
+
+Running
+setting
+
+-
+
+0~0x01FF
+
+-
+
+0x01FF
+
+0~0x001F
+
+-
+
+0
+
+Effective
+immediately
+Effective
+immediately
+
+Running
+setting
+Running
+setting
+
+0
+
+Effective
+immediately
+
+Stop
+setting
+
+ALL
+
+0
+
+Effective
+immediately
+
+Running
+setting
+
+-
+
+01201-
+
+No operation
+Reset fault and multi-turn data
+Reset fault and multi-turn data
+No
+Yes
+
+-
+
+-
+
+-
+
+Digital Servo Drive User Manual
+
+7.14 P11 set multi-segment position function parameters
+Functional
+code
+
+Setting range
+
+Unit
+
+0: Stop after a single operation;
+(P11-01 selects the number of segments) 1Cycle operation
+(P11-01 selects the number of segments)
+2-DI switch operation
+(Selected by DI) 3- Sequence operation
+(P11-01 selects the number of segments)
+
+Factory
+setting
+
+Effective
+method
+
+Setting
+method
+
+Related
+mode
+
+-
+
+1
+
+Effective
+immediately
+
+Stop
+setting
+
+P
+
+1~16
+
+-
+
+1
+
+Effective
+immediately
+
+Stop
+setting
+
+P
+
+Valid in other three modes except DI mode
+0 -Continue to run the unfinished segment
+1- Restart operation from segment 1
+
+-
+
+0
+
+Effective
+immediately
+
+Stop
+setting
+
+P
+
+Time unit
+
+0-ms 1-s
+
+-
+
+0
+
+Displacement command
+type selection
+Sequential operation start
+segment selection
+1st segment movement
+displacement
+The maximum running
+speed of the 1st segment
+displacement
+1st segment displacement
+acceleration and
+deceleration time
+Waiting time after the 1st
+segment displacement is
+completed
+2nd segment movement
+displacement
+The maximum running
+speed of the 2nd segment
+displacement
+2nd segment displacement
+acceleration and
+deceleration time
+Waiting time after the 2nd
+segment displacement is
+completed
+3rd segment movement
+displacement
+The maximum running
+speed of the 3rd segment
+displacement
+3rd segment displacement
+acceleration and
+deceleration time
+Waiting time after the 3rd
+segment displacement is
+completed
+4th segment movement
+displacement
+The maximum running
+speed of the 4th segment
+displacement
+4th segment displacement
+acceleration and
+deceleration time
+Waiting time after the 4th
+segment displacement is
+completed
+5th segment movement
+displacement
+The maximum running
+speed of the 5th segment
+displacement
+5th segment displacement
+acceleration and
+deceleration time
+Waiting time after the 5th
+segment displacement is
+completed
+
+01-
+
+-
+
+0
+
+-
+
+0
+
+Command
+unit
+
+10000
+
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Running
+setting
+Running
+setting
+
+P
+
+Name
+
+P11-00
+
+Multi-segment position
+operation mode
+
+P11-01
+
+Number of segments at end
+point of displacement
+command
+
+P11-02
+P11-03
+P11-04
+P11-05
+P11-12
+P11-14
+P11-15
+P11-16
+P11-17
+P11-19
+P11-20
+P11-21
+P11-22
+P11-24
+P11-25
+P11-26
+P11-27
+P11-29
+P11-30
+P11-31
+P11-32
+P11-34
+P11-35
+P11-36
+
+Margin processing method
+
+Relative displacement command
+Absolute displacement command
+
+0~16
+-1073741824 ~1073741824
+
+P
+P
+P
+P
+
+1~6000
+
+rpm
+
+200
+
+Effective
+immediately
+
+0~65535
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+0~10000
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+Command
+unit
+
+10000
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+Running
+setting
+
+P
+
+-1073741824 ~1073741824
+1~6000
+
+rpm
+
+200
+
+Effective
+immediately
+
+0~65535
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+0~10000
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+10000
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+Running
+setting
+
+P
+
+-1073741824 ~1073741824
+
+Command
+unit
+
+1~6000
+
+rpm
+
+200
+
+Effective
+immediately
+
+0~65535
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+0~10000
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+10000
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+Running
+setting
+
+P
+
+-1073741824 ~1073741824
+
+Command
+unit
+
+1~6000
+
+rpm
+
+200
+
+Effective
+immediately
+
+0~65535
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+0~10000
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+10000
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+Running
+setting
+
+P
+
+-1073741824 ~1073741824
+
+Command
+unit
+
+1~6000
+
+rpm
+
+200
+
+Effective
+immediately
+
+0~65535
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+0~10000
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+-44-
+
+Digital Servo Drive User Manual
+P11-37
+P11-39
+P11-40
+P11-41
+P11-42
+P11-44
+P11-45
+P11-46
+P11-47
+P11-49
+P11-50
+P11-51
+P11-52
+P11-54
+P11-55
+P11-56
+P11-57
+
+P11-59
+
+P11-60
+P11-61
+P11-62
+
+P11-64
+
+P11-65
+P11-66
+P11-67
+
+P11-69
+
+-45-
+
+6th segment movement
+displacement
+The maximum running
+speed of the 6th segment
+displacement
+6th segment displacement
+acceleration and
+deceleration time
+Waiting time after the 6th
+segment displacement is
+completed
+7th segment movement
+displacement
+The maximum running
+speed of the 7th segment
+displacement
+7th segment displacement
+acceleration and
+deceleration time
+Waiting time after the 7th
+segment displacement is
+completed
+8th segment movement
+displacement
+The maximum running
+speed of the 8th segment
+displacement
+8th segment displacement
+acceleration and
+deceleration time
+Waiting time after the 8th
+segment displacement is
+completed
+9th segment movement
+displacement
+The maximum running
+speed of the 9th segment
+displacement
+9th segment displacement
+acceleration and
+deceleration time
+Waiting time after the 9th
+segment displacement is
+completed
+10th segment movement
+displacement
+The maximum running
+speed of the 10th segment
+displacement
+16th segment of
+displacement
+10th segment displacement
+acceleration and
+deceleration time
+Waiting time after the 10th
+segment displacement is
+completed
+11th segment movement
+displacement
+The maximum running
+speed of the 11th segment
+displacement
+16th segment of
+displacement
+11th segment displacement
+acceleration and
+deceleration time
+Waiting time after the 11th
+segment displacement is
+completed
+12th segment movement
+displacement
+The maximum running
+speed of the 12th segment
+displacement
+16th segment of
+displacement
+
+-1073741824 ~1073741824
+
+Command
+unit
+
+10000
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+Running
+setting
+
+P
+
+1~6000
+
+rpm
+
+200
+
+Effective
+immediately
+
+0~65535
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+0~10000
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+10000
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+Running
+setting
+
+P
+
+-1073741824 ~1073741824
+
+Command
+unit
+
+1~6000
+
+rpm
+
+200
+
+Effective
+immediately
+
+0~65535
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+0~10000
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+10000
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+Running
+setting
+
+P
+
+-1073741824 ~1073741824
+
+Command
+unit
+
+1~6000
+
+rpm
+
+200
+
+Effective
+immediately
+
+0~65535
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+0~10000
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+10000
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+Running
+setting
+
+P
+
+-1073741824 ~1073741824
+
+Command
+unit
+
+1~6000
+
+rpm
+
+200
+
+Effective
+immediately
+
+0~65535
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+0~10000
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+Command
+unit
+
+10000
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+1~6000
+
+rpm
+
+200
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+0~65535
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+0~10000
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+Command
+unit
+
+10000
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+1~6000
+
+rpm
+
+200
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+0~65535
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+0~10000
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+Command
+unit
+
+10000
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+rpm
+
+200
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+-1073741824 ~1073741824
+
+-1073741824 ~1073741824
+
+-1073741824 ~1073741824
+
+1~6000
+
+Digital Servo Drive User Manual
+P11-70
+P11-71
+P11-72
+
+P11-74
+Functional
+code
+P11-75
+P11-76
+P11-77
+
+P11-79
+
+P11-80
+P11-81
+P11-82
+
+P11-84
+
+P11-85
+P11-86
+P11-87
+P11-89
+
+P11-90
+P11-91
+
+12th segment displacement
+acceleration and
+deceleration time
+Waiting time after the 12th
+segment displacement is
+completed
+13th segment movement
+displacement
+The maximum running
+speed of the 13th segment
+displacement
+16th segment of
+displacement
+Name
+13th segment displacement
+acceleration and
+deceleration time
+Waiting time after the 13th
+segment displacement is
+completed
+14th segment movement
+displacement
+The maximum running
+speed of the 14th segment
+displacement
+16th segment of
+displacement
+14th segment displacement
+acceleration and
+deceleration time
+Waiting time after the 14th
+segment displacement is
+completed
+15th segment movement
+displacement
+The maximum running
+speed of the 15th segment
+displacement
+16th segment of
+displacement
+15th segment displacement
+acceleration and
+deceleration time
+Waiting time after the 15th
+segment displacement is
+completed
+16th segment movement
+displacement
+Maximum running speed
+of
+16th segment of
+displacement
+16th segment displacement
+acceleration and
+deceleration time
+Waiting time after the 16th
+segment displacement is
+completed
+
+0~65535
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+0~10000
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+Command
+unit
+
+10000
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+1~6000
+
+rpm
+
+200
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+Setting range
+
+Unit
+
+Factory
+setting
+
+Effective
+method
+
+Setting
+method
+
+Related
+mode
+
+0~65535
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+0~10000
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+Command
+unit
+
+10000
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+1~6000
+
+rpm
+
+200
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+0~65535
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+0~10000
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+Command
+unit
+
+10000
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+1~6000
+
+rpm
+
+200
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+0~65535
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+0~10000
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+Command
+unit
+
+10000
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+1~6000
+
+rpm
+
+200
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+0~65535
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+0~10000
+
+ms(s)
+
+10
+
+Effective
+immediately
+
+Running
+setting
+
+P
+
+-1073741824 ~1073741824
+
+-1073741824 ~1073741824
+
+-1073741824 ~1073741824
+
+-1073741824 ~1073741824
+
+7.15 P12 set multi-segment speed parameters
+Functional
+code
+
+Name
+
+Setting range
+
+Unit
+
+Effective
+method
+
+Setting
+method
+
+Related
+mode
+
+P12-00
+
+Multi-segment speed
+command operation mode
+
+0: Stop after a single operation;
+(P12-01 selects the number of segments) 1- Cycle
+operation
+(P12-01 selects the number of segments) 2- Switch
+via external DI
+
+Factory
+setting
+
+-
+
+1
+
+Effective
+immediately
+
+Stop
+setting
+
+S
+
+1~16
+
+-
+
+16
+
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+
+P12-01
+P12-02
+
+Speed command end
+segment selection
+Running time unit
+selection
+
+0-sec 1-min
+
+-
+
+0
+
+P12-03
+
+Acceleration time 1
+
+0~65535
+
+ms
+
+10
+
+P12-04
+
+Deceleration time 1
+
+0~65535
+
+ms
+
+10
+
+S
+S
+S
+S
+
+-46-
+
+Digital Servo Drive User Manual
+P12-05
+
+Acceleration time 2
+
+0~65535
+
+ms
+
+50
+
+P12-06
+
+Deceleration time 2
+
+0~65535
+
+ms
+
+50
+
+P12-07
+
+Acceleration time 3
+
+0~65535
+
+ms
+
+100
+
+P12-08
+
+Deceleration time 3
+
+0~65535
+
+ms
+
+100
+
+P12-09
+
+Acceleration time 4
+
+0~65535
+
+ms
+
+150
+
+P12-10
+
+Deceleration time 4
+
+0~65535
+
+ms
+
+150
+
+P12-20
+P12-21
+
+P12-22
+
+P12-23
+P12-24
+P12-25
+P12-26
+P12-27
+P12-28
+P12-29
+P12-30
+P12-31
+P12-32
+P12-33
+P12-34
+P12-35
+P12-36
+P12-37
+P12-38
+P12-39
+P12-40
+P12-41
+P12-42
+P12-43
+P12-44
+P12-45
+P12-46
+P12-47
+P12-48
+P12-49
+P12-50
+
+-47-
+
+1st segment speed
+command
+1st segment command
+running time
+1st segment acceleration
+and deceleration time
+2nd segment speed
+command
+2nd segment command
+running time
+2nd segment acceleration
+and deceleration time
+3rd segment speed
+command
+3rd segment command
+running time
+3rd segment acceleration
+and deceleration time
+4th segment speed
+command
+4th segment command
+running time
+4th segment acceleration
+and deceleration time
+5th segment speed
+command
+5th segment command
+running time
+5th segment acceleration
+and deceleration time
+6th segment speed
+command
+6th segment command
+running time
+6th segment acceleration
+and deceleration time
+7th segment speed
+command
+7th segment command
+running time
+7th segment acceleration
+and deceleration time
+8th segment speed
+command
+8th segment command
+running time
+8th segment acceleration
+and deceleration time
+9th segment speed
+command
+9th segment command
+running time
+9th segment acceleration
+and deceleration time
+10th segment speed
+command
+10th segment command
+running time
+10th segment acceleration
+and deceleration time
+11th segment speed
+command
+
+-6000~6000
+
+rpm
+
+0
+
+0~6553.5
+
+s(min)
+
+5.0
+
+-
+
+0
+
+-6000~6000
+
+rpm
+
+100
+
+0~6553.5
+
+01234-
+
+Zero acc/dec time
+Acc/Dec time 1
+Acc/Dec time 2
+Acc/Dec time 3
+Acc/Dec time 4
+
+s(min)
+
+5.0
+
+Refer to the description of P12-22
+
+-
+
+0
+
+-6000~6000
+
+rpm
+
+300
+
+0~6553.5
+
+s(min)
+
+5.0
+
+Refer to the description of P12-22
+
+-
+
+0
+
+-6000~6000
+
+rpm
+
+500
+
+0~6553.5
+
+s(min)
+
+5.0
+
+Refer to the description of P12-22
+
+-
+
+0
+
+-6000~6000
+
+rpm
+
+700
+
+0~6553.5
+
+s(min)
+
+5.0
+
+Refer to the description of P12-22
+
+-
+
+0
+
+-6000~6000
+
+rpm
+
+900
+
+0~6553.5
+
+s(min)
+
+5.0
+
+Refer to the description of P12-22
+
+-
+
+0
+
+-6000~6000
+
+rpm
+
+600
+
+0~6553.5
+
+s(min)
+
+5.0
+
+Refer to the description of P12-22
+
+-
+
+0
+
+-6000~6000
+
+rpm
+
+300
+
+0~6553.5
+
+s(min)
+
+5.0
+
+-
+
+0
+
+-6000~6000
+
+rpm
+
+100
+
+0~6553.5
+
+s(min)
+
+5.0
+
+-
+
+0
+
+-6000~6000
+
+rpm
+
+-100
+
+0~6553.5
+
+s(min)
+
+5.0
+
+Refer to the description of P12-22
+
+-
+
+0
+
+-6000~6000
+
+rpm
+
+-300
+
+Refer to the description of P12-22
+
+Refer to the description of P12-22
+
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+
+Effective
+immediately
+
+Stop
+setting
+
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+
+S
+S
+S
+S
+S
+S
+S
+S
+
+S
+
+S
+S
+S
+S
+S
+S
+S
+S
+S
+S
+S
+S
+S
+S
+S
+S
+S
+S
+S
+S
+S
+S
+S
+S
+S
+S
+S
+S
+
+Digital Servo Drive User Manual
+P12-51
+P12-52
+P12-53
+P12-54
+P12-55
+P12-56
+P12-57
+P12-58
+P12-59
+P12-60
+P12-61
+P12-62
+P12-63
+P12-64
+P12-65
+P12-66
+P12-67
+
+11th segment command
+running time
+11th segment acceleration
+and deceleration time
+12th segment speed
+command
+12th segment command
+running time
+12th segment acceleration
+and deceleration time
+13th segment speed
+command
+13th segment command
+running time
+13th segment acceleration
+and deceleration time
+14th segment speed
+command
+14th segment command
+running time
+14th segment acceleration
+and deceleration time
+15th segment speed
+command
+15th segment command
+running time
+15th segment acceleration
+and deceleration time
+16th segment speed
+command
+16th segment command
+running time
+16th segment acceleration
+and deceleration time
+
+0~6553.5
+
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+Effective
+immediately
+
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+Stop
+setting
+
+Effective
+method
+Effective
+at stop
+
+Setting
+method
+Running
+setting
+
+0
+
+Effective
+at stop
+
+Running
+setting
+
+0
+
+Effective
+at stop
+
+Running
+setting
+
+0
+
+Effective
+at stop
+
+Running
+setting
+
+0
+
+Effective
+at stop
+
+Running
+setting
+
+0
+
+Effective
+at stop
+
+Running
+setting
+
+0
+
+Effective
+at stop
+
+Running
+setting
+
+0
+
+Effective
+at stop
+
+Running
+setting
+
+0
+
+Effective
+at stop
+
+Running
+setting
+
+0
+
+Effective
+at stop
+
+Running
+setting
+
+0
+
+Effective
+at stop
+
+Running
+setting
+
+0
+
+Effective
+at stop
+
+Running
+setting
+
+0
+
+Effective
+at stop
+
+Running
+setting
+
+s(min)
+
+5.0
+
+-
+
+0
+
+-6000~6000
+
+rpm
+
+-500
+
+0~6553.5
+
+s(min)
+
+5.0
+
+Refer to the description of P12-22
+
+-
+
+0
+
+-6000~6000
+
+rpm
+
+-700
+
+0~6553.5
+
+Refer to the description of P12-22
+
+s(min)
+
+5.0
+
+Refer to the description of P12-22
+
+-
+
+0
+
+-6000~6000
+
+rpm
+
+-900
+
+0~6553.5
+
+s(min)
+
+5.0
+
+Refer to the description of P12-22
+
+-
+
+0
+
+-6000~6000
+
+rpm
+
+-600
+
+0~6553.5
+
+s(min)
+
+5.0
+
+Refer to the description of P12-22
+
+-
+
+0
+
+-6000~6000
+
+rpm
+
+-300
+
+0~6553.5
+
+s(min)
+
+5.0
+
+-
+
+0
+
+Unit
+
+Factory
+setting
+
+-
+
+0
+
+Refer to the description of P12-22
+
+S
+S
+S
+S
+S
+S
+S
+S
+S
+S
+S
+S
+S
+S
+S
+S
+S
+
+7.16 P17 set virtual DIDO parameters
+Functional
+code
+
+Name
+
+P17-00
+
+VDI1 terminal function
+selection
+
+P17-01
+
+VDI1 terminal logic
+selection
+
+P17-02
+
+VDI2 terminal function
+selection
+
+P17-03
+
+VDI2 terminal logic
+selection
+
+P17-04
+
+VDI3 terminal function
+selection
+
+P17-05
+
+VDI3 terminal logic
+selection
+
+P17-06
+
+VDI4 terminal function
+selection
+
+P17-07
+
+VDI4 terminal logic
+selection
+
+P17-08
+
+VDI5 terminal function
+selection
+
+P17-09
+
+VDI5 terminal logic
+selection
+
+P17-10
+
+VDI6 terminal function
+selection
+
+P17-11
+
+VDI6 terminal logic
+selection
+
+P17-12
+
+VDI7 terminal function
+selection
+
+Setting range
+0~37
+0- Means active when VDI1 write 1
+1- Means active when write value of VDI1 changes
+from 0 to 1
+0~37
+0- Means active when VDI2 write 1
+1- Means active when write value of VDI2 changes
+from 0 to 1
+0~37
+0- Means active when VDI3 write 1
+1- Means active when write value of VDI3 changes
+from 0 to 1
+0~37
+0- Means active when VDI4 write 1
+1- Means active when write value of VDI4 changes
+from 0 to 1
+0~37
+0- Means active when VDI5 write 1
+1- Means active when write value of VDI5 changes
+from 0 to 1
+0~37
+0- Means active when VDI6 write 1
+1- Means active when write value of VDI6 changes
+from 0 to 1
+0~37
+
+-
+
+Related
+mode
+-
+
+-48-
+
+Digital Servo Drive User Manual
+
+P17-13
+
+VDI7 terminal logic
+selection
+
+P17-14
+
+VDI8 terminal function
+selection
+
+P17-15
+
+VDI8 terminal logic
+selection
+
+P17-16
+
+VDI9 terminal function
+selection
+
+P17-17
+
+VDI9 terminal logic
+selection
+
+P17-18
+
+VDI10 terminal
+function selection
+
+P17-19
+
+VDI10 terminal logic
+selection
+
+P17-20
+
+VDI11 terminal
+function selection
+
+P17-21
+
+VDI11 terminal logic
+selection
+
+P17-22
+
+VDI12 terminal
+function selection
+
+P17-23
+
+VDI12 terminal logic
+selection
+
+P17-24
+
+VDI13 terminal
+function selection
+
+P17-25
+
+VDI13 terminal logic
+selection
+
+P17-26
+
+VDI14 terminal
+function selection
+
+P17-27
+
+VDI14 terminal logic
+selection
+
+P17-28
+
+VDI15 terminal
+function selection
+
+P17-29
+
+VDI15 terminal logic
+selection
+
+P17-30
+
+VDI16 terminal
+function selection
+
+P17-31
+
+VDI16 terminal logic
+selection
+
+P17-32
+P17-33
+P17-34
+P17-35
+P17-36
+P17-37
+P17-38
+P17-39
+P17-40
+P17-41
+P17-42
+
+-49-
+
+VDO virtual level
+VDO1 terminal
+function selection
+VDO1 terminal logic
+selection
+VDO2 terminal
+function selection
+VDO2 terminal logic
+selection
+VDO3 terminal
+function selection
+VDO3 terminal logic
+selection
+VDO4 terminal
+function selection
+VDO4 terminal logic
+selection
+VDO5 terminal
+function selection
+VDO5 terminal logic
+selection
+
+0- Means active when VDI7 write 1
+1- Means active when write value of VDI7 changes
+from 0 to 1
+0~37
+0- Means active when VDI8 write 1
+1- Means active when write value of VDI8 changes
+from 0 to 1
+0~37
+0- Means active when VDI9 write 1
+1- Means active when write value of VDI9 changes
+from 0 to 1
+0~37
+0- Means active when VDI10 write 1
+1- Means active when write value of VDI10 changes
+from 0 to 1
+0~37
+0- Means active when VDI11 write 1
+1- Means active when write value of VDI11 changes
+from 0 to 1
+0~37
+0- Means active when VDI12 write 1
+1- Means active when write value of VDI12 changes
+from 0 to 1
+0~37
+0- Means active when VDI13 write 1
+1- Means active when write value of VDI13 changes
+from 0 to 1
+0~37
+0- Means active when VDI14 write 1
+1- Means active when write value of VDI14 changes
+from 0 to 1
+0~37
+0- Means active when VDI15 write 1
+1- Means active when write value of VDI15 changes
+from 0 to 1
+
+-
+
+0
+
+Effective
+at stop
+
+Running
+setting
+
+0
+
+Effective
+at stop
+
+Running
+setting
+
+0
+
+Effective
+at stop
+
+Running
+setting
+
+0
+
+Effective
+at stop
+
+Running
+setting
+
+0
+
+Effective
+at stop
+
+Running
+setting
+
+0
+
+Effective
+at stop
+
+Running
+setting
+
+0
+
+Effective
+at stop
+
+Running
+setting
+
+0
+
+Effective
+at stop
+
+Running
+setting
+
+0
+
+Effective
+at stop
+
+Running
+setting
+
+0
+
+Effective
+at stop
+
+Running
+setting
+
+0
+
+Effective
+at stop
+
+Running
+setting
+
+0
+
+Effective
+at stop
+
+Running
+setting
+
+0
+
+Effective
+at stop
+
+Running
+setting
+
+0
+
+Effective
+at stop
+
+Running
+setting
+
+0
+
+Effective
+at stop
+
+Running
+setting
+
+0
+
+Effective
+at stop
+
+Running
+setting
+
+0
+
+Effective
+at stop
+
+Running
+setting
+
+0
+
+Effective
+at stop
+
+Running
+setting
+
+0
+
+Effective
+at stop
+
+Running
+setting
+
+Effective
+at stop
+Effective
+at stop
+Effective
+at stop
+Effective
+at stop
+Effective
+at stop
+Effective
+at stop
+Effective
+at stop
+Effective
+at stop
+Effective
+at stop
+Effective
+at stop
+
+Display
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+
+0~37
+
+-
+
+0- Means active when VDI16 write 1
+1- Means active when write value of VDI16 changes
+from 0 to 1
+-
+
+-
+
+-
+
+0~22
+
+-
+
+0
+
+-
+
+0
+
+-
+
+0
+
+-
+
+0
+
+-
+
+0
+
+-
+
+0
+
+-
+
+0
+
+-
+
+0
+
+-
+
+0
+
+-
+
+0
+
+01-
+
+Means output 1 when active
+Means output 0 when active
+
+0~22
+01-
+
+Means output 1 when active
+Means output 0 when active
+
+0~22
+01-
+
+Means output 1 when active
+Means output 0 when active
+
+0~22
+01-
+
+Means output 1 when active
+Means output 0 when active
+
+0~22
+01-
+
+Means output 1 when active
+Means output 0 when active
+
+-
+
+-
+
+Digital Servo Drive User Manual
+P17-43
+P17-44
+P17-45
+P17-46
+P17-47
+P17-48
+P17-49
+P17-50
+P17-51
+P17-52
+P17-53
+P17-54
+P17-55
+P17-56
+P17-57
+P17-58
+P17-59
+P17-60
+P17-61
+P17-62
+P17-63
+P17-64
+
+VDO6 terminal
+function selection
+VDO6 terminal logic
+selection
+VDO7 terminal
+function selection
+VDO7 terminal logic
+selection
+VDO8 terminal
+function selection
+VDO8 terminal logic
+selection
+VDO9 terminal
+function selection
+VDO9 terminal logic
+selection
+VDO10 terminal
+function selection
+VDO10 terminal logic
+selection
+VDO11 terminal
+function selection
+VDO11 terminal logic
+selection
+VDO12 terminal
+function selection
+VDO12 terminal logic
+selection
+VDO13 terminal
+function selection
+VDO13 terminal logic
+selection
+VDO14 terminal
+function selection
+VDO14 terminal logic
+selection
+VDO15 terminal
+function selection
+VDO15 terminal logic
+selection
+VDO16 terminal
+function selection
+VDO16 terminal logic
+selection
+
+0~22
+01-
+
+Means output 1 when active
+Means output 0 when active
+
+0~22
+01-
+
+Means output 1 when active
+Means output 0 when active
+
+0~22
+01-
+
+Means output 1 when active
+Means output 0 when active
+
+0~22
+01-
+
+Means output 1 when active
+Means output 0 when active
+
+0~22
+01-
+
+Means output 1 when active
+Means output 0 when active
+
+0~22
+01-
+
+Means output 1 when active
+Means output 0 when active
+
+0~22
+01-
+
+Means output 1 when active
+Means output 0 when active
+
+0~22
+01-
+
+Means output 1 when active
+Means output 0 when active
+
+0~22
+01-
+
+Means output 1 when active
+Means output 0 when active
+
+0~22
+01-
+
+Means output 1 when active
+Means output 0 when active
+
+0~22
+01-
+
+Means output 1 when active
+Means output 0 when active
+
+-
+
+0
+
+-
+
+0
+
+-
+
+0
+
+-
+
+0
+
+-
+
+0
+
+-
+
+0
+
+-
+
+0
+
+-
+
+0
+
+-
+
+0
+
+-
+
+0
+
+-
+
+0
+
+-
+
+0
+
+-
+
+0
+
+-
+
+0
+
+-
+
+0
+
+-
+
+0
+
+-
+
+0
+
+-
+
+0
+
+-
+
+0
+
+-
+
+0
+
+-
+
+0
+
+-
+
+0
+
+Effective
+at stop
+Effective
+at stop
+Effective
+at stop
+Effective
+at stop
+Effective
+at stop
+Effective
+at stop
+Effective
+at stop
+Effective
+at stop
+Effective
+at stop
+Effective
+at stop
+Effective
+at stop
+Effective
+at stop
+Effective
+at stop
+Effective
+at stop
+Effective
+at stop
+Effective
+at stop
+Effective
+at stop
+Effective
+at stop
+Effective
+at stop
+Effective
+at stop
+Effective
+at stop
+Effective
+at stop
+
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+Running
+setting
+
+-
+
+7.17 P30 set communication reading servo related variables
+Functional
+code
+P30-00
+P30-01
+P30-02
+
+P30-03
+
+P30-04
+
+Name
+Communication
+reading servo status
+Communication
+reading DO function
+status 1
+Communication
+reading DO function
+status 2
+Communication
+reading input pulse
+command sampling
+value
+Communication
+reading DI conduction
+status
+
+Setting range
+-
+
+Unit
+-
+
+Factory
+setting
+
+Effective
+method
+
+-
+
+-
+
+Communication
+read only
+
+PST
+
+Setting method
+
+Related
+mode
+PST
+
+-
+
+-
+
+-
+
+-
+
+Communication
+read only
+
+-
+
+-
+
+-
+
+-
+
+Communication
+read only
+
+PST
+
+-
+
+-
+
+-
+
+-
+
+Display
+
+PST
+
+0~511
+
+-
+
+-
+
+-
+
+Display
+
+PST
+
+-50-
+
+Digital Servo Drive User Manual
+
+7.18 P31 set communication given servo related variables
+Functional
+code
+P31-00
+P31-04
+
+Unit
+
+Factory
+setting
+
+0~65535
+
+-
+
+0
+
+0~31
+
+-
+
+0
+
+Name
+Communication given
+VDI virtual level
+Communication given
+DO output status
+
+Setting range
+
+Effective
+method
+Effective
+immediately
+Effective
+immediately
+
+Setting
+method
+Running
+setting
+Running
+setting
+
+Related
+mode
+PST
+PST
+
+Chapter VIII Troubleshooting
+8.1 Fault and Warning Code List
+8.1.1 Fault code table (to reset the fault, you need to cancel the enable first)
+Display
+
+Fault name
+
+Er.101
+
+Parameters of P02 and
+above sets are
+abnormal
+
+Er.102
+Er.104
+Er.105
+Er.108
+Er.111
+Er.120
+Er.121
+Er.122
+Er.130
+Er.131
+
+Programmable logic
+configuration failure
+Programmable logic
+interrupt failure
+Abnormal internal
+program
+Parameter storage
+failure
+Internal failure
+Product matching
+failure
+Servo ON command
+invalid fault
+Absolute position
+mode product
+matching failure
+Duplicate assignment
+of DI function
+DO function
+allocation overrun
+
+Can it
+be
+Reset
+
+No
+
+1. The function code parameter value of P02 and following sets exceeds the upper and
+lower limits, and the parameters are re-initialized;
+2. Power off during the process of writing parameters, rewrite the parameters after power
+on;
+3. Reset the motor model and drive model, and initialize the parameters;
+4. The drive EEPROM is abnormal, replace the drive.
+
+No
+
+MCU related hardware is damaged, replace the drive.
+
+No
+
+MCU related hardware is damaged, replace the drive.
+
+No
+No
+No
+No
+Yes
+No
+Yes
+Yes
+
+Er.136
+
+The data in motor
+ROM is incorrectly
+verified or the
+parameters are not
+saved
+
+No
+
+Er.201
+
+Overcurrent 2
+
+No
+
+Er.207
+
+D/Q axis current
+overflow fault
+
+Yes
+
+-51-
+
+Fault and handling method
+
+1. When EEPROM reads/writes function codes, the total number of function codes is
+abnormal, initialize the parameters;
+2. The range of the set value of the function code is abnormal, initialize the parameters;
+3. Initialize and power on again. If the alarm still occurs, replace the drive.
+1. The parameter value can’t be written to the EEPROM, initialize the parameter;
+2. Initialize and power on again. If the alarm still occurs, replace the drive.
+Initialize and power on again. If the alarm still occurs, replace the drive.
+The motor model and drive model match incorrectly, please contact the after-sales
+personnel to check the motor model.
+DI port parameter configuration fault, recheck DI function and VDI function
+configuration
+The absolute value motor model does not match, or the motor model is set incorrectly,
+please contact the after-sales personnel to check the motor model.
+DI port parameter configuration failure, recheck the DI function and VDI function
+configuration or initialize parameters.
+DO function number exceeds DO function number, recheck DO function configuration
+or initialize parameters.
+When the drive reads the parameters in the encoder ROM area, it finds that the
+parameters are not saved, or the parameters are inconsistent with the agreed values
+1. Check the motor model and drive model;
+2. Check whether the motor encoder cable is correct, and whether the connector is
+connected reliably;
+3. Check if the encoder line is disturbed, and re-arrange the wires.
+Overcurrent detected by hardware;
+1. Check whether the motor power lines U V W are correctly connected, and whether
+there is a reverse connection or phase loss;
+2. There is a short circuit in the U V W lines, or there is leakage between the motor coil
+and the casing, replace the motor wire or test the motor;
+3. The encoder line is in poor contact, check or replace the encoder cable;
+4. The load is too heavy, first test whether the motor is normal with no load;
+5. The acceleration and deceleration are too fast, increase the acceleration and
+deceleration time of the program;
+6. If the gain parameter is adjusted, check whether the gain is set too large, and test after
+reducing the gain;
+7. The braking resistor is too small or short-circuited, test with internal braking resistor
+first;
+8. The drive is damaged, replace the drive;
+Abnormal current feedback causes the internal register of the drive to overflow, replace
+the drive;
+
+Digital Servo Drive User Manual
+
+Er.208
+
+System sampling operation
+timeout
+
+No
+
+Er.210
+
+Output short circuit to
+ground
+
+No
+
+Er.220
+
+Phase sequence error
+
+No
+
+Er.234
+
+Overspeed
+
+No
+
+Er.400
+
+Main circuit overvoltage
+
+Yes
+
+Er.410
+
+Main circuit undervoltage
+
+Yes
+
+Er.420
+Er.430
+
+Main circuit power phase
+loss
+Control power
+undervoltage
+
+1. MCU communication timeout, replace the drive
+2. Encoder communication times out, check whether the encoder line is connected
+well, or replace the encoder and reconnect;
+3. Motor encoder is faulty, replace the motor for test;
+4. Current sampling times out, check whether there is interference from large
+equipment on site, increase the isolation transformer, and re-arrange the wires;
+5. High-precision AD conversion times out, check the analog input wiring to see if
+there is interference, and connect with shielded wire;
+6. The drive is damaged, replace the drive;
+During the power-on self-test of the drive, the motor phase current or bus voltage is
+detected abnormal.
+1. The power lines U V W are short-circuited to the ground, check the motor lines;
+2. The motor coil is short-circuited to the casing, replace the motor;
+3. Drive failure, replace the drive.
+The drive performs angle identification, and it is identified that the phase sequence of
+the UVW of the drive and the UVW of the motor do not match.
+1. The electrical angle of the motor encoder does not match, reset the motor
+parameters, and self-learn;
+2. The U V W phase sequence is reversed, check the motor power lines;
+In torque control mode, the direction of the torque command is opposite to the
+direction of the speed feedback or in the position or speed control mode, the direction
+of the speed feedback is opposite to the direction of the speed command;
+1. The U V W phase sequence is reversed, check the motor power lines;
+2. Initial phase detection error of the motor rotor is caused by the interference signal,
+re-power on, and check the wiring;
+3. The encoder model is wrong or the wiring is wrong, replace the motor or encoder
+line;
+4. Drive failure, replace the drive;
+DC bus voltage exceeds fault value 420V
+1. Measure the power supply voltage. If the grid voltage is too high or unstable, a
+voltage stabilizer needs to be added;
+2. The braking resistor fails, measure the resistance between B1 and B3 of the drive in
+the state of complete power failure. If it is infinite, the internal braking resistor is
+damaged and the drive needs to be replaced;
+3. The resistance of the braking resistor is too large, replace it with a braking resistor of
+40 ohms or 50 ohms, please contact the after-sales personnel;
+4. The grid voltage is too high, and the motor accelerates and decelerates too fast,
+increase the acceleration and deceleration time;
+5. Monitor P0B-26 to check whether the bus voltage is consistent with the grid voltage.
+If the difference is too large, the drive may be damaged and needs to be replaced. 220V
+AC corresponds to the bus voltage of 310V.
+DC bus voltage is lower than the fault value 200V
+1. The main circuit power supply is unstable or power off, re-check the wiring, or add a
+voltage stabilizer;
+2. Monitor P0B-26 to check whether the bus voltage is consistent with the grid voltage.
+If the difference is too large, the drive may be damaged and needs to be replaced. 220V
+AC corresponds to the bus voltage of 310V.
+
+Yes
+
+Servo drive failure, replace the drive.
+
+Yes
+
+Servo drive failure, replace the drive.
+
+Er.500
+
+Overspeed alarm
+
+Yes
+
+Er.510
+
+Pulse output overspeed
+
+Yes
+
+Er.602
+
+Angle identification failed
+
+Yes
+
+The actual speed of the servo motor exceeds the overspeed fault threshold
+1. The phase sequence of motor cable U V W is wrong, check the motor wiring;
+2. The motor parameters are incorrect, reset the motor parameters and self-learn;
+3. The input command exceeds the overspeed fault threshold;
+4. The motor speed is overregulated, the gain parameter setting is unreasonable,
+initialize the drive parameters and test;
+5. Drive failure, replace the drive.
+The output pulse frequency exceeds the upper limit of the frequency allowed by the
+hardware; reduce P05-17 (number of pulses divided by the encoder frequency), so that
+the output pulse frequency is less than the upper limit of the allowable frequency.
+Motor self-learning failed, check whether the encoder line is normal and the encoder
+type is correct.
+
+-52-
+
+Digital Servo Drive User Manual
+Er.610
+
+Drive overload
+
+Yes
+
+Er.620
+
+Motor overload
+
+Yes
+
+Er.625
+
+Brake closed abnormally
+
+Yes
+
+Er.626
+
+Brake opened abnormally
+
+Yes
+
+Er.630
+
+Motor stall
+
+Yes
+
+Er.650
+
+Heat sink overheating
+
+Yes
+
+Er.731
+
+Encoder battery failure
+
+Yes
+
+Er.733
+
+Encoder multi-turn count
+error
+
+Yes
+
+Er.735
+
+Encoder multi-turn count
+overflow
+
+Yes
+
+Er.740
+
+Encoder interference
+
+No
+
+Er.834
+
+AD sampling overvoltage
+
+Yes
+
+Er.835
+
+AD sampling failure
+
+Yes
+
+Er.A33
+
+Encoder data abnormal
+
+No
+
+Er.A34
+
+Encoder loopback
+verification abnormal
+
+No
+
+Er.A35
+
+Z signal loss
+
+No
+
+-53-
+
+1. The motor model or drive model is set incorrectly, please contact the after-sales
+personnel to check the parameters;
+2. Monitor the drive load rate PB-02 to see if the overload causes an alarm;
+3. The motor is stalled, first eliminate the motor stall and then test, or remove the
+motor for no-load test;
+4. The gain parameter setting is too large, test after initializing the parameters;
+5. Motor acceleration and deceleration is too fast, increase the acceleration and
+deceleration time;
+6. The phase sequence of motor cable U V W is wrong, check the motor wiring;
+7. The drive is damaged, replace the drive.
+After the brake protection is turned on, the brake output signal is valid, the first
+100~500ms of the input command is zero, the output torque is less than 70% of the
+gravity load detection value. Confirm whether the signal of the motor brake terminal is
+valid and whether the motor brake relay is damaged
+After the brake protection is turned on, the output signal of the brake is invalid, but it is
+detected that the motor rotates more than two turns
+Check whether the motor brake terminal signal is valid and whether the motor brake
+relay is damaged.
+The actual speed of the motor is lower than 10rpm, but the torque command reaches
+the limit value, and the duration reaches the set value of P0A-32
+1. The UVW output of the drive is out of phase, disconnected, and wrongly connected
+in phase sequence;
+2. The motor parameters are incorrect, reset the motor parameters and self-learn;
+3. The motor is stalled, first eliminate the motor stall and then test, or remove the
+motor for no-load test;
+The temperature of the power module of the drive is higher than the over-temperature
+protection point, the servo drive is faulty, replace the drive.
+The battery voltage of the absolute value encoder is lower than 3.0V
+1. The encoder line is disconnected, set P0D-20=2, and then set P0D-01=1 to clear the
+fault;
+2. The battery is dead, replace the battery.
+Initialize the drive parameters, reset the motor parameters and drive parameters, set the
+encoder type,
+Then set P0D-20=2 and P0D-01=1 to clear the fault and power on again. If the alarm
+still occurs, replace the motor and test.
+Initialize the drive parameters, reset the motor parameters and drive parameters, set the
+encoder type,
+Then set P0D-20=2 and P0D-01=1 to clear the fault and power on again. If the alarm
+still occurs, replace the motor and test.
+Encoder Z signal is interfered, causing the electrical angle corresponding to the Z
+signal to change too much
+1. The encoder wiring is wrong or the connector is loose, check or replace the encoder
+line and test it;
+2. Encoder Z signal is disturbed, re-wire and ensure a good grounding;
+3. The encoder is faulty, replace the motor;
+AI sampling value is greater than 11.5V
+1. Check whether the input analog voltage value is too high;
+2. Analog input port of the drive is faulty, replace the drive.
+AD circuit is disturbed
+There is interference in the AI channel wiring, check the analog signal wiring, and use
+shielded twisted pair.
+The internal parameters of the encoder are abnormal
+1. The serial encoder line is disconnected or loose, check or replace the encoder line
+and test;
+2. The encoder is faulty, replace the motor;
+1. The driver and motor types do not match, reset the motor model;
+2. The encoder line is broken, check the encoder line.
+Encoder Z signal is lost or the AB signal edge transitions at the same time
+1. The serial encoder line is disconnected or loose, check or replace the encoder line
+and test;
+2. The encoder is faulty, replace the motor;
+
+Digital Servo Drive User Manual
+
+Er.B00
+
+Excessive position
+deviation
+
+Yes
+
+Er.B01
+
+Abnormal pulse input
+
+Yes
+
+Er.B03
+
+Electronic gear ratio setting
+exceeds the limit
+
+Yes
+
+In position control mode, the position deviation is greater than the set value of P0A-10
+1. The drive U V W output has phase loss or the phase sequence is wrongly connected,
+check the motor wire;
+2. The motor is stalled, first eliminate the motor stall and then test, or remove the
+motor for no-load test;
+3. The gain of servo drive is low, initialize the parameters and test;
+4. The input pulse frequency is high, reduce the input pulse frequency;
+5. Compared with the operating conditions, the fault value (P0A-10) is too small,
+increase P0A-10;
+6. The torque limit value P07-09~P07-12 is set too small, initialize the parameters and
+test;
+7. Servo drive/motor failure, replace the drive or motor.
+The input pulse frequency is greater than the maximum position pulse frequency
+(P0A-09)
+1. Reduce the input pulse frequency;
+2. Caused by input pulse interference, the pulse line should use twisted pair shielded
+wire and be properly grounded;
+3. The pulse signal switching power supply is infected. Use the internal 24V power
+supply of the drive as the pulse signal power supply.
+A group of electronic gear ratio exceeds the limit value, check the electronic gear ratio
+setting value.
+
+8.1.2 Warning code table (warnings can be reset directly, no need to disable)
+Display
+
+Warning name
+
+Can it be
+Reset
+
+Er.110
+
+Frequency division
+pulse output setting
+failure
+
+Yes
+
+Er.601
+
+Homing failed
+
+Yes
+
+Er.730
+
+Encoder battery
+warning
+
+Yes
+
+Er.831
+
+AI zero drift is too
+large
+
+Yes
+
+Er.900
+
+DI emergency stop
+
+Yes
+
+Er.909
+
+Motor overload
+warning
+
+Yes
+
+Er.920
+
+Braking resistor
+overload
+
+Yes
+
+Er.922
+
+External braking
+resistor is too small
+
+Yes
+
+Er.939
+
+Motor power line is
+disconnected
+
+Yes
+
+Er.941
+
+Changed parameters
+take effect after
+powering on again
+
+Yes
+
+Er.942
+
+Frequent parameter
+storage
+
+Yes
+
+Er.950
+Er.952
+
+Forward overtravel
+warning
+Reverse overtravel
+warning
+
+Yes
+Yes
+
+Warning and handling method
+When using the encoder frequency division output function (P05-38=0), the set
+encoder frequency division pulse number does not meet the threshold determined by
+the encoder specification, reset the encoder frequency division pulse number (P05-17)
+to make it meet the specified range.
+When using the homing function (P05-30=1~5), the home is not found within the time
+set by P05-35,
+1. Increase the time of P05-34;
+2. Check whether the home signal is valid, change the home set point, or change the
+home search direction;
+The battery voltage of the absolute value encoder is lower than 3.0V. Replace the
+battery with a new one that matches the voltage in the power-on state.
+When the input voltage of AI (including AI1 and AI2) terminals is 0V, the voltage
+sampled by the driver is greater than 500mV,
+Check AI input wiring, use shielded twisted pair.
+DI terminal corresponding to DI function 34 (FunIN.34: brake, Emergency) is
+triggered (including hardware DI and virtual DI), check the DI wiring.
+The load rate is too high and causes a warning; check whether the load is too heavy or
+there is a stall condition.
+Braking resistor current excessive warning
+1. Check if the bus voltage is too high and the energy discharges too quickly; add a
+voltage regulator and reduce the voltage;
+2. Check if the motor decelerates too fast, increase the deceleration time;
+3. The power of the internal braking resistor is insufficient. Replace the external
+braking resistor. It is recommended that the resistance value should not be lower than
+35 ohms.
+4. When using an external resistor, check the parameter values of P02-25 ~ P2-27, and
+set the value of P2-27 to be consistent with the resistance value of the selected resistor;
+4. The brake circuit of the drive is damaged, replace the drive;
+P02-27 (resistance value of external braking resistor) is less than P02-21 (minimum
+value of external braking resistor allowed by the drive)
+The actual phase current of the motor is less than 10% of the rated current, and the
+actual speed is small, but the internal torque command is large, check the wiring of the
+motor power cable, rewire, and replace the cable if necessary
+When the function code attribute “Effective time” of the servo drive is “power on
+again”, the drive reminds the user that it needs to be powered on again after the
+parameter value of the function code is changed
+If the number of function codes modified at the same time exceeds 200, check the
+operation mode. For parameters that do not need to be stored in EEPROM, set P0C-13
+to 0 before the host computer writes
+The corresponding DI terminal of DI function 14 (FunIN.14: P-OT, forward overtravel
+switch) is triggered.
+The corresponding DI terminal of DI function 15 (FunIN.15: N-OT, reverse overtravel
+switch) is triggered.
+
+-54-
+
+Digital Servo Drive User Manual
+Er.980
+
+Encoder internal fault
+
+Yes
+
+Er.A40
+
+Internal failure
+
+Yes
+
+The encoder algorithm is faulty; if the fault is still reported after turning on the power
+for many times, replace the motor.
+Motor self-learning failed
+1. Check the motor encoder line error;
+2. The encoder model is wrong, reset the motor model and encoder type;
+3. The motor encoder is faulty, replace the motor.
+
+Chapter IX MODBUS Communication
+This series of drives has two RS485 interfaces, which can communicate with the computer through USB-to-485
+communication line for parameter setting, or control the drive to run the internal multi-segment position or multi-speed
+mode through the RS485 master station controller.
+
+9.1 Wiring and Setup
+9.1.1 Topology structure
+CN3 and CN4 of the drive are RS485 interfaces. For specific pin definitions, please refer to chapter 4.3.1. When
+multiple nodes are used for communication control, a bus topology should be used, and the last one needs to be
+connected to a 120-ohm terminal resistor.
+
+Terminal
+resistance
+
+RS485
+master
+
+9.1.2 Related parameters
+No.
+P0C-00
+
+Parameter name
+Servo axis address
+
+Setting range
+1~247, 0 is the broadcast address
+
+Factory
+setting
+1
+
+0-2400bps
+1-4800bps
+P0C-02
+
+Serial port baud rate
+
+2-9600bps
+
+setting
+
+3-19200bps
+
+5
+
+4-38400bps
+5-57600bps
+
+P0C-03
+
+-55-
+
+Moubus data format
+
+0: No parity, 2 stop bits
+1: Even parity, 1 stop bit: 2: Odd parity, 1 stop bit:
+3: No parity, 1 stop bit
+
+0
+
+Digital Servo Drive User Manual
+Whether the write
+P0C-13
+
+0: Do not update EEPROM
+1: Update except P0B set and P0D set
+EEPROM
+
+function code of Moubus
+communication is
+updated to EEPROM
+
+1
+
+Note: To write parameters frequently, you need to set P0C-13 to 0 to prevent damage to the drive!
+
+9.1.3 Communication address description
+The communication address of the parameter can be calculated from the parameter number in the following method:
+Staying the same
+
+Convert to hexadecimal
+
+Hex address: 0B11
+Decimal address: 2833
+
+9.2 MODBUS communication protocol
+9.2.1 Read register command (0x06)
+Command sent by master station (PLC, etc.):
+Byte order
+
+Command
+example
+
+Functional symbols
+
+Functions
+
+1st Byte
+
+0x01
+
+Slave Addr
+
+Slave address, here is 1
+
+2nd Byte
+
+0x03
+
+CMD
+
+Function code, here is 0x03, indicating that it is a
+command to read parameters
+
+3rd Byte
+
+0x0B
+
+Start AddrH
+
+Upper 8 bits of the starting address of the read parameter
+
+4th Byte
+
+0x11
+
+Start AddrL
+
+Lower 8 bits of the starting address of the read parameter
+
+5th Byte
+
+0x00
+
+Num_High (Byte)
+
+Upper 8 bits of the number of read parameters Note: The
+number here refers to how many registers (words), not
+how many bytes.
+
+6th Byte
+
+0x02
+
+Num_Low (Byte)
+
+Lower 8 bits of the number of read parameters
+
+7th Byte
+
+0x96
+
+CRC_H
+
+High bit of CRC check. CRC check refers to the CRC
+checksum of the 1st to the previous byte (here is the 6th
+byte).
+
+8th Byte
+
+0x2A
+
+CRC_L
+
+Low bit of CRC check.
+
+[For the above example: Two parameters are read from the master station with the slave station address set as 1 and the
+starting address, as 2833(0x0B11), namely, two bytes are read]
+Slave station (servo drive) response:
+
+-56-
+
+Digital Servo Drive User Manual
+
+Byte order
+
+Command
+example
+
+Functional symbols
+
+Functions
+
+1st Byte
+
+0x01
+
+Slave Addr
+
+Slave address, here is 1
+
+2nd Byte
+
+0x03
+
+CMD
+
+Function code, 0x03, corresponding to the master
+command
+
+3rd Byte
+
+0x04
+
+Data Lenth
+
+Data length of the response, unit: bytes
+
+4th Byte
+
+0x00
+
+Data(0)
+
+Data 0 (high bit of the 1st register)
+
+5th Byte
+
+0x64
+
+Data(0)
+
+Data 0 (low bit of the 1st register)
+
+6th Byte
+
+0x00
+
+Data(1)
+
+Data 1 (high bit of the 2nd register)
+
+7th Byte
+
+0xC8
+
+Data(1)
+
+Data 1 (low bit of the 2nd register)
+
+8th Byte
+
+0xBA
+
+CRC_H
+
+High bit of CRC check. CRC check refers to the CRC
+checksum of the 1st to the previous byte (here is the 9th
+byte).
+
+9th Byte
+
+0x7A
+
+CRC_L
+
+Low bit of CRC check.
+
+[Response data0:0x0064; data1:0x00C8], converted to 32-bit data 00C80064, which is decimal 13107300.
+
+9.2.2 Write single-register command (0x06)
+Command sent by master station (PLC, etc.):
+Byte order
+
+Command
+example
+
+Functional
+symbols
+
+Functions
+
+1st Byte
+
+0x01
+
+Slave Addr
+
+Slave address, here is 1
+
+2nd Byte
+
+0x06
+
+CMD
+
+Function code, here is 0x06, indicating that it is to write a
+parameter command
+
+3rd Byte
+
+0x12
+
+Start AddrH
+
+Upper 8 bits of the starting address of the written parameter
+
+4th Byte
+
+0x14
+
+Start AddrL
+
+Lower 8 bits of the starting address of the written parameter
+
+5th Byte
+
+0x01
+
+DATA(0)
+
+Upper 8 bits of the written data.
+
+6th Byte
+
+0xF4
+
+DATA(1)
+
+Lower 8 bits of the written data.
+
+7th Byte
+
+0xCC
+
+CRC_H
+
+High bit of CRC check. CRC check refers to the CRC
+checksum of the 1st to the previous byte (here is the 6th byte).
+
+8th Byte
+
+0xA1
+
+CRC_L
+
+Low bit of CRC check.
+
+[For the above example: A parameter is written from the master station with the slave station address set as 1 and the
+starting address, as 4628(0x1214), the value is 500(0x01F4)]
+Slave station (servo drive) response:
+
+-57-
+
+Byte order
+
+Command
+example
+
+Functional
+symbols
+
+Functions
+
+1st Byte
+
+0x01
+
+Slave Addr
+
+Slave address, here is 1
+
+2nd Byte
+
+0x06
+
+CMD
+
+Function code, 0x06, corresponding to the master command
+
+3rd Byte
+
+0x12
+
+Start AddrH
+
+Upper 8 bits of the starting address of the written parameter
+
+4th Byte
+
+0x14
+
+Start AddrL
+
+Lower 8 bits of the starting address of the written parameter
+
+5th Byte
+
+0x01
+
+DATA(0)
+
+Upper 8 bits of the written data.
+
+6th Byte
+
+0xF4
+
+DATA(1)
+
+Lower 8 bits of the written data.
+
+Digital Servo Drive User Manual
+7th Byte
+
+0xCC
+
+CRC_H
+
+High bit of CRC check. CRC check refers to the CRC
+checksum of the 1st to the previous byte (here is the 6th byte).
+
+8th Byte
+
+0xA1
+
+CRC_L
+
+Low bit of CRC check.
+
+[The response is the same as the command sent by the master]
+
+9.2.3 Write muiti-register command (0x10)
+Command sent by the station (PLC, etc.):
+Byte order
+
+Command
+example
+
+Functional
+symbols
+
+Functions
+
+1st Byte
+
+0x01
+
+Slave Addr
+
+Slave address, here is 1
+
+2nd Byte
+
+0x10
+
+CMD
+
+Function code, here is 0x10, indicating that it is to write
+multiple parameter commands
+
+3rd Byte
+
+0x11
+
+Start AddrH
+
+Upper 8 bits of the starting address of the written parameter
+
+4th Byte
+
+0x0C
+
+Start AddrL
+
+Lower 8 bits of the starting address of the written parameter
+
+5th Byte
+
+0x00
+
+NUM_H
+
+Upper 8 bits of the number of parameters (registers) written
+
+6th Byte
+
+0x02
+
+NUM_L
+
+Lower 8 bits of the number of parameters (registers) written
+
+7th Byte
+
+0x04
+
+Data Length
+
+The number of bytes of the parameter written is twice the
+number of registers
+
+8th Byte
+
+0x38
+
+DATA(0)
+
+Upper 8 bits of the first data written.
+
+9th Byte
+
+0x80
+
+DATA(0)
+
+Lower 8 bits of the first data written.
+
+10th Byte
+
+0x00
+
+DATA(1)
+
+Upper 8 bits of the second data written.
+
+11th Byte
+
+0x01
+
+DATA(1)
+
+Lower 8 bits of the second data written.
+
+12th Byte
+
+0xFE
+
+CRC_H
+
+High bit of CRC check. CRC check refers to the CRC
+checksum of the 1st to the previous byte (here is the 6th byte).
+
+13th Byte
+
+0xE2
+
+CRC_L
+
+Low bit of CRC check.
+
+[For the above example: the master station writes 32-bit data 80000 (0x13880) to the place where the slave station
+address is 1 and the starting address is 4364 (0x110C)]
+Slave station (servo drive) response:
+Byte order
+
+Command
+example
+
+Functional
+symbols
+
+Functions
+
+1st Byte
+
+0x01
+
+Slave Addr
+
+Slave address, here is 1
+
+2nd Byte
+
+0x10
+
+CMD
+
+Function code, 0x10, corresponding to the master
+command
+
+3rd Byte
+
+0x11
+
+Start AddrH
+
+Upper 8 bits of the starting address of the written
+parameter
+
+4th Byte
+
+0x0C
+
+Start AddrL
+
+Lower 8 bits of the starting address of the written
+parameter
+
+5th Byte
+
+0x00
+
+NUM_H
+
+Upper 8 bits of the number of parameters to be written
+(number of registers).
+
+6th Byte
+
+0x04
+
+NUM_L
+
+Lower 8 bits of the number of parameters to be written
+(number of registers).
+
+7th Byte
+
+0x04
+
+CRC_H
+
+High bit of CRC check. CRC check refers to the CRC
+checksum of the 1st to the previous byte (here is the 6th
+byte).
+-58-
+
+Digital Servo Drive User Manual
+
+8th Byte
+
+0xF5
+
+CRC_L
+
+Low bit of CRC check.
+
+9.2.4 Response exception and error codes
+Regardless of the read or write command, if the slave responds abnormally, its response frame is changed. As follows
+Byte order
+
+Command
+example
+
+Functional
+symbols
+
+Functions
+
+1st Byte
+
+0x01
+
+Slave Addr
+
+Slave address, here is 1
+
+2nd Byte
+
+0x83
+
+CMD|0x80
+
+0x80 + function code
+
+3rd Byte
+
+0x02
+
+Error Code
+
+Error code. There are the following types:
+0x01- Illegal command code
+0x02: Illegal address
+0x03: Illegal data
+0x04: Refused to execute
+
+4th Byte
+
+0xC0
+
+CRC_H
+
+High bit of CRC check. CRC check refers to the CRC
+checksum of the 1st to the previous byte (here is the 3rd
+byte).
+
+5th Byte
+
+0x F1
+
+CRC_L
+
+Low bit of CRC check.
+
+9.2.5 CRC check
+When the host computer communicates with the servo drive, a consistent CRC check algorithm must be used, or CRC check
+error will occur. The servo drive adopts 16-bit CRC, with the low byte in front and the high byte in the back; the CRC function
+is as follows:
+Uint16 COMM_CrcValueCalc(const Uint8 *data, Uint16 length)
+{
+Uint16 crcValue = 0xffff; int16 i;
+while (length--)
+{
+crcValue ^= *data++; for (i = 0; i< 8; i++)
+{
+if (crcValue& 0x0001)
+{
+crcValue = (crcValue>> 1) ^ 0xA001;
+}
+else
+{
+crcValue = crcValue>> 1;
+}
+}
+}
+return (crcValue);
+}
+
+-59-
+
+

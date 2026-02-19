@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\nicol\Desktop\DevReciproc\DriveA5\build_vs2022\CMakeFiles\8c3eb04313b7e397b0e6c21b3894a797\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{23F86145-7137-3BDF-9508-4C9478C4A7BC}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>
