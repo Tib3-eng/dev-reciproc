@@ -89,6 +89,30 @@ static int read_p0b09(modbus_t *ctx, uint16_t *out){
     return -1;
 }
 
+static int read_p0b09_cached(modbus_t *ctx, uint16_t *out, int *mode){
+    /* mode: 0=unknown, 3=FC03 holding, 4=FC04 input */
+    if(mode && *mode == 3){
+        if(read_u16(ctx, REG_P0B_09, out) == 0) return 0;
+        if(read_u16_in(ctx, REG_P0B_09, out) == 0){ *mode = 4; return 0; }
+        return -1;
+    }
+    if(mode && *mode == 4){
+        if(read_u16_in(ctx, REG_P0B_09, out) == 0) return 0;
+        if(read_u16(ctx, REG_P0B_09, out) == 0){ *mode = 3; return 0; }
+        return -1;
+    }
+
+    if(read_u16(ctx, REG_P0B_09, out) == 0){
+        if(mode) *mode = 3;
+        return 0;
+    }
+    if(read_u16_in(ctx, REG_P0B_09, out) == 0){
+        if(mode) *mode = 4;
+        return 0;
+    }
+    return -1;
+}
+
 static int write_u16_seq(modbus_t *ctx, int reg, uint16_t v, const char *label,
                          int retries, int retry_ms){
     for(int i = 0; i < retries; ++i){
@@ -144,6 +168,11 @@ static int cmd_stop(modbus_t *ctx){
     return -1;
 }
 
+static int cmd_vdi_stop(modbus_t *ctx){
+    set_timeouts_us(ctx, CMD_RESP_US, CMD_BYTE_US);
+    return write_u16_seq(ctx, REG_P31_00, 0, NULL, 3, 30);
+}
+
 static int cmd_rpm(modbus_t *ctx, int rpm){
     if(rpm < -32768 || rpm > 32767) return -1;
     set_timeouts_us(ctx, CMD_RESP_US, CMD_BYTE_US);
@@ -159,6 +188,33 @@ static int64_t qpc_now_ticks(void){
     LARGE_INTEGER c;
     QueryPerformanceCounter(&c);
     return (int64_t)c.QuadPart;
+}
+
+static void stop_drive_now(modbus_t *ctx){
+    /* Fast stop vector: issue stop command immediately with short retries. */
+    for(int i = 0; i < 4; ++i){
+        (void)cmd_rpm(ctx, 0);
+        (void)cmd_stop(ctx);
+        (void)cmd_vdi_stop(ctx);
+        Sleep(20);
+    }
+}
+
+static int ipc_stop_requested(int use_ipc){
+    if(!use_ipc) return 0;
+
+    HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
+    if(h == NULL || h == INVALID_HANDLE_VALUE) return 0;
+
+    DWORD avail = 0;
+    if(!PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL) || avail == 0) return 0;
+
+    char buf[128];
+    DWORD to_read = (avail < (DWORD)(sizeof(buf) - 1)) ? avail : (DWORD)(sizeof(buf) - 1);
+    DWORD got = 0;
+    if(!ReadFile(h, buf, to_read, &got, NULL) || got == 0) return 0;
+    buf[got] = 0;
+    return (strstr(buf, "STOP") != NULL) ? 1 : 0;
 }
 static int64_t qpc_freq_ticks(void){
     LARGE_INTEGER f;
@@ -347,47 +403,76 @@ int main(int argc, char **argv){
     int64_t start_ticks = qpc_now_ticks();
     int64_t next_ticks = start_ticks;
 
+    int stop_requested = 0;
+    int stop_sent = 0;
+    int64_t hard_stop_ticks = start_ticks + (int64_t)(duration_s * (double)qpc_freq);
+    int p0b09_mode = 0;
+    int32_t last_pos = 0;
+    int last_pos_valid = 0;
     for(int idx = 0; idx < total_samples; ){
+        if(ipc_stop_requested(use_ipc)){
+            stop_requested = 1;
+            break;
+        }
         int64_t now = qpc_now_ticks();
-        if(now >= next_ticks){
+        if(!stop_sent && now >= hard_stop_ticks){
+            stop_drive_now(ctx);
+            stop_sent = 1;
+        }
+        int sampled_ok = 0;
+        int32_t sampled_pos = 0;
+        if(!stop_sent){
+            set_timeouts_us(ctx, FAST_RESP_US, FAST_BYTE_US);
+            uint16_t pos_raw = 0;
+            if(read_p0b09_cached(ctx, &pos_raw, &p0b09_mode) == 0){
+                if(cmd_units_per_rev > 0){
+                    /* Escala 0..65535 -> 0..(P05-02-1) */
+                    sampled_pos = (int32_t)(((uint32_t)pos_raw * (uint32_t)cmd_units_per_rev) / 65536u);
+                }else{
+                    sampled_pos = (int32_t)pos_raw;
+                }
+                sampled_ok = 1;
+            }
+        }
+        if(sampled_ok){
+            last_pos = sampled_pos;
+            last_pos_valid = 1;
+        }
+
+        int emitted = 0;
+        while(idx < total_samples && now >= next_ticks){
             double t_s = (double)idx / rate_hz;
             int64_t t_qpc = start_ticks + (int64_t)idx * dt_ticks;
 
             /* schedule step */
-            if(seg_idx + 1 < seg_count && t_s >= segs[seg_idx].t_end){
+            while(seg_idx + 1 < seg_count && t_s >= segs[seg_idx].t_end){
                 seg_idx++;
-                (void)cmd_rpm(ctx, segs[seg_idx].rpm);
-            }
-
-            int32_t pos = 0;
-            int err = 0;
-            set_timeouts_us(ctx, FAST_RESP_US, FAST_BYTE_US);
-            uint16_t pos_raw = 0;
-            if(read_p0b09(ctx, &pos_raw) != 0){
-                err = 1;
-            }else{
-                if(cmd_units_per_rev > 0){
-                    /* Escala 0..65535 -> 0..(P05-02-1) */
-                    pos = (int32_t)(((uint32_t)pos_raw * (uint32_t)cmd_units_per_rev) / 65536u);
-                }else{
-                    pos = (int32_t)pos_raw;
+                if(!stop_sent){
+                    (void)cmd_rpm(ctx, segs[seg_idx].rpm);
                 }
             }
 
-            if(err){
-                fprintf(f, "%d,%lld,%.6f,NULL,1\n", idx, (long long)t_qpc, t_s);
+            if(last_pos_valid){
+                fprintf(f, "%d,%lld,%.6f,%ld,0\n", idx, (long long)t_qpc, t_s, (long)last_pos);
             }else{
-                fprintf(f, "%d,%lld,%.6f,%ld,0\n", idx, (long long)t_qpc, t_s, (long)pos);
+                fprintf(f, "%d,%lld,%.6f,NULL,1\n", idx, (long long)t_qpc, t_s);
             }
             idx++;
             next_ticks += dt_ticks;
-        }else{
+            emitted = 1;
+        }
+        if(!emitted){
             Sleep(1);
         }
     }
 
-    (void)cmd_rpm(ctx, 0);
-    (void)cmd_stop(ctx);
+    if(stop_requested){
+        puts("STOP requested (IPC).");
+        fflush(stdout);
+    }
+    if(!stop_sent){
+        stop_drive_now(ctx);
+    }
     modbus_close(ctx);
     modbus_free(ctx);
     fclose(f);

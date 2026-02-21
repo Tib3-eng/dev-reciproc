@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import time
+from itertools import zip_longest
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Tuple, Optional
@@ -293,27 +294,101 @@ def wait_and_merge(state: RunState) -> int:
     state.dlg_proc.wait()
     state.drive_proc.wait()
 
+    merge_rc = -1
     merge_cmd = [
         state.merge_exe,
         "--dlg", state.dlg_csv,
         "--drive", state.drive_csv,
         "--out", state.merge_csv,
     ]
-    return subprocess.call(merge_cmd)
+    try:
+        merge_rc = subprocess.call(merge_cmd)
+    except Exception:
+        merge_rc = -1
+
+    # Safety net: if C merge failed or output is missing, generate merge in Python.
+    if merge_rc != 0 or not os.path.exists(state.merge_csv):
+        _merge_csv_fallback(state.dlg_csv, state.drive_csv, state.merge_csv)
+        return 0
+
+    return merge_rc
+
+
+def _merge_csv_fallback(dlg_csv: str, drive_csv: str, out_csv: str) -> None:
+    """
+    Fallback merge implemented in Python.
+    Keeps output schema compatible with merge_logs.c:
+      idx,t_s,ch1..ch8,pos,dlg_err,drive_err
+    """
+    with open(dlg_csv, "r", newline="", encoding="utf-8") as fdlg, \
+         open(drive_csv, "r", newline="", encoding="utf-8") as fdrv, \
+         open(out_csv, "w", newline="", encoding="utf-8") as fout:
+        rd_dlg = csv.reader(fdlg)
+        rd_drv = csv.reader(fdrv)
+        w = csv.writer(fout)
+
+        # skip headers
+        next(rd_dlg, None)
+        next(rd_drv, None)
+
+        w.writerow(["idx", "t_s", "ch1", "ch2", "ch3", "ch4", "ch5", "ch6", "ch7", "ch8", "pos", "dlg_err", "drive_err"])
+
+        idx_fallback = 0
+        for drow, rrow in zip_longest(rd_dlg, rd_drv, fillvalue=None):
+            dlg = drow if drow else []
+            drv = rrow if rrow else []
+
+            idx = dlg[0] if len(dlg) > 0 and dlg[0] else (drv[0] if len(drv) > 0 and drv[0] else str(idx_fallback))
+            t_s = dlg[2] if len(dlg) > 2 and dlg[2] else (drv[2] if len(drv) > 2 and drv[2] else "NULL")
+
+            ch = []
+            for i in range(8):
+                col = 3 + i  # ch1 starts at col 3 in dlg.csv (0-based)
+                ch.append(dlg[col] if len(dlg) > col and dlg[col] else "NULL")
+
+            pos = drv[3] if len(drv) > 3 and drv[3] else "NULL"
+            dlg_err = dlg[11] if len(dlg) > 11 and dlg[11] else "1"
+            drv_err = drv[4] if len(drv) > 4 and drv[4] else "1"
+
+            w.writerow([idx, t_s, *ch, pos, dlg_err, drv_err])
+            idx_fallback += 1
 
 
 def stop_run(state: Optional[RunState]) -> None:
     """
-    Hard stop for both processes.
+    Stop both processes with a graceful STOP request first, then terminate fallback.
     """
     if not state:
         return
-    for p in (state.dlg_proc, state.drive_proc):
+    procs = (state.dlg_proc, state.drive_proc)
+
+    # 1) Best-effort graceful stop (loggers running with --ipc can read STOP from stdin).
+    for p in procs:
+        if p and p.poll() is None and p.stdin:
+            try:
+                p.stdin.write("STOP\n")
+                p.stdin.flush()
+            except Exception:
+                pass
+
+    # 2) Give the drive logger a short window to issue Modbus stop safely.
+    deadline = time.time() + 2.5
+    while time.time() < deadline:
+        if all((not p) or (p.poll() is not None) for p in procs):
+            return
+        time.sleep(0.05)
+
+    # 3) Fallback terminate/kill.
+    for p in procs:
         if p and p.poll() is None:
             try:
                 p.terminate()
+                p.wait(timeout=1.5)
             except Exception:
-                pass
+                try:
+                    p.kill()
+                except Exception:
+                    pass
 
 
 def _wait_ready(proc: subprocess.Popen, tag: str, timeout_s: float = 5.0) -> None:

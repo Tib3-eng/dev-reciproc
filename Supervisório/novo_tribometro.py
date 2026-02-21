@@ -1312,14 +1312,22 @@ def start_acquisition():
         timer_started = False
 
         # Thread que aguarda fim e faz merge (nao bloqueia GUI)
+        state_snapshot = external_run_state
         def _wait_and_merge():
             try:
-                orch.wait_and_merge(external_run_state)
+                merge_rc = orch.wait_and_merge(state_snapshot)
+                if os.path.exists(caminho_merge_csv):
+                    log_msg(f"Merge gerado: {caminho_merge_csv} (rc={merge_rc})")
+                else:
+                    log_msg("Merge nao foi gerado.")
+            except Exception as e:
+                log_msg(f"Erro no merge final: {e}")
             finally:
                 # Atualiza estado visual ao final
-                global running, is_paused
+                global running, is_paused, external_run_state
                 running = False
                 is_paused = False
+                external_run_state = None
                 try:
                     label_ensaio_estado.config(text="Finalizado")
                     label_ensaio_vel.config(text="Parado")

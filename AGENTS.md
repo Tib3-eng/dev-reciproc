@@ -65,10 +65,13 @@ CalibraDLG_UI (WinForms):
 Supervisório (Python/Tk):
 - novo_tribometro.py is the main UI; novo_tribometro.exe is the packaged app.
 - orchestrator_runtime.py launches dlg_logger_ipc + a5_speed_logger in background and merges logs with merge_logs.
+- wait_and_merge has fallback merge in Python if merge_logs fails or merge.csv is missing.
 - Outputs go to Desktop\\Repositorio\\<Nome do ensaio - Estudo> with info.csv, schedule.csv, dlg.csv, drive.csv, merge.csv.
 - Check status: DLG uses UDP ACQSTOP/SETCH/SETUP/START (8 canais) and waits for ACQDATA (no ICMP ping).
 - Check status bind: tenta 41402 (mesma do logger); se falhar, usa porta efemera e registra no log.
 - Pending: If DLG check still fails, suspect DLG busy in another app or firewall/route issues.
+- stop_run: envia STOP via stdin (IPC) e espera curto periodo antes de terminate/kill.
+- novo_tribometro logs merge status in aba Log and captures run state snapshot to avoid race with global external_run_state.
 
 DriveA5 (Modbus RTU / libmodbus):
 - a5_cli: RUN/STOP, set RPM (P06-03), read P0B-09. Try FC03, fallback FC04.
@@ -90,6 +93,11 @@ DriveA5 (Modbus RTU / libmodbus):
 - Revolution count: detect robust wrap (prev > 60000 and pos < 5000).
 - a5_speed_logger: headless logger para modo velocidade (RPM) com schedule CSV (rpm,duration_s). Loga P0B-09 em 200 Hz (idx,t_qpc,t_s,pos,err); se P05-02 estiver disponivel, escala para 0..(P05-02-1); caso contrario usa valor bruto 0..65535.
 - a5_speed_logger --setup: escreve P02-00=0, P06-02=2, P03-02=0, P0C-09=1 e P31-00=0 para aceitar comando de RPM via Modbus.
+- a5_speed_logger fim de ensaio: envia parada imediata reforcada (RPM=0 + CTRL RDY + P31-00=0 com retry curto).
+- a5_speed_logger usa deadline real (QPC/wall-time) para disparar STOP no tempo alvo, mesmo se o loop de aquisicao estiver atrasado.
+- Se o logger do Drive estiver atrasado no deadline, ele usa "hold-last" para fechar a timeline sem buracos longos (sem arrastar RUN apos o tempo alvo).
+- a5_speed_logger cacheia modo de leitura de P0B-09 (FC03/FC04) para reduzir latencia de fallback em cada amostra.
+- a5_speed_logger --ipc: aceita STOP via stdin para encerramento antecipado com a mesma rotina de parada.
 - merge_logs: junta dlg.csv + drive.csv por indice de linha e gera merge.csv.
 Field notes (DriveA5, based on recent tests):
 - Relative mode (P11-04=0) is more consistent than absolute, but still drifts if completion threshold is loose.
