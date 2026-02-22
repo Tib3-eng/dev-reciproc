@@ -1556,17 +1556,22 @@ def stop_acquisition():
             # --------------------------------------------------------------
             global external_run_state
             if USE_EXTERNAL_RUNNER and external_run_state is not None:
-                orch.stop_run(external_run_state)
+                state_snapshot = external_run_state
                 external_run_state = None
+                def _stop_external():
+                    try:
+                        orch.stop_run(state_snapshot)
+                    except Exception as e:
+                        log_msg(f"Erro ao solicitar parada externa: {e}")
+                threading.Thread(target=_stop_external, daemon=True).start()
                 try:
-                    label_ensaio_estado.config(text="Aguardando novo ensaio")
+                    label_ensaio_estado.config(text="Finalizando...")
                     _set_targets_stopped()
                 except Exception:
                     pass
-                lbl_tempo_decorrido2.config(text="0:00:00")
-                timer_started = False
                 if 'button_frame5_pausar' in globals():
                     button_frame5_pausar.config(text="Pausar", bg="SystemButtonFace")
+                log_msg("Parada solicitada. Finalizando arquivos e merge...")
                 return
 
             if 'button_frame5_pausar' in globals():

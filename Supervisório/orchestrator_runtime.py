@@ -371,8 +371,8 @@ def stop_run(state: Optional[RunState]) -> None:
     for p in procs:
         _send_ipc(p, "STOP")
 
-    # 2) Give the drive logger a short window to issue Modbus stop safely.
-    deadline = time.time() + 2.5
+    # 2) Give both loggers time to flush/close after STOP (partial run merge safety).
+    deadline = time.time() + 6.0
     while time.time() < deadline:
         if all((not p) or (p.poll() is not None) for p in procs):
             return

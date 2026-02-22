@@ -75,6 +75,7 @@ Supervisório (Python/Tk):
 - Check status bind: tenta 41402 (mesma do logger); se falhar, usa porta efemera e registra no log.
 - Pending: If DLG check still fails, suspect DLG busy in another app or firewall/route issues.
 - stop_run: envia STOP via stdin (IPC) e espera curto periodo antes de terminate/kill.
+- stop_run no supervisório: ao clicar Parar, estado vira "Finalizando...", envia STOP para ambos, aguarda fechamento e mantem merge final ate salvar arquivos parciais.
 - orchestrator_runtime tem pause_run/resume_run e envia PAUSE/RESUME para ambos os processos IPC.
 - Botao Pausar no supervisório externo alterna para Retomar, congela o cronometro e o estado; ao retomar, continua da mesma etapa.
 - novo_tribometro logs merge status in aba Log and captures run state snapshot to avoid race with global external_run_state.
