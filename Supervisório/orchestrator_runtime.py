@@ -318,7 +318,7 @@ def _merge_csv_fallback(dlg_csv: str, drive_csv: str, out_csv: str) -> None:
     """
     Fallback merge implemented in Python.
     Keeps output schema compatible with merge_logs.c:
-      idx,t_s,ch1..ch8,pos,dlg_err,drive_err
+      idx,t_s,ch1..ch8,pos,rpm,dlg_err,drive_pos_err,drive_rpm_err
     """
     with open(dlg_csv, "r", newline="", encoding="utf-8") as fdlg, \
          open(drive_csv, "r", newline="", encoding="utf-8") as fdrv, \
@@ -331,7 +331,7 @@ def _merge_csv_fallback(dlg_csv: str, drive_csv: str, out_csv: str) -> None:
         next(rd_dlg, None)
         next(rd_drv, None)
 
-        w.writerow(["idx", "t_s", "ch1", "ch2", "ch3", "ch4", "ch5", "ch6", "ch7", "ch8", "pos", "dlg_err", "drive_err"])
+        w.writerow(["idx", "t_s", "ch1", "ch2", "ch3", "ch4", "ch5", "ch6", "ch7", "ch8", "pos", "rpm", "dlg_err", "drive_pos_err", "drive_rpm_err"])
 
         idx_fallback = 0
         for drow, rrow in zip_longest(rd_dlg, rd_drv, fillvalue=None):
@@ -347,10 +347,12 @@ def _merge_csv_fallback(dlg_csv: str, drive_csv: str, out_csv: str) -> None:
                 ch.append(dlg[col] if len(dlg) > col and dlg[col] else "NULL")
 
             pos = drv[3] if len(drv) > 3 and drv[3] else "NULL"
+            rpm = drv[4] if len(drv) > 4 and drv[4] else "NULL"
             dlg_err = dlg[11] if len(dlg) > 11 and dlg[11] else "1"
-            drv_err = drv[4] if len(drv) > 4 and drv[4] else "1"
+            drv_pos_err = drv[5] if len(drv) > 5 and drv[5] else "1"
+            drv_rpm_err = drv[6] if len(drv) > 6 and drv[6] else "1"
 
-            w.writerow([idx, t_s, *ch, pos, dlg_err, drv_err])
+            w.writerow([idx, t_s, *ch, pos, rpm, dlg_err, drv_pos_err, drv_rpm_err])
             idx_fallback += 1
 
 

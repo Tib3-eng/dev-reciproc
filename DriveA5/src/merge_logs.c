@@ -1,6 +1,6 @@
 // merge_logs.c
-// Merge DLG (8ch) + Drive (pos) CSV logs by row index.
-// Output CSV: idx,t_s,ch1..ch8,pos,dlg_err,drive_err
+// Merge DLG (8ch) + Drive (pos+rpm) CSV logs by row index.
+// Output CSV: idx,t_s,ch1..ch8,pos,rpm,dlg_err,drive_pos_err,drive_rpm_err
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -66,7 +66,7 @@ int main(int argc, char **argv){
     fgets(line_dlg, sizeof(line_dlg), fdlg);
     fgets(line_drv, sizeof(line_drv), fdrv);
 
-    fprintf(fout, "idx,t_s,ch1,ch2,ch3,ch4,ch5,ch6,ch7,ch8,pos,dlg_err,drive_err\n");
+    fprintf(fout, "idx,t_s,ch1,ch2,ch3,ch4,ch5,ch6,ch7,ch8,pos,rpm,dlg_err,drive_pos_err,drive_rpm_err\n");
 
     int idx_fallback = 0;
     for(;;){
@@ -75,7 +75,7 @@ int main(int argc, char **argv){
         if(!ld && !lr) break;
 
         char *dlg_cols[16] = {0};
-        char *drv_cols[8] = {0};
+        char *drv_cols[12] = {0};
         int dlg_n = 0, drv_n = 0;
 
         if(ld){
@@ -84,7 +84,7 @@ int main(int argc, char **argv){
         }
         if(lr){
             trim(line_drv);
-            drv_n = split_csv(line_drv, drv_cols, 8);
+            drv_n = split_csv(line_drv, drv_cols, 12);
         }
 
         /* DLG expected: idx,t_qpc,t_s,ch1..ch8,err */
@@ -108,13 +108,15 @@ int main(int argc, char **argv){
         }
 
         const char *pos = (drv_n >= 4 && drv_cols[3][0]) ? drv_cols[3] : "NULL";
+        const char *rpm = (drv_n >= 5 && drv_cols[4][0]) ? drv_cols[4] : "NULL";
         const char *dlg_err = (dlg_n >= 12 && dlg_cols[11][0]) ? dlg_cols[11] : "1";
-        const char *drv_err = (drv_n >= 5 && drv_cols[4][0]) ? drv_cols[4] : "1";
+        const char *drv_pos_err = (drv_n >= 6 && drv_cols[5][0]) ? drv_cols[5] : "1";
+        const char *drv_rpm_err = (drv_n >= 7 && drv_cols[6][0]) ? drv_cols[6] : "1";
 
-        fprintf(fout, "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n",
+        fprintf(fout, "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n",
                 idx, t_s,
                 ch[0], ch[1], ch[2], ch[3], ch[4], ch[5], ch[6], ch[7],
-                pos, dlg_err, drv_err);
+                pos, rpm, dlg_err, drv_pos_err, drv_rpm_err);
 
         idx_fallback++;
     }

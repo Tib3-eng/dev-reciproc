@@ -1,5 +1,5 @@
 // a5_speed_logger.c
-// Headless DriveA5 speed-mode logger (P0B-09) -> CSV, 200 Hz target.
+// Headless DriveA5 speed-mode logger (position + RPM) -> CSV.
 // - Reads a schedule CSV (rpm,duration_s) and applies RPM segments.
 // - Logs fixed number of rows (duration * rate), inserts NULL on read error.
 // - Waits for START on stdin when --ipc is used.
@@ -28,6 +28,7 @@ enum {
     REG_P31_00  = 0x3100, // VDI virtual
     REG_P0B_07  = 0x0B07, // P0B-07 (abs pos, 32-bit) - legacy
     REG_P0B_09  = 0x0B09, // P0B-09 (pos per revolution, 0..65535)
+    REG_P0B_00  = 0x0B00, // P0B-00 (actual motor speed, rpm)
     REG_P05_02  = 0x0502, // P05-02 (command units per revolution)
     REG_P0C_26  = 0x0C26  // word order
 };
@@ -89,28 +90,39 @@ static int read_p0b09(modbus_t *ctx, uint16_t *out){
     return -1;
 }
 
-static int read_p0b09_cached(modbus_t *ctx, uint16_t *out, int *mode){
+static int read_u16_cached(modbus_t *ctx, int reg, uint16_t *out, int *mode){
     /* mode: 0=unknown, 3=FC03 holding, 4=FC04 input */
     if(mode && *mode == 3){
-        if(read_u16(ctx, REG_P0B_09, out) == 0) return 0;
-        if(read_u16_in(ctx, REG_P0B_09, out) == 0){ *mode = 4; return 0; }
+        if(read_u16(ctx, reg, out) == 0) return 0;
+        if(read_u16_in(ctx, reg, out) == 0){ *mode = 4; return 0; }
         return -1;
     }
     if(mode && *mode == 4){
-        if(read_u16_in(ctx, REG_P0B_09, out) == 0) return 0;
-        if(read_u16(ctx, REG_P0B_09, out) == 0){ *mode = 3; return 0; }
+        if(read_u16_in(ctx, reg, out) == 0) return 0;
+        if(read_u16(ctx, reg, out) == 0){ *mode = 3; return 0; }
         return -1;
     }
 
-    if(read_u16(ctx, REG_P0B_09, out) == 0){
+    if(read_u16(ctx, reg, out) == 0){
         if(mode) *mode = 3;
         return 0;
     }
-    if(read_u16_in(ctx, REG_P0B_09, out) == 0){
+    if(read_u16_in(ctx, reg, out) == 0){
         if(mode) *mode = 4;
         return 0;
     }
     return -1;
+}
+
+static int read_p0b09_cached(modbus_t *ctx, uint16_t *out, int *mode){
+    return read_u16_cached(ctx, REG_P0B_09, out, mode);
+}
+
+static int read_rpm_cached(modbus_t *ctx, int16_t *out, int *mode){
+    uint16_t u = 0;
+    if(read_u16_cached(ctx, REG_P0B_00, &u, mode) != 0) return -1;
+    *out = (int16_t)u;
+    return 0;
 }
 
 static int write_u16_seq(modbus_t *ctx, int reg, uint16_t v, const char *label,
@@ -328,7 +340,7 @@ int main(int argc, char **argv){
         free(segs);
         return 1;
     }
-    fprintf(f, "idx,t_qpc,t_s,pos,err\n");
+    fprintf(f, "idx,t_qpc,t_s,pos,rpm,pos_err,rpm_err\n");
     fflush(f);
 
     char port_path[64];
@@ -407,6 +419,7 @@ int main(int argc, char **argv){
     int stop_sent = 0;
     int64_t hard_stop_ticks = start_ticks + (int64_t)(duration_s * (double)qpc_freq);
     int p0b09_mode = 0;
+    int rpm_mode = 0;
     for(int idx = 0; idx < total_samples; ){
         if(ipc_stop_requested(use_ipc)){
             stop_requested = 1;
@@ -422,8 +435,10 @@ int main(int argc, char **argv){
             continue;
         }
 
-        int sampled_ok = 0;
+        int sampled_pos_ok = 0;
+        int sampled_rpm_ok = 0;
         int32_t sampled_pos = 0;
+        int16_t sampled_rpm = 0;
         set_timeouts_us(ctx, FAST_RESP_US, FAST_BYTE_US);
         uint16_t pos_raw = 0;
         if(read_p0b09_cached(ctx, &pos_raw, &p0b09_mode) == 0){
@@ -433,7 +448,10 @@ int main(int argc, char **argv){
             }else{
                 sampled_pos = (int32_t)pos_raw;
             }
-            sampled_ok = 1;
+            sampled_pos_ok = 1;
+        }
+        if(read_rpm_cached(ctx, &sampled_rpm, &rpm_mode) == 0){
+            sampled_rpm_ok = 1;
         }
 
         /* Lost slots are explicit NULL. We never copy position values. */
@@ -448,7 +466,7 @@ int main(int argc, char **argv){
                 }
             }
 
-            fprintf(f, "%d,%lld,%.6f,NULL,1\n", idx, (long long)t_qpc, t_s);
+            fprintf(f, "%d,%lld,%.6f,NULL,NULL,1,1\n", idx, (long long)t_qpc, t_s);
             idx++;
             next_ticks += dt_ticks;
         }
@@ -464,11 +482,13 @@ int main(int argc, char **argv){
                 }
             }
 
-            if(sampled_ok){
-                fprintf(f, "%d,%lld,%.6f,%ld,0\n", idx, (long long)t_qpc, t_s, (long)sampled_pos);
-            }else{
-                fprintf(f, "%d,%lld,%.6f,NULL,1\n", idx, (long long)t_qpc, t_s);
-            }
+            if(sampled_pos_ok) fprintf(f, "%d,%lld,%.6f,%ld,", idx, (long long)t_qpc, t_s, (long)sampled_pos);
+            else               fprintf(f, "%d,%lld,%.6f,NULL,", idx, (long long)t_qpc, t_s);
+
+            if(sampled_rpm_ok) fprintf(f, "%d,", (int)sampled_rpm);
+            else               fprintf(f, "NULL,");
+
+            fprintf(f, "%d,%d\n", sampled_pos_ok ? 0 : 1, sampled_rpm_ok ? 0 : 1);
             idx++;
             next_ticks += dt_ticks;
         }

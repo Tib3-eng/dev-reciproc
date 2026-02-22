@@ -92,14 +92,14 @@ DriveA5 (Modbus RTU / libmodbus):
 - a5_pos_cli logs position checks to out/a5_pos_log.csv (raw + logical P0B-07, error, dev, cmd) and caches P05-02 (units/rev) when readable.
 - Standard test: 10 rpm, 120 s, ~200 Hz. CSV: t_s,pos,rev.
 - Revolution count: detect robust wrap (prev > 60000 and pos < 5000).
-- a5_speed_logger: headless logger para modo velocidade (RPM) com schedule CSV (rpm,duration_s). Loga P0B-09 em 200 Hz (idx,t_qpc,t_s,pos,err); se P05-02 estiver disponivel, escala para 0..(P05-02-1); caso contrario usa valor bruto 0..65535.
+- a5_speed_logger: headless logger para modo velocidade (RPM) com schedule CSV (rpm,duration_s). Loga P0B-09 (posicao) e P0B-00 (actual motor speed) em 50 Hz: idx,t_qpc,t_s,pos,rpm,pos_err,rpm_err. Se P05-02 estiver disponivel, escala posicao para 0..(P05-02-1); caso contrario usa bruto 0..65535.
 - a5_speed_logger --setup: escreve P02-00=0, P06-02=2, P03-02=0, P0C-09=1 e P31-00=0 para aceitar comando de RPM via Modbus.
 - a5_speed_logger fim de ensaio: envia parada imediata reforcada (RPM=0 + CTRL RDY + P31-00=0 com retry curto).
 - a5_speed_logger usa deadline real (QPC/wall-time) para disparar STOP no tempo alvo, mesmo se o loop de aquisicao estiver atrasado.
 - Se o logger do Drive atrasar, ele marca slots perdidos como NULL (err=1) e nao replica posicoes; STOP continua no deadline alvo.
 - a5_speed_logger cacheia modo de leitura de P0B-09 (FC03/FC04) para reduzir latencia de fallback em cada amostra.
 - a5_speed_logger --ipc: aceita STOP via stdin para encerramento antecipado com a mesma rotina de parada.
-- merge_logs: junta dlg.csv + drive.csv por indice de linha e gera merge.csv.
+- merge_logs: junta dlg.csv + drive.csv por indice de linha e gera merge.csv com colunas: idx,t_s,ch1..ch8,pos,rpm,dlg_err,drive_pos_err,drive_rpm_err.
 Field notes (DriveA5, based on recent tests):
 - Relative mode (P11-04=0) is more consistent than absolute, but still drifts if completion threshold is loose.
 - P05-21 (positioning completion threshold) around 20 caused ~20 count residual; lowering to 5 or 2 is recommended for tighter closure.
