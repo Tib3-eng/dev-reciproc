@@ -250,7 +250,7 @@ def go():
 
     running = "true"
     try:
-        label_ensaio_estado.config(text="Em andamento")
+        label_ensaio_estado.config(text="Em andamento", fg="yellow")
     except Exception:
         pass
 
@@ -672,7 +672,7 @@ def velocidades():
     # Quando terminar tudo, mostra "Fim" ou zera
     if running == "true":
         try:
-            label_ensaio_estado.config(text="Finalizado")
+            label_ensaio_estado.config(text="Finalizado", fg="green")
             _set_targets_stopped()
         except Exception:
             pass
@@ -769,7 +769,7 @@ def _set_target_labels(vel_txt=None, rpm_txt=None):
         _do()
 
 def _set_targets_stopped():
-    _set_target_labels("Parado", "0 rpm")
+    _set_target_labels("0 mm/s", "0 rpm")
 
 def _update_vel_label_from_schedule(vel_mm_s_list, dur_s_list, rpm_list=None):
     """
@@ -1318,6 +1318,7 @@ def start_acquisition():
                 schedule=schedule,
                 duration_s=dur_total,
                 rate_hz=rate_hz,
+                bind_port=0,
                 com_port="COM4",
                 slave_id=1,
                 baud=115200,
@@ -1340,7 +1341,7 @@ def start_acquisition():
         is_paused = False
         tempo_pause_inicio = 0
         try:
-            label_ensaio_estado.config(text="Em andamento")
+            label_ensaio_estado.config(text="Em andamento", fg="yellow")
             _set_targets_stopped()
         except Exception:
             pass
@@ -1372,7 +1373,7 @@ def start_acquisition():
                 timer_started = False
                 external_run_state = None
                 try:
-                    label_ensaio_estado.config(text="Finalizado")
+                    label_ensaio_estado.config(text="Finalizado", fg="green")
                     _set_targets_stopped()
                 except Exception:
                     pass
@@ -1486,7 +1487,7 @@ def pause_acquisition():
             is_paused = True
             tempo_pause_inicio = time.time()
             try:
-                label_ensaio_estado.config(text="Pausado")
+                label_ensaio_estado.config(text="Pausado", fg="darkorange")
             except Exception:
                 pass
             if 'button_frame5_pausar' in globals():
@@ -1506,7 +1507,7 @@ def pause_acquisition():
             start_time = start_time + (tempo_agora - tempo_pause_inicio)
         tempo_pause_inicio = 0
         try:
-            label_ensaio_estado.config(text="Em andamento")
+            label_ensaio_estado.config(text="Em andamento", fg="yellow")
         except Exception:
             pass
         if 'button_frame5_pausar' in globals():
@@ -1565,7 +1566,7 @@ def stop_acquisition():
                         log_msg(f"Erro ao solicitar parada externa: {e}")
                 threading.Thread(target=_stop_external, daemon=True).start()
                 try:
-                    label_ensaio_estado.config(text="Finalizando...")
+                    label_ensaio_estado.config(text="Finalizando...", fg="darkorange")
                     _set_targets_stopped()
                 except Exception:
                     pass
@@ -1579,7 +1580,7 @@ def stop_acquisition():
 
             lbl_tempo_decorrido2.config(text="0:00:00")
             try:
-                label_ensaio_estado.config(text="Aguardando novo ensaio")
+                label_ensaio_estado.config(text="Aguardando novo ensaio", fg="black")
                 _set_targets_stopped()
             except Exception:
                 pass
@@ -2406,7 +2407,7 @@ lbl_header_voltas_cursos.grid(row=0, column=2, padx=5, pady=5)
 tkinter.Label(labelframe2_baixo, text="Duração [min]", font=("Arial", 9, "bold")) \
     .grid(row=0, column=3, padx=5, pady=5)
 tkinter.Label(labelframe3_baixo, text="Estado", font=("Arial", 9, "bold")).grid(row=0, column=0, padx=5, pady=5)
-label_ensaio_estado = tkinter.Label(labelframe3_baixo, text="Aguardando novo ensaio", font=("Arial", 9))
+label_ensaio_estado = tkinter.Label(labelframe3_baixo, text="Aguardando novo ensaio", font=("Arial", 9), fg="black")
 label_ensaio_estado.grid(row=0, column=1, padx=5, pady=5)
 
 
@@ -2450,7 +2451,7 @@ muda_estado_reciprocante()
 ### Tempo, velocidade e botões
 lbl_vel_atual = tkinter.Label(labelframe3_baixo, text="Velocidade alvo atual", font=("Arial", 9, "bold"))
 lbl_vel_atual.grid(row=1, column=0, padx=5, pady=5)
-label_ensaio_vel = tkinter.Label(labelframe3_baixo, text="Parado", font=("Arial", 12))
+label_ensaio_vel = tkinter.Label(labelframe3_baixo, text="0 mm/s", font=("Arial", 12))
 label_ensaio_vel.grid(row=1, column=1, padx=10, pady=10)
 lbl_rpm_alvo = tkinter.Label(labelframe3_baixo, text="RPM Alvo atual", font=("Arial", 9, "bold"))
 lbl_rpm_alvo.grid(row=2, column=0, padx=5, pady=5)
