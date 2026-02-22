@@ -95,7 +95,7 @@ DriveA5 (Modbus RTU / libmodbus):
 - a5_speed_logger --setup: escreve P02-00=0, P06-02=2, P03-02=0, P0C-09=1 e P31-00=0 para aceitar comando de RPM via Modbus.
 - a5_speed_logger fim de ensaio: envia parada imediata reforcada (RPM=0 + CTRL RDY + P31-00=0 com retry curto).
 - a5_speed_logger usa deadline real (QPC/wall-time) para disparar STOP no tempo alvo, mesmo se o loop de aquisicao estiver atrasado.
-- Se o logger do Drive estiver atrasado no deadline, ele usa "hold-last" para fechar a timeline sem buracos longos (sem arrastar RUN apos o tempo alvo).
+- Se o logger do Drive atrasar, ele marca slots perdidos como NULL (err=1) e nao replica posicoes; STOP continua no deadline alvo.
 - a5_speed_logger cacheia modo de leitura de P0B-09 (FC03/FC04) para reduzir latencia de fallback em cada amostra.
 - a5_speed_logger --ipc: aceita STOP via stdin para encerramento antecipado com a mesma rotina de parada.
 - merge_logs: junta dlg.csv + drive.csv por indice de linha e gera merge.csv.

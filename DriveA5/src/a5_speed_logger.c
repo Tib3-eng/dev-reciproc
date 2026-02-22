@@ -407,8 +407,6 @@ int main(int argc, char **argv){
     int stop_sent = 0;
     int64_t hard_stop_ticks = start_ticks + (int64_t)(duration_s * (double)qpc_freq);
     int p0b09_mode = 0;
-    int32_t last_pos = 0;
-    int last_pos_valid = 0;
     for(int idx = 0; idx < total_samples; ){
         if(ipc_stop_requested(use_ipc)){
             stop_requested = 1;
@@ -419,32 +417,30 @@ int main(int argc, char **argv){
             stop_drive_now(ctx);
             stop_sent = 1;
         }
-        int sampled_ok = 0;
-        int32_t sampled_pos = 0;
-        if(!stop_sent){
-            set_timeouts_us(ctx, FAST_RESP_US, FAST_BYTE_US);
-            uint16_t pos_raw = 0;
-            if(read_p0b09_cached(ctx, &pos_raw, &p0b09_mode) == 0){
-                if(cmd_units_per_rev > 0){
-                    /* Escala 0..65535 -> 0..(P05-02-1) */
-                    sampled_pos = (int32_t)(((uint32_t)pos_raw * (uint32_t)cmd_units_per_rev) / 65536u);
-                }else{
-                    sampled_pos = (int32_t)pos_raw;
-                }
-                sampled_ok = 1;
-            }
-        }
-        if(sampled_ok){
-            last_pos = sampled_pos;
-            last_pos_valid = 1;
+        if(now < next_ticks){
+            Sleep(1);
+            continue;
         }
 
-        int emitted = 0;
-        while(idx < total_samples && now >= next_ticks){
+        int sampled_ok = 0;
+        int32_t sampled_pos = 0;
+        set_timeouts_us(ctx, FAST_RESP_US, FAST_BYTE_US);
+        uint16_t pos_raw = 0;
+        if(read_p0b09_cached(ctx, &pos_raw, &p0b09_mode) == 0){
+            if(cmd_units_per_rev > 0){
+                /* Escala 0..65535 -> 0..(P05-02-1) */
+                sampled_pos = (int32_t)(((uint32_t)pos_raw * (uint32_t)cmd_units_per_rev) / 65536u);
+            }else{
+                sampled_pos = (int32_t)pos_raw;
+            }
+            sampled_ok = 1;
+        }
+
+        /* Lost slots are explicit NULL. We never copy position values. */
+        while(idx < total_samples && now >= (next_ticks + dt_ticks)){
             double t_s = (double)idx / rate_hz;
             int64_t t_qpc = start_ticks + (int64_t)idx * dt_ticks;
 
-            /* schedule step */
             while(seg_idx + 1 < seg_count && t_s >= segs[seg_idx].t_end){
                 seg_idx++;
                 if(!stop_sent){
@@ -452,17 +448,29 @@ int main(int argc, char **argv){
                 }
             }
 
-            if(last_pos_valid){
-                fprintf(f, "%d,%lld,%.6f,%ld,0\n", idx, (long long)t_qpc, t_s, (long)last_pos);
+            fprintf(f, "%d,%lld,%.6f,NULL,1\n", idx, (long long)t_qpc, t_s);
+            idx++;
+            next_ticks += dt_ticks;
+        }
+
+        if(idx < total_samples && now >= next_ticks){
+            double t_s = (double)idx / rate_hz;
+            int64_t t_qpc = start_ticks + (int64_t)idx * dt_ticks;
+
+            while(seg_idx + 1 < seg_count && t_s >= segs[seg_idx].t_end){
+                seg_idx++;
+                if(!stop_sent){
+                    (void)cmd_rpm(ctx, segs[seg_idx].rpm);
+                }
+            }
+
+            if(sampled_ok){
+                fprintf(f, "%d,%lld,%.6f,%ld,0\n", idx, (long long)t_qpc, t_s, (long)sampled_pos);
             }else{
                 fprintf(f, "%d,%lld,%.6f,NULL,1\n", idx, (long long)t_qpc, t_s);
             }
             idx++;
             next_ticks += dt_ticks;
-            emitted = 1;
-        }
-        if(!emitted){
-            Sleep(1);
         }
     }
 
