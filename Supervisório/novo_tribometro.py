@@ -1851,8 +1851,103 @@ def alterar_escala_tempo():
         messagebox.showwarning("Valor Invalido", "Escala do eixo X deve ser um numero positivo (minutos).")
 
 def abrir_config_y():
-    """Stub simples para configuracao de eixos Y (mantem UI funcional)."""
-    messagebox.showinfo("Configurar Eixos Y", "Configuracao de eixos Y ainda nao implementada neste executavel.")
+    """Abre popup compacto para configurar eixo Y dos graficos 1 (temperatura) e 2 (forca)."""
+    global y1_auto, y1_min, y1_max, y2_auto, y2_min, y2_max
+
+    win = tkinter.Toplevel(root)
+    win.title("Configurar Eixos Y")
+    win.resizable(False, False)
+    win.transient(root)
+    win.grab_set()
+
+    frame = tkinter.Frame(win, padx=8, pady=8)
+    frame.grid(row=0, column=0, sticky="nsew")
+
+    tkinter.Label(frame, text="Grafico", font=("Arial", 9, "bold")).grid(row=0, column=0, padx=(0, 8), pady=(0, 4), sticky="w")
+    tkinter.Label(frame, text="Automatico", font=("Arial", 9, "bold")).grid(row=0, column=1, padx=4, pady=(0, 4))
+    tkinter.Label(frame, text="Min", font=("Arial", 9, "bold")).grid(row=0, column=2, padx=4, pady=(0, 4))
+    tkinter.Label(frame, text="Max", font=("Arial", 9, "bold")).grid(row=0, column=3, padx=4, pady=(0, 4))
+
+    y_temp_auto_var = tkinter.BooleanVar(value=y1_auto)
+    y_temp_min_var = tkinter.StringVar(value=f"{y1_min:.6g}")
+    y_temp_max_var = tkinter.StringVar(value=f"{y1_max:.6g}")
+
+    y_forca_auto_var = tkinter.BooleanVar(value=y2_auto)
+    y_forca_min_var = tkinter.StringVar(value=f"{y2_min:.6g}")
+    y_forca_max_var = tkinter.StringVar(value=f"{y2_max:.6g}")
+
+    tkinter.Label(frame, text="Temperatura (Grafico 1)").grid(row=1, column=0, padx=(0, 8), pady=2, sticky="w")
+    chk_temp = tkinter.Checkbutton(frame, variable=y_temp_auto_var)
+    chk_temp.grid(row=1, column=1, padx=4, pady=2)
+    ent_temp_min = tkinter.Entry(frame, width=9, textvariable=y_temp_min_var)
+    ent_temp_min.grid(row=1, column=2, padx=4, pady=2)
+    ent_temp_max = tkinter.Entry(frame, width=9, textvariable=y_temp_max_var)
+    ent_temp_max.grid(row=1, column=3, padx=4, pady=2)
+
+    tkinter.Label(frame, text="Atrito/forca (Grafico 2)").grid(row=2, column=0, padx=(0, 8), pady=2, sticky="w")
+    chk_forca = tkinter.Checkbutton(frame, variable=y_forca_auto_var)
+    chk_forca.grid(row=2, column=1, padx=4, pady=2)
+    ent_forca_min = tkinter.Entry(frame, width=9, textvariable=y_forca_min_var)
+    ent_forca_min.grid(row=2, column=2, padx=4, pady=2)
+    ent_forca_max = tkinter.Entry(frame, width=9, textvariable=y_forca_max_var)
+    ent_forca_max.grid(row=2, column=3, padx=4, pady=2)
+
+    def _set_manual_state(var, ent_min, ent_max):
+        state = "disabled" if var.get() else "normal"
+        ent_min.config(state=state)
+        ent_max.config(state=state)
+
+    def _refresh_states(*_args):
+        _set_manual_state(y_temp_auto_var, ent_temp_min, ent_temp_max)
+        _set_manual_state(y_forca_auto_var, ent_forca_min, ent_forca_max)
+
+    y_temp_auto_var.trace_add("write", _refresh_states)
+    y_forca_auto_var.trace_add("write", _refresh_states)
+    _refresh_states()
+
+    btns = tkinter.Frame(frame)
+    btns.grid(row=3, column=0, columnspan=4, sticky="e", pady=(8, 0))
+
+    def _parse_range(nome, is_auto, txt_min, txt_max):
+        if is_auto:
+            return None
+        try:
+            vmin = float(txt_min.replace(",", ".").strip())
+            vmax = float(txt_max.replace(",", ".").strip())
+        except Exception:
+            messagebox.showwarning("Valor invalido", f"{nome}: min/max devem ser numericos.", parent=win)
+            return "ERR"
+        if vmin >= vmax:
+            messagebox.showwarning("Valor invalido", f"{nome}: min deve ser menor que max.", parent=win)
+            return "ERR"
+        return (vmin, vmax)
+
+    def _aplicar():
+        global y1_auto, y1_min, y1_max, y2_auto, y2_min, y2_max
+        r_temp = _parse_range("Temperatura", y_temp_auto_var.get(), y_temp_min_var.get(), y_temp_max_var.get())
+        if r_temp == "ERR":
+            return
+        r_forca = _parse_range("Atrito/forca", y_forca_auto_var.get(), y_forca_min_var.get(), y_forca_max_var.get())
+        if r_forca == "ERR":
+            return
+
+        y1_auto = y_temp_auto_var.get()
+        y2_auto = y_forca_auto_var.get()
+
+        if r_temp is not None:
+            y1_min, y1_max = r_temp
+        if r_forca is not None:
+            y2_min, y2_max = r_forca
+
+        try:
+            canvas1.draw_idle()
+            canvas2.draw_idle()
+        except Exception:
+            pass
+        win.destroy()
+
+    tkinter.Button(btns, text="Aplicar alteracoes", command=_aplicar).grid(row=0, column=0, padx=(0, 6))
+    tkinter.Button(btns, text="Cancelar", command=win.destroy).grid(row=0, column=1)
 def aumenta_tensao():
     if not HAVE_LDTP:
         messagebox.showwarning('Indisponivel', 'Modulo LDTP nao encontrado. Controle analogico interno desativado.')
