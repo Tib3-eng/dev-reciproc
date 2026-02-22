@@ -65,6 +65,8 @@ CalibraDLG_UI (WinForms):
 Supervisório (Python/Tk):
 - novo_tribometro.py is the main UI; novo_tribometro.exe is the packaged app.
 - orchestrator_runtime.py launches dlg_logger_ipc + a5_speed_logger in background and merges logs with merge_logs.
+- conversao mm/s->rpm no orchestrator usa modulo (abs) para enviar setpoint sempre positivo no modo velocidade.
+- UI mostra "Velocidade alvo atual" (mm/s) e "RPM Alvo atual" (setpoint enviado ao Drive).
 - Taxa padrao de aquisicao no pipeline externo (DLG + Drive) ajustada para 50 Hz; manter ambas iguais para sincronismo.
 - wait_and_merge has fallback merge in Python if merge_logs fails or merge.csv is missing.
 - Outputs go to Desktop\\Repositorio\\<Nome do ensaio - Estudo> with info.csv, schedule.csv, dlg.csv, drive.csv, merge.csv.
@@ -93,7 +95,7 @@ DriveA5 (Modbus RTU / libmodbus):
 - Standard test: 10 rpm, 120 s, ~200 Hz. CSV: t_s,pos,rev.
 - Revolution count: detect robust wrap (prev > 60000 and pos < 5000).
 - a5_speed_logger: headless logger para modo velocidade (RPM) com schedule CSV (rpm,duration_s). Loga P0B-09 (posicao) e P0B-00 (actual motor speed) em 50 Hz: idx,t_qpc,t_s,pos,rpm,pos_err,rpm_err. Se P05-02 estiver disponivel, escala posicao para 0..(P05-02-1); caso contrario usa bruto 0..65535.
-- a5_speed_logger --setup: escreve P02-00=0, P06-02=2, P03-02=0, P0C-09=1 e P31-00=0 para aceitar comando de RPM via Modbus.
+- a5_speed_logger --setup: escreve P02-00=0, P06-00=0, P06-01=3, P06-02=0, P03-02=0, P0C-09=1 e P31-00=0 para usar P06-03 como unica fonte de velocidade (evita offset por A+B).
 - a5_speed_logger fim de ensaio: envia parada imediata reforcada (RPM=0 + CTRL RDY + P31-00=0 com retry curto).
 - a5_speed_logger usa deadline real (QPC/wall-time) para disparar STOP no tempo alvo, mesmo se o loop de aquisicao estiver atrasado.
 - Se o logger do Drive atrasar, ele marca slots perdidos como NULL (err=1) e nao replica posicoes; STOP continua no deadline alvo.

@@ -23,6 +23,8 @@ enum {
     REG_RPM_CMD = 1539,   // 1540-1  : RPM setpoint (int16)
     REG_P02_00  = 0x0200, // control mode (speed/pos/torque)
     REG_P03_02  = 0x0302, // DI1 func (disable)
+    REG_P06_00  = 0x0600, // main speed source A
+    REG_P06_01  = 0x0601, // aux speed source B
     REG_P06_02  = 0x0602, // speed command source
     REG_P0C_09  = 0x0C09, // comm VDI enable
     REG_P31_00  = 0x3100, // VDI virtual
@@ -154,15 +156,19 @@ static int read_s32(modbus_t *ctx, int reg, int low_first, int32_t *out){
 static void setup_speed_mode(modbus_t *ctx){
     // NOTE: Ajusta parametros para aceitar RPM via Modbus.
     // P02-00 = 0 (modo velocidade)
-    // P06-02 = 2 (fonte comando velocidade = comunicacao/modbus)
+    // P06-00 = 0 (fonte A = P06-03 / given number)
+    // P06-01 = 3 (fonte B = 0/no effect)
+    // P06-02 = 0 (seletor = source A only)
     // P03-02 = 0 (desabilita DI1)
     // P0C-09 = 1 (VDI via comunicacao)
-    puts("Setup speed mode (P02-00/P06-02/P03-02/P0C-09)...");
+    puts("Setup speed mode (P02-00/P06-00/P06-01/P06-02/P03-02/P0C-09)...");
     (void)write_u16_seq(ctx, REG_P31_00, 0, "P31-00 (VDI STOP)", 2, 30);
     (void)write_u16_seq(ctx, REG_P0C_09, 1, "P0C-09 (Comm VDI)", 2, 30);
     (void)write_u16_seq(ctx, REG_P03_02, 0, "P03-02 (DI1 func)", 2, 30);
     (void)write_u16_seq(ctx, REG_P02_00, 0, "P02-00 (control mode)", 2, 30);
-    (void)write_u16_seq(ctx, REG_P06_02, 2, "P06-02 (speed src)", 2, 30);
+    (void)write_u16_seq(ctx, REG_P06_00, 0, "P06-00 (A src=given)", 2, 30);
+    (void)write_u16_seq(ctx, REG_P06_01, 3, "P06-01 (B src=0)", 2, 30);
+    (void)write_u16_seq(ctx, REG_P06_02, 0, "P06-02 (sel=A)", 2, 30);
 }
 
 static int cmd_run(modbus_t *ctx){

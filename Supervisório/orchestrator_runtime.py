@@ -105,7 +105,9 @@ def rpm_from_mm_s(vel_mm_s: float, raio_mm: float) -> int:
     """
     if raio_mm <= 0:
         return 0
-    rpm = (vel_mm_s * 60.0) / (2.0 * 3.141592653589793 * raio_mm)
+    # For current tribometer operation we command speed magnitude only.
+    # Direction reversals are handled mechanically/sequence-wise, not by negative RPM setpoints.
+    rpm = abs((vel_mm_s * 60.0) / (2.0 * 3.141592653589793 * raio_mm))
     # Round to nearest int (Drive expects int16)
     return int(rpm + 0.5 if rpm >= 0 else rpm - 0.5)
 

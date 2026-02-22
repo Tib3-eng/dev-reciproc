@@ -616,9 +616,13 @@ def velocidades():
         vel_atual_mms = lista_velocidades_digitadas[i]  # Valor para mostrar (mm/s)
         duracao_atual_s = lista_duracao[i]              # Duração dessa etapa (segundos)
 
-        # 2. Atualiza o label
-        # Assim que entra nessa etapa, ele muda o texto para a velocidade atual
-        label_ensaio_vel.config(text=f"{vel_atual_mms} mm/s")
+        # 2. Atualiza os labels de alvo atual (velocidade linear e RPM alvo)
+        try:
+            raio_mm = float(ent_raio.get().strip().replace(",", "."))
+        except Exception:
+            raio_mm = 0.0
+        rpm_alvo = orch.rpm_from_mm_s(vel_atual_mms, raio_mm) if raio_mm > 0 else 0
+        _set_target_labels(f"{vel_atual_mms} mm/s", f"{rpm_alvo} rpm")
 
         # 3. Manda o comando para a máquina
         # (Se precisar converter para Volts)
@@ -640,7 +644,7 @@ def velocidades():
                     myModule.SetAnOutV(ip, 0, 0, 100) # Zera a tensão
                     motor_estava_parado = True
                     # O label pode indicar que está pausado
-                    label_ensaio_vel.config(text=f"{vel_atual_mms} mm/s (Pausado)")
+                    _set_target_labels(f"{vel_atual_mms} mm/s (Pausado)", f"{rpm_alvo} rpm")
                 
                 # 2. Espera sem descontar o tempo (congela o cronômetro da etapa)
                 time.sleep(0.1)
@@ -651,7 +655,7 @@ def velocidades():
                 # Se estava parado antes, religa o motor na velocidade certa
                 if motor_estava_parado:
                     myModule.SetAnOutV(ip, tensao_para_enviar, 0, 100)
-                    label_ensaio_vel.config(text=f"{vel_atual_mms} mm/s")
+                    _set_target_labels(f"{vel_atual_mms} mm/s", f"{rpm_alvo} rpm")
                     motor_estava_parado = False
 
                 # Desconta o tempo
@@ -669,7 +673,7 @@ def velocidades():
     if running == "true":
         try:
             label_ensaio_estado.config(text="Finalizado")
-            label_ensaio_vel.config(text="Parado")
+            _set_targets_stopped()
         except Exception:
             pass
         myModule.SetAnOutV(ip, 0, 0, 100) # Para a máquina
@@ -739,19 +743,31 @@ def _start_timer_now():
 def _is_running():
     return (running == "true") or (running is True)
 
-def _update_vel_label_from_schedule(vel_mm_s_list, dur_s_list):
-    """
-    Atualiza o label de velocidade baseado no schedule (modo externo).
-    """
-    def _set_label(txt):
-        try:
-            root.after(0, lambda: label_ensaio_vel.config(text=txt))
-        except Exception:
+def _set_target_labels(vel_txt=None, rpm_txt=None):
+    def _do():
+        if vel_txt is not None:
             try:
-                label_ensaio_vel.config(text=txt)
+                label_ensaio_vel.config(text=vel_txt)
+            except Exception:
+                pass
+        if rpm_txt is not None:
+            try:
+                label_ensaio_rpm.config(text=rpm_txt)
             except Exception:
                 pass
 
+    try:
+        root.after(0, _do)
+    except Exception:
+        _do()
+
+def _set_targets_stopped():
+    _set_target_labels("Parado", "0 rpm")
+
+def _update_vel_label_from_schedule(vel_mm_s_list, dur_s_list, rpm_list=None):
+    """
+    Atualiza o label de velocidade baseado no schedule (modo externo).
+    """
     # Aguarda o inicio efetivo do tempo
     while _is_running() and not timer_started:
         time.sleep(0.05)
@@ -770,7 +786,7 @@ def _update_vel_label_from_schedule(vel_mm_s_list, dur_s_list):
             elapsed = 0
 
         if elapsed >= total:
-            _set_label("Parado")
+            _set_targets_stopped()
             break
 
         # Descobre o segmento atual
@@ -784,9 +800,18 @@ def _update_vel_label_from_schedule(vel_mm_s_list, dur_s_list):
 
         try:
             v = float(vel_mm_s_list[idx])
-            _set_label(f"{v:.2f} mm/s")
+            v_txt = f"{v:.2f} mm/s"
         except Exception:
-            pass
+            v_txt = None
+
+        rpm_txt = None
+        try:
+            if rpm_list is not None and idx < len(rpm_list):
+                rpm_txt = f"{int(rpm_list[idx])} rpm"
+        except Exception:
+            rpm_txt = None
+
+        _set_target_labels(v_txt, rpm_txt)
 
         time.sleep(0.2)
 def _wait_dlg_ok_and_start_timer(dlg_csv_path, min_ok=3, timeout_s=15):
@@ -1251,6 +1276,7 @@ def start_acquisition():
         for vel_mm_s, dur_s in zip(lista_velocidades_digitadas, lista_duracao):
             rpm = orch.rpm_from_mm_s(vel_mm_s, raio_mm)
             schedule.append((rpm, dur_s))
+        rpm_schedule = [rpm for rpm, _ in schedule]
 
         if not schedule:
             messagebox.showwarning("Tabela vazia", "Nenhuma etapa válida para iniciar o ensaio.")
@@ -1300,7 +1326,7 @@ def start_acquisition():
         is_paused = False
         try:
             label_ensaio_estado.config(text="Em andamento")
-            label_ensaio_vel.config(text="Parado")
+            _set_targets_stopped()
         except Exception:
             pass
         if 'button_frame5_pausar' in globals():
@@ -1330,7 +1356,7 @@ def start_acquisition():
                 external_run_state = None
                 try:
                     label_ensaio_estado.config(text="Finalizado")
-                    label_ensaio_vel.config(text="Parado")
+                    _set_targets_stopped()
                 except Exception:
                     pass
                 # Limpa os graficos ao final do ensaio (evita sobreposicao no proximo)
@@ -1367,7 +1393,7 @@ def start_acquisition():
         # Thread para atualizar velocidade atual (modo externo)
         threading.Thread(
             target=_update_vel_label_from_schedule,
-            args=(lista_velocidades_digitadas, lista_duracao),
+            args=(lista_velocidades_digitadas, lista_duracao, rpm_schedule),
             daemon=True
         ).start()
         threading.Thread(
@@ -1478,7 +1504,7 @@ def stop_acquisition():
                 external_run_state = None
                 try:
                     label_ensaio_estado.config(text="Aguardando novo ensaio")
-                    label_ensaio_vel.config(text="Parado")
+                    _set_targets_stopped()
                 except Exception:
                     pass
                 lbl_tempo_decorrido2.config(text="0:00:00")
@@ -1493,7 +1519,7 @@ def stop_acquisition():
             lbl_tempo_decorrido2.config(text="0:00:00")
             try:
                 label_ensaio_estado.config(text="Aguardando novo ensaio")
-                label_ensaio_vel.config(text="Parado")
+                _set_targets_stopped()
             except Exception:
                 pass
             timer_started = False
@@ -2266,29 +2292,33 @@ entry_curso.bind('<KeyRelease>', calcular_voltas_cursos_duracao)
 muda_estado_reciprocante()
 
 ### Tempo, velocidade e botões
-lbl_vel_atual = tkinter.Label(labelframe3_baixo, text="Velocidade atual", font=("Arial", 9, "bold"))
+lbl_vel_atual = tkinter.Label(labelframe3_baixo, text="Velocidade alvo atual", font=("Arial", 9, "bold"))
 lbl_vel_atual.grid(row=1, column=0, padx=5, pady=5)
 label_ensaio_vel = tkinter.Label(labelframe3_baixo, text="Parado", font=("Arial", 12))
 label_ensaio_vel.grid(row=1, column=1, padx=10, pady=10)
+lbl_rpm_alvo = tkinter.Label(labelframe3_baixo, text="RPM Alvo atual", font=("Arial", 9, "bold"))
+lbl_rpm_alvo.grid(row=2, column=0, padx=5, pady=5)
+label_ensaio_rpm = tkinter.Label(labelframe3_baixo, text="0 rpm", font=("Arial", 12))
+label_ensaio_rpm.grid(row=2, column=1, padx=10, pady=10)
 lbl_tempo_decorrido1 = tkinter.Label(labelframe3_baixo, text="Tempo restante", font=("Arial", 9, "bold"))
-lbl_tempo_decorrido1.grid(row=2, column=0, padx=5, pady=5)
+lbl_tempo_decorrido1.grid(row=3, column=0, padx=5, pady=5)
 lbl_tempo_decorrido2 = tkinter.Label(labelframe3_baixo, text="0:00:00", font=("Arial", 40, "bold"))
-lbl_tempo_decorrido2.grid(row=2, column=1, sticky="w", padx=5, pady=5)
+lbl_tempo_decorrido2.grid(row=3, column=1, sticky="w", padx=5, pady=5)
 
 #Botões
 button_frame4_iniciar = tkinter.Button(labelframe3_baixo, text="Iniciar", command=start_acquisition)
-button_frame4_iniciar.grid(sticky="news", row=4, column=0,columnspan=2, padx=5, pady=2)
+button_frame4_iniciar.grid(sticky="news", row=5, column=0,columnspan=2, padx=5, pady=2)
 button_frame5_pausar = tkinter.Button(labelframe3_baixo, text="Pausar", command=pause_acquisition)
-button_frame5_pausar.grid(sticky="news", row=5, column=0,columnspan=2, padx=5, pady=2)
+button_frame5_pausar.grid(sticky="news", row=6, column=0,columnspan=2, padx=5, pady=2)
 button_frame5_parar = tkinter.Button(labelframe3_baixo, text="Parar", command=stop_acquisition)
-button_frame5_parar.grid(sticky="news", row=6, column=0,columnspan=2, padx=5, pady=2)
+button_frame5_parar.grid(sticky="news", row=7, column=0,columnspan=2, padx=5, pady=2)
 
 # Check status (DLG + Drive) - separado dos botoes principais
 button_frame6_status = tkinter.Button(labelframe3_baixo, text="Check status", command=check_status)
-button_frame6_status.grid(sticky="news", row=7, column=0, columnspan=2, padx=5, pady=(10, 2))
+button_frame6_status.grid(sticky="news", row=8, column=0, columnspan=2, padx=5, pady=(10, 2))
 
 status_frame = tkinter.Frame(labelframe3_baixo)
-status_frame.grid(sticky="w", row=8, column=0, columnspan=2, padx=5, pady=(2, 6))
+status_frame.grid(sticky="w", row=9, column=0, columnspan=2, padx=5, pady=(2, 6))
 tkinter.Label(status_frame, text="DLG:", font=("Arial", 9, "bold")).grid(row=0, column=0, padx=(0, 4))
 status_dlg_value = tkinter.Label(status_frame, text="?", fg="gray")
 status_dlg_value.grid(row=0, column=1, padx=(0, 12))
