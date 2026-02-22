@@ -250,7 +250,7 @@ def go():
 
     running = "true"
     try:
-        label_ensaio_estado.config(text="Em andamento", fg="yellow")
+        label_ensaio_estado.config(text="Em andamento", fg="#0078D4")
     except Exception:
         pass
 
@@ -1341,7 +1341,7 @@ def start_acquisition():
         is_paused = False
         tempo_pause_inicio = 0
         try:
-            label_ensaio_estado.config(text="Em andamento", fg="yellow")
+            label_ensaio_estado.config(text="Em andamento", fg="#0078D4")
             _set_targets_stopped()
         except Exception:
             pass
@@ -1507,7 +1507,7 @@ def pause_acquisition():
             start_time = start_time + (tempo_agora - tempo_pause_inicio)
         tempo_pause_inicio = 0
         try:
-            label_ensaio_estado.config(text="Em andamento", fg="yellow")
+            label_ensaio_estado.config(text="Em andamento", fg="#0078D4")
         except Exception:
             pass
         if 'button_frame5_pausar' in globals():
@@ -1568,8 +1568,10 @@ def stop_acquisition():
                 try:
                     label_ensaio_estado.config(text="Finalizando...", fg="darkorange")
                     _set_targets_stopped()
+                    lbl_tempo_decorrido2.config(text="0:00:00")
                 except Exception:
                     pass
+                timer_started = False
                 if 'button_frame5_pausar' in globals():
                     button_frame5_pausar.config(text="Pausar", bg="SystemButtonFace")
                 log_msg("Parada solicitada. Finalizando arquivos e merge...")
@@ -2406,8 +2408,8 @@ lbl_header_voltas_cursos.grid(row=0, column=2, padx=5, pady=5)
     
 tkinter.Label(labelframe2_baixo, text="Duração [min]", font=("Arial", 9, "bold")) \
     .grid(row=0, column=3, padx=5, pady=5)
-tkinter.Label(labelframe3_baixo, text="Estado", font=("Arial", 9, "bold")).grid(row=0, column=0, padx=5, pady=5)
-label_ensaio_estado = tkinter.Label(labelframe3_baixo, text="Aguardando novo ensaio", font=("Arial", 9), fg="black")
+tkinter.Label(labelframe3_baixo, text="Estado", font=("Arial", 10, "bold")).grid(row=0, column=0, padx=5, pady=5)
+label_ensaio_estado = tkinter.Label(labelframe3_baixo, text="Aguardando novo ensaio", font=("Arial", 10, "bold"), fg="black")
 label_ensaio_estado.grid(row=0, column=1, padx=5, pady=5)
 
 
