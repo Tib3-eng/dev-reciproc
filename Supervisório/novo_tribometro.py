@@ -110,7 +110,7 @@ def check_status():
                 dlg_exe,
                 '--out', tmp_path,
                 '--duration', '1',
-                '--rate', '200',
+                '--rate', f"{getattr(orch, 'DEFAULT_RATE_HZ', 50.0):.0f}",
                 '--ip', str(dlg_ip),
                 '--port', str(dlg_port),
                 '--bind-port', '0',
@@ -182,7 +182,7 @@ def check_status():
 
 # INICIALIZAÇÃO DE VARIÁVEIS PADRÃO
 aux = 2000
-freq = 200.0
+freq = 50.0
 running = False
 ip = '127.0.0.1'
 channels = []
@@ -373,7 +373,7 @@ def go():
 
                 # Simula a taxa de amostragem
                 # Pausa a execução por 0.005s (1/200) para simular a frequência de 200Hz
-                time.sleep(1.0 / 200.0)
+                time.sleep(1.0 / freq)
 
             # --- FINALIZAÇÃO ---
             # Se sobrou algo no buffer ao parar, salva o resto
@@ -1257,7 +1257,7 @@ def start_acquisition():
             return
 
         dur_total = sum(d for _, d in schedule)
-        rate_hz = 200.0
+        rate_hz = float(getattr(orch, "DEFAULT_RATE_HZ", 50.0))
 
         # Caminhos padrao (gerados por salvar_arquivo)
         out_paths = {
@@ -1798,7 +1798,7 @@ def get_channels():
 ip = '190.29.92.63'
 timer = 0
 tempo_total_aqc = 0
-freq = 200.0
+freq = 50.0
 taxagraficos = int(1 / freq)
 active_abas = 0
 cont_abas = 0

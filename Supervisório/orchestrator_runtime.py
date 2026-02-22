@@ -28,7 +28,7 @@ from typing import List, Tuple, Optional
 # -------------------------------
 # Configuration defaults (can be overridden by caller)
 # -------------------------------
-DEFAULT_RATE_HZ = 200.0
+DEFAULT_RATE_HZ = 50.0
 DEFAULT_DLG_IP = "192.168.1.100"
 DEFAULT_DLG_PORT = 41401
 DEFAULT_BIND_IP = ""
