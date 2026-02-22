@@ -42,12 +42,21 @@ static const uint16_t WORD_RDY = 0x0000;
 #define CMD_BYTE_US 50000
 #define FAST_RESP_US 3000
 #define FAST_BYTE_US 2000
+#define RAMP_TIME_S 3.0
 
 typedef struct {
     int rpm;
     double dur_s;
     double t_end;
 } seg_t;
+
+typedef struct {
+    int start_rpm;
+    int target_rpm;
+    int active;
+    int64_t t_start;
+    int64_t t_end;
+} rpm_ramp_t;
 
 static void set_timeouts_us(modbus_t *ctx, int resp_us, int byte_us){
     modbus_set_response_timeout(ctx, 0, resp_us);
@@ -202,16 +211,40 @@ static int cmd_rpm(modbus_t *ctx, int rpm){
     return -1;
 }
 
+static int round_to_int(double v);
+
 static int64_t qpc_now_ticks(void){
     LARGE_INTEGER c;
     QueryPerformanceCounter(&c);
     return (int64_t)c.QuadPart;
 }
 
-static void stop_drive_now(modbus_t *ctx){
-    /* Fast stop vector: issue stop command immediately with short retries. */
+static void stop_drive_now(modbus_t *ctx, int *current_cmd_rpm, int64_t ramp_ticks){
+    /* Soft stop vector: ramp to zero setpoint, then force RDY/VDI stop. */
+    int start_rpm = (current_cmd_rpm != NULL) ? *current_cmd_rpm : 0;
+    if(ramp_ticks > 0 && start_rpm != 0){
+        int64_t t0 = qpc_now_ticks();
+        int64_t t1 = t0 + ramp_ticks;
+        int last_cmd = start_rpm;
+
+        for(;;){
+            int64_t now = qpc_now_ticks();
+            if(now >= t1) break;
+            double alpha = (double)(now - t0) / (double)(t1 - t0);
+            if(alpha < 0.0) alpha = 0.0;
+            if(alpha > 1.0) alpha = 1.0;
+            int cmd = round_to_int((double)start_rpm * (1.0 - alpha));
+            if(cmd != last_cmd){
+                (void)cmd_rpm(ctx, cmd);
+                last_cmd = cmd;
+            }
+            Sleep(20);
+        }
+    }
+
+    (void)cmd_rpm(ctx, 0);
+    if(current_cmd_rpm) *current_cmd_rpm = 0;
     for(int i = 0; i < 4; ++i){
-        (void)cmd_rpm(ctx, 0);
         (void)cmd_stop(ctx);
         (void)cmd_vdi_stop(ctx);
         Sleep(20);
@@ -285,6 +318,37 @@ static int64_t qpc_freq_ticks(void){
     LARGE_INTEGER f;
     QueryPerformanceFrequency(&f);
     return (int64_t)f.QuadPart;
+}
+
+static int round_to_int(double v){
+    return (v >= 0.0) ? (int)(v + 0.5) : (int)(v - 0.5);
+}
+
+static void ramp_begin(rpm_ramp_t *r, int start_rpm, int target_rpm, int64_t now_ticks, int64_t ramp_ticks){
+    if(!r) return;
+    r->start_rpm = start_rpm;
+    r->target_rpm = target_rpm;
+    r->t_start = now_ticks;
+    r->t_end = now_ticks + ((ramp_ticks > 0) ? ramp_ticks : 0);
+    if(ramp_ticks <= 0 || start_rpm == target_rpm){
+        r->active = 0;
+        r->t_end = now_ticks;
+    }else{
+        r->active = 1;
+    }
+}
+
+static int ramp_eval(const rpm_ramp_t *r, int64_t now_ticks){
+    if(!r) return 0;
+    if(!r->active) return r->target_rpm;
+    if(now_ticks <= r->t_start) return r->start_rpm;
+    if(now_ticks >= r->t_end) return r->target_rpm;
+
+    int64_t span = r->t_end - r->t_start;
+    int64_t elapsed = now_ticks - r->t_start;
+    double alpha = (span > 0) ? ((double)elapsed / (double)span) : 1.0;
+    double v = (double)r->start_rpm + ((double)(r->target_rpm - r->start_rpm) * alpha);
+    return round_to_int(v);
 }
 
 static int parse_two_numbers(const char *line, double *a, double *b){
@@ -453,18 +517,11 @@ int main(int argc, char **argv){
         }
     }
 
-    /* Start schedule */
     int seg_idx = 0;
-    if(cmd_rpm(ctx, segs[0].rpm) != 0){
-        fprintf(stderr, "Falha enviando RPM inicial.\n");
-    }
-    if(cmd_run(ctx) != 0){
-        fprintf(stderr, "Falha RUN.\n");
-    }
-
     int total_samples = (int)(duration_s * rate_hz + 0.5);
     int64_t qpc_freq = qpc_freq_ticks();
     int64_t dt_ticks = (int64_t)((double)qpc_freq / rate_hz + 0.5);
+    int64_t ramp_ticks = (int64_t)(RAMP_TIME_S * (double)qpc_freq + 0.5);
     int64_t start_ticks = qpc_now_ticks();
     int64_t next_ticks = start_ticks;
 
@@ -475,6 +532,17 @@ int main(int argc, char **argv){
     int64_t hard_stop_ticks = start_ticks + (int64_t)(duration_s * (double)qpc_freq);
     int p0b09_mode = 0;
     int rpm_mode = 0;
+    int current_cmd_rpm = 0;
+    int desired_seg_rpm = segs[0].rpm;
+    rpm_ramp_t rpm_ramp = {0, 0, 0, start_ticks, start_ticks};
+
+    /* Smooth first engagement: start at 0 rpm and ramp to the first segment target. */
+    (void)cmd_rpm(ctx, 0);
+    if(cmd_run(ctx) != 0){
+        fprintf(stderr, "Falha RUN.\n");
+    }
+    ramp_begin(&rpm_ramp, current_cmd_rpm, desired_seg_rpm, start_ticks, ramp_ticks);
+
     for(int idx = 0; idx < total_samples; ){
         ipc_cmd_t ipc_cmd = ipc_poll_command(use_ipc);
         if(ipc_cmd == IPC_CMD_STOP){
@@ -484,7 +552,9 @@ int main(int argc, char **argv){
         if(ipc_cmd == IPC_CMD_PAUSE && !paused){
             paused = 1;
             pause_start_ticks = qpc_now_ticks();
-            stop_drive_now(ctx);
+            stop_drive_now(ctx, &current_cmd_rpm, ramp_ticks);
+            current_cmd_rpm = 0;
+            ramp_begin(&rpm_ramp, 0, 0, pause_start_ticks, 0);
         }else if(ipc_cmd == IPC_CMD_RESUME && paused){
             int64_t now_resume = qpc_now_ticks();
             int64_t paused_ticks = now_resume - pause_start_ticks;
@@ -494,8 +564,9 @@ int main(int argc, char **argv){
             hard_stop_ticks += paused_ticks;
             paused = 0;
             if(!stop_sent){
-                (void)cmd_rpm(ctx, segs[seg_idx].rpm);
                 (void)cmd_run(ctx);
+                desired_seg_rpm = segs[seg_idx].rpm;
+                ramp_begin(&rpm_ramp, current_cmd_rpm, desired_seg_rpm, now_resume, ramp_ticks);
             }
         }
 
@@ -506,12 +577,27 @@ int main(int argc, char **argv){
 
         int64_t now = qpc_now_ticks();
         if(!stop_sent && now >= hard_stop_ticks){
-            stop_drive_now(ctx);
+            stop_drive_now(ctx, &current_cmd_rpm, ramp_ticks);
+            current_cmd_rpm = 0;
+            ramp_begin(&rpm_ramp, 0, 0, now, 0);
             stop_sent = 1;
         }
         if(now < next_ticks){
             Sleep(1);
             continue;
+        }
+
+        if(!stop_sent){
+            int rpm_cmd_now = ramp_eval(&rpm_ramp, now);
+            if(rpm_ramp.active && now >= rpm_ramp.t_end){
+                rpm_ramp.active = 0;
+                rpm_cmd_now = rpm_ramp.target_rpm;
+            }
+            if(rpm_cmd_now != current_cmd_rpm){
+                if(cmd_rpm(ctx, rpm_cmd_now) == 0){
+                    current_cmd_rpm = rpm_cmd_now;
+                }
+            }
         }
 
         int sampled_pos_ok = 0;
@@ -540,9 +626,10 @@ int main(int argc, char **argv){
 
             while(seg_idx + 1 < seg_count && t_s >= segs[seg_idx].t_end){
                 seg_idx++;
-                if(!stop_sent){
-                    (void)cmd_rpm(ctx, segs[seg_idx].rpm);
-                }
+            }
+            if(!stop_sent && segs[seg_idx].rpm != desired_seg_rpm){
+                desired_seg_rpm = segs[seg_idx].rpm;
+                ramp_begin(&rpm_ramp, current_cmd_rpm, desired_seg_rpm, now, ramp_ticks);
             }
 
             fprintf(f, "%d,%lld,%.6f,NULL,NULL,1,1\n", idx, (long long)t_qpc, t_s);
@@ -556,9 +643,10 @@ int main(int argc, char **argv){
 
             while(seg_idx + 1 < seg_count && t_s >= segs[seg_idx].t_end){
                 seg_idx++;
-                if(!stop_sent){
-                    (void)cmd_rpm(ctx, segs[seg_idx].rpm);
-                }
+            }
+            if(!stop_sent && segs[seg_idx].rpm != desired_seg_rpm){
+                desired_seg_rpm = segs[seg_idx].rpm;
+                ramp_begin(&rpm_ramp, current_cmd_rpm, desired_seg_rpm, now, ramp_ticks);
             }
 
             if(sampled_pos_ok) fprintf(f, "%d,%lld,%.6f,%ld,", idx, (long long)t_qpc, t_s, (long)sampled_pos);
@@ -578,7 +666,7 @@ int main(int argc, char **argv){
         fflush(stdout);
     }
     if(!stop_sent){
-        stop_drive_now(ctx);
+        stop_drive_now(ctx, &current_cmd_rpm, ramp_ticks);
     }
     modbus_close(ctx);
     modbus_free(ctx);
