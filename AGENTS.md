@@ -46,6 +46,7 @@ DLG4000 (UDP/WinSock2):
 - dlg_logger_ipc grava numero fixo de linhas (duracao * taxa) e injeta NULL quando faltar amostra.
 - dlg_logger_ipc aplica calibracao por canal quando calib.json/calib_CHn.json estiver presente; se nao houver, loga bruto.
 - dlg_logger_ipc espera 3 amostras validas (DATA_OK) antes de iniciar o tempo; o supervisório so inicia o Drive depois disso.
+- dlg_logger_ipc --ipc agora aceita PAUSE/RESUME/STOP. Em pause ele drena e descarta pacotes, congela o tempo local e retoma sem criar slots de catch-up.
 
 CalibraDLG (UDP/WinSock2):
 - Modes: interactive console (default) or --ipc (JSON lines over STDIN/STDOUT).
@@ -74,6 +75,8 @@ Supervisório (Python/Tk):
 - Check status bind: tenta 41402 (mesma do logger); se falhar, usa porta efemera e registra no log.
 - Pending: If DLG check still fails, suspect DLG busy in another app or firewall/route issues.
 - stop_run: envia STOP via stdin (IPC) e espera curto periodo antes de terminate/kill.
+- orchestrator_runtime tem pause_run/resume_run e envia PAUSE/RESUME para ambos os processos IPC.
+- Botao Pausar no supervisório externo alterna para Retomar, congela o cronometro e o estado; ao retomar, continua da mesma etapa.
 - novo_tribometro logs merge status in aba Log and captures run state snapshot to avoid race with global external_run_state.
 
 DriveA5 (Modbus RTU / libmodbus):
@@ -101,6 +104,7 @@ DriveA5 (Modbus RTU / libmodbus):
 - Se o logger do Drive atrasar, ele marca slots perdidos como NULL (err=1) e nao replica posicoes; STOP continua no deadline alvo.
 - a5_speed_logger cacheia modo de leitura de P0B-09 (FC03/FC04) para reduzir latencia de fallback em cada amostra.
 - a5_speed_logger --ipc: aceita STOP via stdin para encerramento antecipado com a mesma rotina de parada.
+- a5_speed_logger --ipc: aceita PAUSE/RESUME. Em pause envia parada imediata; em resume volta com o RPM do segmento atual e desloca deadlines (sem contar tempo pausado).
 - merge_logs: junta dlg.csv + drive.csv por indice de linha e gera merge.csv com colunas: idx,t_s,ch1..ch8,pos,rpm,dlg_err,drive_pos_err,drive_rpm_err.
 Field notes (DriveA5, based on recent tests):
 - Relative mode (P11-04=0) is more consistent than absolute, but still drifts if completion threshold is loose.

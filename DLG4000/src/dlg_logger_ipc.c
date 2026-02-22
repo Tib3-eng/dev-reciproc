@@ -436,6 +436,70 @@ static void trim(char *s){
     if(p != s) memmove(s, p, strlen(p)+1);
 }
 
+typedef enum {
+    IPC_CMD_NONE = 0,
+    IPC_CMD_STOP = 1,
+    IPC_CMD_PAUSE = 2,
+    IPC_CMD_RESUME = 3
+} ipc_cmd_t;
+
+static ipc_cmd_t ipc_poll_command(int use_ipc){
+    static char pending[256];
+    static size_t pending_len = 0;
+    if(!use_ipc) return IPC_CMD_NONE;
+
+    HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
+    if(h == NULL || h == INVALID_HANDLE_VALUE) return IPC_CMD_NONE;
+
+    DWORD avail = 0;
+    if(!PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL) || avail == 0){
+        return IPC_CMD_NONE;
+    }
+
+    char chunk[128];
+    DWORD to_read = (avail < (DWORD)(sizeof(chunk) - 1)) ? avail : (DWORD)(sizeof(chunk) - 1);
+    DWORD got = 0;
+    if(!ReadFile(h, chunk, to_read, &got, NULL) || got == 0){
+        return IPC_CMD_NONE;
+    }
+    chunk[got] = 0;
+
+    if(got + pending_len >= sizeof(pending)){
+        pending_len = 0;
+    }
+    memcpy(pending + pending_len, chunk, got);
+    pending_len += got;
+    pending[pending_len] = 0;
+
+    for(size_t i = 0; i < pending_len; ++i){
+        if(pending[i] != '\n') continue;
+
+        size_t line_len = i;
+        while(line_len > 0 && (pending[line_len - 1] == '\r' || pending[line_len - 1] == '\n')){
+            line_len--;
+        }
+
+        char line[64];
+        size_t copy_len = (line_len < sizeof(line) - 1) ? line_len : (sizeof(line) - 1);
+        memcpy(line, pending, copy_len);
+        line[copy_len] = 0;
+        trim(line);
+
+        size_t remain = pending_len - (i + 1);
+        memmove(pending, pending + i + 1, remain);
+        pending_len = remain;
+        pending[pending_len] = 0;
+
+        if(_stricmp(line, "STOP") == 0) return IPC_CMD_STOP;
+        if(_stricmp(line, "PAUSE") == 0) return IPC_CMD_PAUSE;
+        if(_stricmp(line, "RESUME") == 0) return IPC_CMD_RESUME;
+
+        i = (size_t)-1;
+    }
+
+    return IPC_CMD_NONE;
+}
+
 static void print_usage(void){
     puts("Uso:");
     puts("  dlg_logger_ipc --out <csv> --duration <s> [--rate <hz>] [--ipc]");
@@ -586,7 +650,35 @@ int main(int argc, char **argv){
     }
 
     int idx = 0;
+    int stop_requested = 0;
+    int paused = 0;
+    int64_t pause_start_ticks = 0;
     while(idx < total_samples){
+        ipc_cmd_t ipc_cmd = ipc_poll_command(use_ipc);
+        if(ipc_cmd == IPC_CMD_STOP){
+            stop_requested = 1;
+            break;
+        }
+        if(ipc_cmd == IPC_CMD_PAUSE && !paused){
+            paused = 1;
+            pause_start_ticks = qpc_now_ticks();
+            ring_clear(&ring);
+        }else if(ipc_cmd == IPC_CMD_RESUME && paused){
+            int64_t now_resume = qpc_now_ticks();
+            int64_t paused_ticks = now_resume - pause_start_ticks;
+            if(paused_ticks < 0) paused_ticks = 0;
+            start_ticks += paused_ticks;
+            next_ticks += paused_ticks;
+            paused = 0;
+        }
+
+        if(paused){
+            (void)drain_packets_to_ring(s, &ring, DEFAULT_CHANNELS);
+            ring_clear(&ring);
+            Sleep(1);
+            continue;
+        }
+
         /* Drain all available packets */
         (void)drain_packets_to_ring(s, &ring, DEFAULT_CHANNELS);
 
@@ -620,6 +712,11 @@ int main(int argc, char **argv){
         }else{
             Sleep(1);
         }
+    }
+
+    if(stop_requested && use_ipc){
+        puts("STOP requested (IPC).");
+        fflush(stdout);
     }
 
     stop_acq(s, &addr);

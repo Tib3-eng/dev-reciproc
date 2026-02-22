@@ -218,21 +218,68 @@ static void stop_drive_now(modbus_t *ctx){
     }
 }
 
-static int ipc_stop_requested(int use_ipc){
-    if(!use_ipc) return 0;
+typedef enum {
+    IPC_CMD_NONE = 0,
+    IPC_CMD_STOP = 1,
+    IPC_CMD_PAUSE = 2,
+    IPC_CMD_RESUME = 3
+} ipc_cmd_t;
+
+static ipc_cmd_t ipc_poll_command(int use_ipc){
+    static char pending[256];
+    static size_t pending_len = 0;
+    if(!use_ipc) return IPC_CMD_NONE;
 
     HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
-    if(h == NULL || h == INVALID_HANDLE_VALUE) return 0;
+    if(h == NULL || h == INVALID_HANDLE_VALUE) return IPC_CMD_NONE;
 
     DWORD avail = 0;
-    if(!PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL) || avail == 0) return 0;
+    if(!PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL) || avail == 0){
+        return IPC_CMD_NONE;
+    }
 
-    char buf[128];
-    DWORD to_read = (avail < (DWORD)(sizeof(buf) - 1)) ? avail : (DWORD)(sizeof(buf) - 1);
+    char chunk[128];
+    DWORD to_read = (avail < (DWORD)(sizeof(chunk) - 1)) ? avail : (DWORD)(sizeof(chunk) - 1);
     DWORD got = 0;
-    if(!ReadFile(h, buf, to_read, &got, NULL) || got == 0) return 0;
-    buf[got] = 0;
-    return (strstr(buf, "STOP") != NULL) ? 1 : 0;
+    if(!ReadFile(h, chunk, to_read, &got, NULL) || got == 0){
+        return IPC_CMD_NONE;
+    }
+    chunk[got] = 0;
+
+    if(got + pending_len >= sizeof(pending)){
+        pending_len = 0;
+    }
+    memcpy(pending + pending_len, chunk, got);
+    pending_len += got;
+    pending[pending_len] = 0;
+
+    for(size_t i = 0; i < pending_len; ++i){
+        if(pending[i] != '\n') continue;
+
+        size_t line_len = i;
+        while(line_len > 0 && (pending[line_len - 1] == '\r' || pending[line_len - 1] == '\n')){
+            line_len--;
+        }
+
+        char line[64];
+        size_t copy_len = (line_len < sizeof(line) - 1) ? line_len : (sizeof(line) - 1);
+        memcpy(line, pending, copy_len);
+        line[copy_len] = 0;
+        trim(line);
+
+        size_t remain = pending_len - (i + 1);
+        memmove(pending, pending + i + 1, remain);
+        pending_len = remain;
+        pending[pending_len] = 0;
+
+        if(_stricmp(line, "STOP") == 0) return IPC_CMD_STOP;
+        if(_stricmp(line, "PAUSE") == 0) return IPC_CMD_PAUSE;
+        if(_stricmp(line, "RESUME") == 0) return IPC_CMD_RESUME;
+
+        i = (size_t)-1;
+    }
+
+    return IPC_CMD_NONE;
 }
 static int64_t qpc_freq_ticks(void){
     LARGE_INTEGER f;
@@ -423,14 +470,40 @@ int main(int argc, char **argv){
 
     int stop_requested = 0;
     int stop_sent = 0;
+    int paused = 0;
+    int64_t pause_start_ticks = 0;
     int64_t hard_stop_ticks = start_ticks + (int64_t)(duration_s * (double)qpc_freq);
     int p0b09_mode = 0;
     int rpm_mode = 0;
     for(int idx = 0; idx < total_samples; ){
-        if(ipc_stop_requested(use_ipc)){
+        ipc_cmd_t ipc_cmd = ipc_poll_command(use_ipc);
+        if(ipc_cmd == IPC_CMD_STOP){
             stop_requested = 1;
             break;
         }
+        if(ipc_cmd == IPC_CMD_PAUSE && !paused){
+            paused = 1;
+            pause_start_ticks = qpc_now_ticks();
+            stop_drive_now(ctx);
+        }else if(ipc_cmd == IPC_CMD_RESUME && paused){
+            int64_t now_resume = qpc_now_ticks();
+            int64_t paused_ticks = now_resume - pause_start_ticks;
+            if(paused_ticks < 0) paused_ticks = 0;
+            start_ticks += paused_ticks;
+            next_ticks += paused_ticks;
+            hard_stop_ticks += paused_ticks;
+            paused = 0;
+            if(!stop_sent){
+                (void)cmd_rpm(ctx, segs[seg_idx].rpm);
+                (void)cmd_run(ctx);
+            }
+        }
+
+        if(paused){
+            Sleep(2);
+            continue;
+        }
+
         int64_t now = qpc_now_ticks();
         if(!stop_sent && now >= hard_stop_ticks){
             stop_drive_now(ctx);

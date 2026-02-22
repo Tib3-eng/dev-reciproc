@@ -711,8 +711,15 @@ def atualiza_decorrido():
         total_s = 0
 
     try:
-        elapsed = time.time() - start_time
+        if not timer_started:
+            elapsed = 0
+        elif is_paused:
+            elapsed = tempo_pause_inicio - start_time
+        else:
+            elapsed = time.time() - start_time
     except Exception:
+        elapsed = 0
+    if elapsed < 0:
         elapsed = 0
 
     if total_s > 0:
@@ -780,6 +787,9 @@ def _update_vel_label_from_schedule(vel_mm_s_list, dur_s_list, rpm_list=None):
             pass
 
     while _is_running():
+        if is_paused:
+            time.sleep(0.1)
+            continue
         try:
             elapsed = time.time() - start_time
         except Exception:
@@ -855,6 +865,10 @@ def _wait_dlg_ok_and_start_timer(dlg_csv_path, min_ok=3, timeout_s=15):
                 if parts[-1].strip() == "0":
                     ok_count += 1
                     if ok_count >= min_ok:
+                        while _is_running() and is_paused:
+                            time.sleep(0.05)
+                        if not _is_running() or timer_started:
+                            return
                         try:
                             root.after(0, _start_timer_now)
                         except Exception:
@@ -929,7 +943,7 @@ def start_acquisition():
     global running
     # NOTE: declare globals before any assignment inside this function to avoid
     # Python "assigned before global declaration" errors (PyInstaller parse).
-    global start_time, is_paused
+    global start_time, is_paused, tempo_pause_inicio
 
     # Impede o funcionamento do botão iniciar duas vezes seguidas:
     if running == "true":
@@ -1324,6 +1338,7 @@ def start_acquisition():
         # Atualiza estado do GUI
         running = "true"
         is_paused = False
+        tempo_pause_inicio = 0
         try:
             label_ensaio_estado.config(text="Em andamento")
             _set_targets_stopped()
@@ -1350,13 +1365,19 @@ def start_acquisition():
                 log_msg(f"Erro no merge final: {e}")
             finally:
                 # Atualiza estado visual ao final
-                global running, is_paused, external_run_state
+                global running, is_paused, external_run_state, tempo_pause_inicio, timer_started
                 running = False
                 is_paused = False
+                tempo_pause_inicio = 0
+                timer_started = False
                 external_run_state = None
                 try:
                     label_ensaio_estado.config(text="Finalizado")
                     _set_targets_stopped()
+                except Exception:
+                    pass
+                try:
+                    button_frame5_pausar.config(text="Pausar", bg="SystemButtonFace")
                 except Exception:
                     pass
                 # Limpa os graficos ao final do ensaio (evita sobreposicao no proximo)
@@ -1445,47 +1466,81 @@ def start_acquisition():
 
 
 def pause_acquisition():
-    global is_paused, start_time, tempo_pause_inicio, running
+    global is_paused, start_time, tempo_pause_inicio, running, external_run_state
     
     # Só funciona se a aquisição estiver rodando (running == "true")
-    if running == "true":
-        # --------------------------------------------------------------
-        # INTEGRACAO COM LOGGERS EM C:
-        # Pausar ainda não está implementado no pipeline externo.
-        # (Evita estado inconsistente de loggers externos.)
-        # --------------------------------------------------------------
-        if USE_EXTERNAL_RUNNER:
-            messagebox.showwarning("Pausar não disponível",
-                                   "O modo externo (DLG + Drive) ainda não suporta pausa.\n"
-                                   "Use 'Parar' para finalizar o ensaio.")
+    if running != "true":
+        return
+
+    if USE_EXTERNAL_RUNNER:
+        if external_run_state is None:
+            messagebox.showwarning("Pausar", "Ensaio externo não está ativo.")
             return
+
         if not is_paused:
-            
+            try:
+                orch.pause_run(external_run_state)
+            except Exception as e:
+                messagebox.showerror("Erro ao pausar", f"Falha ao pausar ensaio externo.\n\n{e}")
+                return
             is_paused = True
-            tempo_pause_inicio = time.time() # Marca a hora que pausou
-            
-            # Muda o texto do botão visualmente
-            button_frame5_pausar.config(text="Retomar", bg="yellow")
-            print("Aquisição PAUSADA.")
-            
-        else:
-        
-            is_paused = False
-            tempo_agora = time.time()
-            tempo_que_ficou_parado = tempo_agora - tempo_pause_inicio
-            
-            start_time = start_time + tempo_que_ficou_parado
-            
-            # Muda o botão de volta
+            tempo_pause_inicio = time.time()
+            try:
+                label_ensaio_estado.config(text="Pausado")
+            except Exception:
+                pass
+            if 'button_frame5_pausar' in globals():
+                button_frame5_pausar.config(text="Retomar", bg="yellow")
+            log_msg("Ensaio pausado.")
+            return
+
+        try:
+            orch.resume_run(external_run_state)
+        except Exception as e:
+            messagebox.showerror("Erro ao retomar", f"Falha ao retomar ensaio externo.\n\n{e}")
+            return
+
+        is_paused = False
+        tempo_agora = time.time()
+        if timer_started and tempo_pause_inicio > 0:
+            start_time = start_time + (tempo_agora - tempo_pause_inicio)
+        tempo_pause_inicio = 0
+        try:
+            label_ensaio_estado.config(text="Em andamento")
+        except Exception:
+            pass
+        if 'button_frame5_pausar' in globals():
             button_frame5_pausar.config(text="Pausar", bg="SystemButtonFace")
-            print("Aquisição RETOMADA.")
-            
-            # Reinicia o loop do relógio na tela
-            atualiza_decorrido()
+        log_msg("Ensaio retomado.")
+        atualiza_decorrido()
+        return
+
+    if not is_paused:
+        is_paused = True
+        tempo_pause_inicio = time.time() # Marca a hora que pausou
+        
+        # Muda o texto do botão visualmente
+        button_frame5_pausar.config(text="Retomar", bg="yellow")
+        print("Aquisição PAUSADA.")
+        
+    else:
+    
+        is_paused = False
+        tempo_agora = time.time()
+        tempo_que_ficou_parado = tempo_agora - tempo_pause_inicio
+        
+        start_time = start_time + tempo_que_ficou_parado
+        
+        # Muda o botão de volta
+        button_frame5_pausar.config(text="Pausar", bg="SystemButtonFace")
+        print("Aquisição RETOMADA.")
+        
+        # Reinicia o loop do relógio na tela
+        atualiza_decorrido()
 
 
 def stop_acquisition():
-    global running, is_paused, ip, timer_started
+    global running, is_paused, ip, timer_started, tempo_pause_inicio
     global graSamps, sampsTimestamp, p_strokes, p_atrito_ef, p_atrito_max, p_atrito_min, p_coluna_velocidade
 
     if running:
@@ -1493,6 +1548,7 @@ def stop_acquisition():
         if resposta:
             running = False
             is_paused = False
+            tempo_pause_inicio = 0
 
             # --------------------------------------------------------------
             # INTEGRACAO COM LOGGERS EM C:

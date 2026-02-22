@@ -52,6 +52,7 @@ class RunState:
     # Run settings
     duration_s: float
     rate_hz: float
+    paused: bool = False
 
 
 def sanitize_folder_name(name: str) -> str:
@@ -368,12 +369,7 @@ def stop_run(state: Optional[RunState]) -> None:
 
     # 1) Best-effort graceful stop (loggers running with --ipc can read STOP from stdin).
     for p in procs:
-        if p and p.poll() is None and p.stdin:
-            try:
-                p.stdin.write("STOP\n")
-                p.stdin.flush()
-            except Exception:
-                pass
+        _send_ipc(p, "STOP")
 
     # 2) Give the drive logger a short window to issue Modbus stop safely.
     deadline = time.time() + 2.5
@@ -413,13 +409,46 @@ def _wait_ready(proc: subprocess.Popen, tag: str, timeout_s: float = 5.0) -> Non
 
 
 def _send_start(proc: subprocess.Popen) -> None:
-    if not proc or not proc.stdin:
-        return
+    _send_ipc(proc, "START")
+
+
+def _send_ipc(proc: Optional[subprocess.Popen], command: str) -> bool:
+    """
+    Best-effort single-line IPC command sender.
+    Returns True when the write succeeds.
+    """
+    if not proc or proc.poll() is not None or not proc.stdin:
+        return False
     try:
-        proc.stdin.write("START\n")
+        proc.stdin.write(command + "\n")
         proc.stdin.flush()
+        return True
     except Exception:
-        pass
+        return False
+
+
+def pause_run(state: Optional[RunState]) -> None:
+    """
+    Pause both loggers.
+    Drive is paused first so motor stop is requested immediately.
+    """
+    if not state:
+        return
+    _send_ipc(state.drive_proc, "PAUSE")
+    _send_ipc(state.dlg_proc, "PAUSE")
+    state.paused = True
+
+
+def resume_run(state: Optional[RunState]) -> None:
+    """
+    Resume both loggers.
+    DLG resumes first to keep timeline alignment with merged data.
+    """
+    if not state:
+        return
+    _send_ipc(state.dlg_proc, "RESUME")
+    _send_ipc(state.drive_proc, "RESUME")
+    state.paused = False
 
 
 def _wait_data_ready(proc: subprocess.Popen, timeout_s: float = 5.0) -> bool:
