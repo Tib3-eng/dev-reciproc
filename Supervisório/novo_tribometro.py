@@ -1,10 +1,12 @@
 import os
+import json
 import time
 import threading
 import subprocess
 import tempfile
+import shutil
 import tkinter
-from tkinter import messagebox
+from tkinter import messagebox, filedialog
 from tkinter import ttk
 
 import numpy as np
@@ -43,8 +45,104 @@ import orchestrator_runtime as orch
 USE_EXTERNAL_RUNNER = True
 external_run_state = None
 
-# Pasta base padrao para salvar ensaios
-REPO_BASE = os.path.join(os.path.expanduser("~"), "Desktop", "Repositorio")
+# Persistencia simples de configuracoes do supervisório.
+DEFAULT_REPO_BASE = os.path.join(os.path.expanduser("~"), "Desktop", "Repositorio")
+APP_SETTINGS_DIR = os.path.join(
+    os.getenv("LOCALAPPDATA") or os.path.expanduser("~"),
+    "LATRIB"
+)
+APP_SETTINGS_PATH = os.path.join(APP_SETTINGS_DIR, "supervisorio_settings.json")
+
+
+def _load_app_settings():
+    try:
+        with open(APP_SETTINGS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_app_settings(data):
+    try:
+        os.makedirs(APP_SETTINGS_DIR, exist_ok=True)
+        with open(APP_SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+APP_SETTINGS = _load_app_settings()
+REPO_BASE = APP_SETTINGS.get("repo_base", DEFAULT_REPO_BASE)
+if not isinstance(REPO_BASE, str) or not REPO_BASE.strip():
+    REPO_BASE = DEFAULT_REPO_BASE
+
+
+def _set_repo_base(path):
+    global REPO_BASE, APP_SETTINGS
+    if not path:
+        return
+    REPO_BASE = path
+    APP_SETTINGS["repo_base"] = REPO_BASE
+    _save_app_settings(APP_SETTINGS)
+    if "repo_base_var" in globals():
+        repo_base_var.set(REPO_BASE)
+    log_msg(f"Diretorio base definido para: {REPO_BASE}")
+
+
+def selecionar_repo_base():
+    initial_dir = REPO_BASE if os.path.isdir(REPO_BASE) else os.path.expanduser("~")
+    path = filedialog.askdirectory(
+        title="Selecionar diretorio base dos ensaios",
+        initialdir=initial_dir
+    )
+    if not path:
+        return
+    try:
+        os.makedirs(path, exist_ok=True)
+    except Exception as e:
+        messagebox.showerror("Erro", f"Nao foi possivel usar este diretorio.\n\n{e}")
+        return
+    _set_repo_base(path)
+
+
+def _external_pipeline_ativo():
+    if external_run_state is None:
+        return False
+    try:
+        dlg_alive = external_run_state.dlg_proc and external_run_state.dlg_proc.poll() is None
+        drv_alive = external_run_state.drive_proc and external_run_state.drive_proc.poll() is None
+        return dlg_alive or drv_alive
+    except Exception:
+        return False
+
+
+def abrir_configurar_canais():
+    if _is_running() or _external_pipeline_ativo():
+        messagebox.showwarning(
+            "Configurar canais",
+            "Finalize o ensaio e feche processos em segundo plano antes de calibrar."
+        )
+        return
+
+    repo_root = orch.find_repo_root()
+    candidates = [
+        os.path.join(repo_root, "CalibraDLG_UI", "bin", "Release", "net6.0-windows", "CalibraDLG_UI.exe"),
+        os.path.join(repo_root, "CalibraDLG_UI.exe"),
+    ]
+    exe = next((c for c in candidates if os.path.exists(c)), None)
+    if not exe:
+        messagebox.showerror(
+            "Configurar canais",
+            "CalibraDLG_UI.exe nao encontrado.\n\n"
+            "Compile o CalibraDLG_UI antes de abrir esta tela."
+        )
+        return
+    try:
+        subprocess.Popen([exe], cwd=os.path.dirname(exe))
+        log_msg("CalibraDLG_UI iniciado.")
+    except Exception as e:
+        messagebox.showerror("Configurar canais", f"Falha ao abrir CalibraDLG_UI.\n\n{e}")
 
 # Log simples para a aba de debug (quando existir)
 def log_msg(msg):
@@ -2080,29 +2178,56 @@ aba2.grid_columnconfigure(0, weight=1)
 aba2.grid_rowconfigure(1, weight=1)
 aba2.grid_rowconfigure(2, weight=1)
 
-nb.add(aba2, text="configurações iniciais")
+nb.add(aba2, text="configuracoes iniciais")
 
 # ------------------------------------------------------------------
-# ABA DE LOG (DESENVOLVIMENTO)
+# ABA DE CONFIGURACOES ADICIONAIS
 # ------------------------------------------------------------------
-# Esta aba serve para debug durante desenvolvimento e validacao de
-# comunicacao (ex.: Check status). O log e somente informativo.
-aba_log = tkinter.Frame(nb)
-aba_log.grid(sticky="news", row=0, column=0)
-aba_log.grid_rowconfigure(0, weight=1)
-aba_log.grid_columnconfigure(0, weight=1)
-aba_log.grid_columnconfigure(1, weight=0)
+aba_cfg = tkinter.Frame(nb)
+aba_cfg.grid(sticky="news", row=0, column=0)
+aba_cfg.grid_rowconfigure(0, weight=1)
+aba_cfg.grid_columnconfigure(0, weight=1)
+nb.add(aba_cfg, text="configuracoes adicionais")
 
-nb.add(aba_log, text="log")
+cfg_frame = tkinter.LabelFrame(aba_cfg, text="configuracoes")
+cfg_frame.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+cfg_frame.grid_columnconfigure(1, weight=1)
 
-# Text widget com scroll vertical para mensagens de debug.
-log_text = tkinter.Text(aba_log, height=10, wrap="none", state="disabled")
-log_text.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=6)
+tkinter.Label(
+    cfg_frame,
+    text="Diretorio fixo dos ensaios",
+    font=("Arial", 10, "bold")
+).grid(row=0, column=0, sticky="w", padx=6, pady=(8, 4), columnspan=3)
 
-log_scroll_y = tkinter.Scrollbar(aba_log, orient="vertical", command=log_text.yview)
-log_scroll_y.grid(row=0, column=1, sticky="ns", padx=(2, 6), pady=6)
+repo_base_var = tkinter.StringVar(value=REPO_BASE)
+repo_entry = tkinter.Entry(cfg_frame, textvariable=repo_base_var, state="readonly")
+repo_entry.grid(row=1, column=0, columnspan=2, sticky="ew", padx=6, pady=4)
 
-log_text.configure(yscrollcommand=log_scroll_y.set)
+btn_repo = tkinter.Button(cfg_frame, text="Selecionar pasta", command=selecionar_repo_base)
+btn_repo.grid(row=1, column=2, sticky="e", padx=6, pady=4)
+
+tkinter.Label(
+    cfg_frame,
+    text="A pasta selecionada fica salva e sera usada como base nos proximos ensaios.",
+    anchor="w",
+    justify="left"
+).grid(row=2, column=0, columnspan=3, sticky="w", padx=6, pady=(2, 12))
+
+tkinter.Label(
+    cfg_frame,
+    text="Calibracao de canais",
+    font=("Arial", 10, "bold")
+).grid(row=3, column=0, sticky="w", padx=6, pady=(8, 4), columnspan=3)
+
+btn_cfg_canais = tkinter.Button(cfg_frame, text="Configurar canais", command=abrir_configurar_canais)
+btn_cfg_canais.grid(row=4, column=0, sticky="w", padx=6, pady=(2, 6))
+
+tkinter.Label(
+    cfg_frame,
+    text="Recomendado: sem ensaio ativo e sem processos de aquisicao em segundo plano.",
+    anchor="w",
+    justify="left"
+).grid(row=5, column=0, columnspan=3, sticky="w", padx=6, pady=(2, 8))
 
 #'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 

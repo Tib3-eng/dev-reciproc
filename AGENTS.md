@@ -68,6 +68,9 @@ Supervisório (Python/Tk):
 - orchestrator_runtime.py launches dlg_logger_ipc + a5_speed_logger in background and merges logs with merge_logs.
 - conversao mm/s->rpm no orchestrator usa modulo (abs) para enviar setpoint sempre positivo no modo velocidade.
 - UI mostra "Velocidade alvo atual" (mm/s) e "RPM Alvo atual" (setpoint enviado ao Drive).
+- A UI nao usa mais aba de log; mensagens seguem para console e status visuais.
+- A aba "configuracoes adicionais" permite escolher diretorio base fixo dos ensaios; valor persistido em settings local (APPDATA).
+- A aba "configuracoes adicionais" inclui botao "Configurar canais" para abrir CalibraDLG_UI diretamente, com bloqueio se ensaio/processos estiverem ativos.
 - Botao "Configurar Eixos Y (Min / Max)" abre popup compacto com 2 linhas (Temperatura/Grafico 1 e Atrito-forca/Grafico 2), com modo Automatico (padrao) e campos Min/Max manuais.
 - Taxa padrao de aquisicao no pipeline externo (DLG + Drive) ajustada para 50 Hz; manter ambas iguais para sincronismo.
 - wait_and_merge has fallback merge in Python if merge_logs fails or merge.csv is missing.
@@ -79,7 +82,7 @@ Supervisório (Python/Tk):
 - stop_run no supervisório: ao clicar Parar, estado vira "Finalizando...", envia STOP para ambos, aguarda fechamento e mantem merge final ate salvar arquivos parciais.
 - orchestrator_runtime tem pause_run/resume_run e envia PAUSE/RESUME para ambos os processos IPC.
 - Botao Pausar no supervisório externo alterna para Retomar, congela o cronometro e o estado; ao retomar, continua da mesma etapa.
-- novo_tribometro logs merge status in aba Log and captures run state snapshot to avoid race with global external_run_state.
+- novo_tribometro captures run state snapshot to avoid race with global external_run_state.
 
 DriveA5 (Modbus RTU / libmodbus):
 - a5_cli: RUN/STOP, set RPM (P06-03), read P0B-09. Try FC03, fallback FC04.
