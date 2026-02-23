@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Drawing;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -12,8 +13,6 @@ namespace CalibraDLG_UI
 {
     public sealed class MainForm : Form
     {
-        private readonly TextBox _exePath;
-        private readonly Button _browseExe;
         private readonly ComboBox _channel;
         private readonly ComboBox _sensor;
         private readonly ComboBox _gain;
@@ -26,10 +25,13 @@ namespace CalibraDLG_UI
         private readonly Button _finish;
         private readonly Button _cancel;
         private readonly Button _legend;
+        private readonly Button _checkDlg;
         private readonly DataGridView _grid;
+        private readonly TextBox _logBox;
         private readonly Label _status;
         private readonly Label _result;
         private readonly Label _error;
+        private readonly Label _dlgCheckStatus;
         private readonly ToolTip _tips;
         private LegendForm? _legendForm;
         private readonly List<double> _refPoints = new();
@@ -44,6 +46,8 @@ namespace CalibraDLG_UI
         private TaskCompletionSource<bool>? _pendingPoint;
         private bool _finishRequested;
         private bool _cancelRequested;
+        private string _calibraExePath = string.Empty;
+        private string _calibOutDir = string.Empty;
 
         public MainForm()
         {
@@ -54,9 +58,9 @@ namespace CalibraDLG_UI
             var top = new TableLayoutPanel
             {
                 Dock = DockStyle.Top,
-                Height = 150,
+                Height = 120,
                 ColumnCount = 6,
-                RowCount = 4,
+                RowCount = 3,
                 Padding = new Padding(10),
                 AutoSize = false
             };
@@ -68,12 +72,7 @@ namespace CalibraDLG_UI
             top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20));
             top.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
             top.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-            top.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
             top.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
-
-            _exePath = new TextBox { Dock = DockStyle.Fill };
-            _browseExe = new Button { Text = "Procurar", Dock = DockStyle.Fill };
-            _browseExe.Click += (_, __) => BrowseExe();
 
             _channel = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
             for (int i = 1; i <= 8; i++) _channel.Items.Add($"CH{i}");
@@ -136,39 +135,45 @@ namespace CalibraDLG_UI
             _finish = new Button { Text = "Finalizar", AutoSize = true, Anchor = AnchorStyles.Left, Enabled = false, Margin = new Padding(0, 2, 0, 2) };
             _cancel = new Button { Text = "Cancelar", AutoSize = true, Anchor = AnchorStyles.Left, Enabled = false, Margin = new Padding(0, 2, 0, 2) };
             _legend = new Button { Text = "Legenda", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 2, 0, 2) };
+            _checkDlg = new Button { Text = "Check DLG", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 2, 0, 2) };
 
             _start.Click += async (_, __) => await StartCalibAsync();
             _capture.Click += async (_, __) => await CapturePointAsync();
             _finish.Click += (_, __) => FinishCalib();
             _cancel.Click += (_, __) => CancelCalib();
             _legend.Click += (_, __) => ShowLegend();
+            _checkDlg.Click += async (_, __) => await CheckDlgAsync();
 
-            top.Controls.Add(new Label { Text = "Executavel CalibraDLG", Dock = DockStyle.Fill, TextAlign = System.Drawing.ContentAlignment.MiddleLeft }, 0, 0);
-            top.Controls.Add(_exePath, 1, 0);
-            top.Controls.Add(_browseExe, 4, 0);
-            top.Controls.Add(_legend, 5, 0);
-            top.SetColumnSpan(_exePath, 3);
+            var rightButtons = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                AutoSize = true,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false
+            };
+            rightButtons.Controls.Add(_cancel);
+            rightButtons.Controls.Add(_legend);
 
-            top.Controls.Add(new Label { Text = "Canal", Dock = DockStyle.Fill, TextAlign = System.Drawing.ContentAlignment.MiddleLeft }, 0, 1);
-            top.Controls.Add(_channel, 1, 1);
-            top.Controls.Add(new Label { Text = "Sensor", Dock = DockStyle.Fill, TextAlign = System.Drawing.ContentAlignment.MiddleLeft }, 2, 1);
-            top.Controls.Add(_sensor, 3, 1);
-            top.Controls.Add(new Label { Text = "Ganho", Dock = DockStyle.Fill, TextAlign = System.Drawing.ContentAlignment.MiddleLeft }, 4, 1);
-            top.Controls.Add(_gain, 5, 1);
+            top.Controls.Add(new Label { Text = "Canal", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
+            top.Controls.Add(_channel, 1, 0);
+            top.Controls.Add(new Label { Text = "Sensor", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 2, 0);
+            top.Controls.Add(_sensor, 3, 0);
+            top.Controls.Add(new Label { Text = "Ganho", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 4, 0);
+            top.Controls.Add(_gain, 5, 0);
 
-            top.Controls.Add(new Label { Text = "Filtro LPF", Dock = DockStyle.Fill, TextAlign = System.Drawing.ContentAlignment.MiddleLeft }, 0, 2);
-            top.Controls.Add(_lpf, 1, 2);
-            top.Controls.Add(new Label { Text = "Excitacao", Dock = DockStyle.Fill, TextAlign = System.Drawing.ContentAlignment.MiddleLeft }, 2, 2);
-            top.Controls.Add(_sensPwr, 3, 2);
-            top.Controls.Add(new Label { Text = "Pontos", Dock = DockStyle.Fill, TextAlign = System.Drawing.ContentAlignment.MiddleLeft }, 4, 2);
-            top.Controls.Add(_points, 5, 2);
+            top.Controls.Add(new Label { Text = "Filtro LPF", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 1);
+            top.Controls.Add(_lpf, 1, 1);
+            top.Controls.Add(new Label { Text = "Excitacao", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 2, 1);
+            top.Controls.Add(_sensPwr, 3, 1);
+            top.Controls.Add(new Label { Text = "Pontos", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 4, 1);
+            top.Controls.Add(_points, 5, 1);
 
-            top.Controls.Add(new Label { Text = "Valor de referencia", Dock = DockStyle.Fill, TextAlign = System.Drawing.ContentAlignment.MiddleLeft }, 0, 3);
-            top.Controls.Add(_refValue, 1, 3);
-            top.Controls.Add(_capture, 2, 3);
-            top.Controls.Add(_start, 3, 3);
-            top.Controls.Add(_finish, 4, 3);
-            top.Controls.Add(_cancel, 5, 3);
+            top.Controls.Add(new Label { Text = "Valor de referencia", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 2);
+            top.Controls.Add(_refValue, 1, 2);
+            top.Controls.Add(_capture, 2, 2);
+            top.Controls.Add(_start, 3, 2);
+            top.Controls.Add(_finish, 4, 2);
+            top.Controls.Add(rightButtons, 5, 2);
 
             _grid = new DataGridView
             {
@@ -186,19 +191,49 @@ namespace CalibraDLG_UI
             _grid.Columns[2].HeaderCell.ToolTipText = "Leitura bruta media recebida do DLG.";
             _grid.Columns[3].HeaderCell.ToolTipText = "Numero de amostras usadas no ponto.";
 
-            var bottom = new Panel { Dock = DockStyle.Bottom, Height = 90, Padding = new Padding(10) };
+            var bottom = new Panel { Dock = DockStyle.Bottom, Height = 170, Padding = new Padding(10) };
+            var infoPanel = new Panel { Dock = DockStyle.Top, Height = 60 };
+            var checkPanel = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                Height = 30,
+                AutoSize = false,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false
+            };
+
             _status = new Label { Dock = DockStyle.Top, Height = 20, Text = "Ocioso" };
             _error = new Label { Dock = DockStyle.Top, Height = 20, Text = "Erro (RMSE): -" };
             _result = new Label { Dock = DockStyle.Top, Height = 20, Text = "" };
-            bottom.Controls.Add(_result);
-            bottom.Controls.Add(_error);
-            bottom.Controls.Add(_status);
+            _dlgCheckStatus = new Label
+            {
+                AutoSize = true,
+                Padding = new Padding(8, 6, 0, 0),
+                ForeColor = Color.DarkRed,
+                Text = "DLG: sem check"
+            };
+            _logBox = new TextBox
+            {
+                Dock = DockStyle.Fill,
+                Multiline = true,
+                ReadOnly = true,
+                ScrollBars = ScrollBars.Vertical
+            };
+
+            infoPanel.Controls.Add(_result);
+            infoPanel.Controls.Add(_error);
+            infoPanel.Controls.Add(_status);
+            checkPanel.Controls.Add(_checkDlg);
+            checkPanel.Controls.Add(_dlgCheckStatus);
+            bottom.Controls.Add(_logBox);
+            bottom.Controls.Add(checkPanel);
+            bottom.Controls.Add(infoPanel);
 
             Controls.Add(_grid);
             Controls.Add(top);
             Controls.Add(bottom);
 
-            SetDefaultExePath();
+            ResolveRuntimePaths();
 
             _tips = new ToolTip
             {
@@ -208,8 +243,6 @@ namespace CalibraDLG_UI
                 ShowAlways = true
             };
 
-            _tips.SetToolTip(_exePath, "Caminho para CalibraDLG.exe. O UI chama este executavel via IPC.");
-            _tips.SetToolTip(_browseExe, "Localize o executavel CalibraDLG.exe.");
             _tips.SetToolTip(_legend, "Legenda interativa com explicacoes detalhadas.");
             _tips.SetToolTip(_channel, "Canal do DLG (CH1..CH8). Deve corresponder ao canal fisico ligado ao sensor.");
             _tips.SetToolTip(_sensor, "Tipo de sensor (indice tSensor do manual). Mantem compatibilidade com o hardware.");
@@ -222,40 +255,138 @@ namespace CalibraDLG_UI
             _tips.SetToolTip(_capture, "Captura um ponto usando o valor de referencia atual.");
             _tips.SetToolTip(_finish, "Finaliza e grava o arquivo de calibracao.");
             _tips.SetToolTip(_cancel, "Cancela a calibracao e encerra o processo.");
+            _tips.SetToolTip(_checkDlg, "Verifica se CalibraDLG.exe foi encontrado e se o DLG responde ao comando de configuracao.");
             _tips.SetToolTip(_grid, "Tabela com os pontos capturados e suas leituras.");
             _tips.SetToolTip(_error, "Erro estimado (RMSE) do ajuste linear; percentual sobre o intervalo de referencia.");
+            _tips.SetToolTip(_logBox, "Log curto de runtime para diagnostico rapido.");
         }
 
-        private void SetDefaultExePath()
+        private static string FindRepoRoot(params string[] seedDirs)
         {
-            var root = Environment.CurrentDirectory;
-            var rel1 = Path.Combine(root, "build", "CalibraDLG", "Release", "CalibraDLG.exe");
-            var rel2 = Path.Combine(root, "build", "CalibraDLG", "Debug", "CalibraDLG.exe");
-            if (File.Exists(rel1)) _exePath.Text = rel1;
-            else if (File.Exists(rel2)) _exePath.Text = rel2;
+            foreach (var seed in seedDirs)
+            {
+                if (string.IsNullOrWhiteSpace(seed)) continue;
+                DirectoryInfo? dir = null;
+                try
+                {
+                    dir = new DirectoryInfo(Path.GetFullPath(seed));
+                }
+                catch
+                {
+                    dir = null;
+                }
+                if (dir == null || !dir.Exists) continue;
+
+                while (dir != null)
+                {
+                    var hasCalib = Directory.Exists(Path.Combine(dir.FullName, "CalibraDLG"));
+                    var hasDlg = Directory.Exists(Path.Combine(dir.FullName, "DLG4000"));
+                    if (hasCalib && hasDlg) return dir.FullName;
+                    dir = dir.Parent;
+                }
+            }
+            return string.Empty;
         }
 
-        private void BrowseExe()
+        private static IEnumerable<string> GetCalibraExeCandidates()
         {
-            using var dlg = new OpenFileDialog
+            var baseDir = AppContext.BaseDirectory;
+            var cwd = Environment.CurrentDirectory;
+            var repoRoot = FindRepoRoot(baseDir, cwd);
+            var list = new List<string>();
+            if (!string.IsNullOrWhiteSpace(repoRoot))
             {
-                Filter = "CalibraDLG.exe|CalibraDLG.exe|Executables (*.exe)|*.exe",
-                Title = "Selecionar CalibraDLG.exe"
-            };
-            if (dlg.ShowDialog(this) == DialogResult.OK)
+                list.Add(Path.Combine(repoRoot, "CalibraDLG", "build", "Release", "CalibraDLG.exe"));
+                list.Add(Path.Combine(repoRoot, "CalibraDLG", "build", "Debug", "CalibraDLG.exe"));
+            }
+            list.Add(Path.Combine(baseDir, "CalibraDLG.exe"));
+            list.Add(Path.Combine(baseDir, "bin", "CalibraDLG.exe"));
+            list.Add(Path.Combine(cwd, "CalibraDLG.exe"));
+            list.Add(Path.Combine(cwd, "CalibraDLG", "build", "Release", "CalibraDLG.exe"));
+            return list;
+        }
+
+        private static IEnumerable<string> GetDlgLoggerCandidates()
+        {
+            var baseDir = AppContext.BaseDirectory;
+            var cwd = Environment.CurrentDirectory;
+            var repoRoot = FindRepoRoot(baseDir, cwd);
+            var list = new List<string>();
+            if (!string.IsNullOrWhiteSpace(repoRoot))
             {
-                _exePath.Text = dlg.FileName;
+                list.Add(Path.Combine(repoRoot, "DLG4000", "bin", "Release", "dlg_logger_ipc.exe"));
+                list.Add(Path.Combine(repoRoot, "DLG4000", "bin", "dlg_logger_ipc.exe"));
+            }
+            list.Add(Path.Combine(baseDir, "dlg_logger_ipc.exe"));
+            list.Add(Path.Combine(baseDir, "bin", "dlg_logger_ipc.exe"));
+            list.Add(Path.Combine(cwd, "DLG4000", "bin", "Release", "dlg_logger_ipc.exe"));
+            list.Add(Path.Combine(cwd, "DLG4000", "bin", "dlg_logger_ipc.exe"));
+            return list;
+        }
+
+        private static string FindFirstExisting(IEnumerable<string> candidates)
+        {
+            foreach (var c in candidates)
+            {
+                try
+                {
+                    var full = Path.GetFullPath(c);
+                    if (File.Exists(full)) return full;
+                }
+                catch
+                {
+                    // ignore candidate errors
+                }
+            }
+            return string.Empty;
+        }
+
+        private void ResolveRuntimePaths()
+        {
+            _calibraExePath = FindFirstExisting(GetCalibraExeCandidates());
+            var dlgLogger = FindFirstExisting(GetDlgLoggerCandidates());
+
+            if (!string.IsNullOrWhiteSpace(dlgLogger))
+            {
+                _calibOutDir = Path.GetDirectoryName(dlgLogger) ?? string.Empty;
+            }
+            else if (!string.IsNullOrWhiteSpace(_calibraExePath))
+            {
+                var calibDir = Path.GetDirectoryName(_calibraExePath) ?? Environment.CurrentDirectory;
+                _calibOutDir = Path.Combine(calibDir, "out");
+            }
+            else
+            {
+                _calibOutDir = Path.Combine(Environment.CurrentDirectory, "out");
+            }
+
+            if (string.IsNullOrWhiteSpace(_calibraExePath))
+            {
+                _start.Enabled = false;
+                SetStatus("CalibraDLG.exe nao encontrado.");
+                SetDlgCheckState(false, "exe nao encontrado");
+            }
+            else if (_proc == null || _proc.HasExited)
+            {
+                _start.Enabled = true;
+                SetStatus("Pronto para calibrar.");
+                SetDlgCheckState(false, "aguardando check");
             }
         }
 
         private async Task StartCalibAsync()
         {
             if (_proc != null && !_proc.HasExited) return;
+            AppendLog("Calibracao: iniciar solicitado.");
 
-            var exe = _exePath.Text.Trim();
-            if (string.IsNullOrEmpty(exe) || !File.Exists(exe))
+            if (string.IsNullOrWhiteSpace(_calibraExePath) || !File.Exists(_calibraExePath))
             {
-                SetStatus("Caminho do executavel invalido.");
+                ResolveRuntimePaths();
+            }
+
+            if (string.IsNullOrWhiteSpace(_calibraExePath) || !File.Exists(_calibraExePath))
+            {
+                SetStatus("CalibraDLG.exe nao encontrado.");
                 return;
             }
 
@@ -272,7 +403,7 @@ namespace CalibraDLG_UI
             _proc = new Process();
             _proc.StartInfo = new ProcessStartInfo
             {
-                FileName = exe,
+                FileName = _calibraExePath,
                 Arguments = "--ipc",
                 UseShellExecute = false,
                 RedirectStandardInput = true,
@@ -295,10 +426,14 @@ namespace CalibraDLG_UI
             var iGain = _gain.SelectedIndex;
             var iLpf = _lpf.SelectedIndex == 0 ? 0 : _lpf.SelectedIndex - 1;
             var iSensPwr = _sensPwr.SelectedIndex;
-            var exeDir = Path.GetDirectoryName(exe) ?? Environment.CurrentDirectory;
-            var outDir = Path.Combine(exeDir, "out");
+            var outDir = _calibOutDir;
+            if (string.IsNullOrWhiteSpace(outDir))
+            {
+                var exeDir = Path.GetDirectoryName(_calibraExePath) ?? Environment.CurrentDirectory;
+                outDir = Path.Combine(exeDir, "out");
+            }
             Directory.CreateDirectory(outDir);
-            var outPath = Path.Combine(outDir, $"calib_CH{ch}.json");
+            var outPath = Path.Combine(outDir, $"calib_CH{ch}.json").Replace('\\', '/');
 
             var line = string.Format(CultureInfo.InvariantCulture,
                 "{{\"op\":\"config\",\"ch\":{0},\"tSensor\":{1},\"iGain\":{2},\"iLPF\":{3},\"iSensPwr\":{4},\"out_path\":\"{5}\"}}",
@@ -306,7 +441,135 @@ namespace CalibraDLG_UI
             SendLine(line);
 
             SetStatus("Configuracao enviada. Aguardando DLG...");
+            AppendLog("Calibracao: configuracao enviada ao runtime.");
             await Task.Delay(50);
+        }
+
+        private async Task CheckDlgAsync()
+        {
+            if (_proc != null && !_proc.HasExited)
+            {
+                SetStatus("Finalize/cancele a calibracao antes do check.");
+                AppendLog("Check DLG bloqueado: calibracao em andamento.");
+                return;
+            }
+
+            _checkDlg.Enabled = false;
+            AppendLog("Check DLG: iniciando.");
+
+            try
+            {
+                ResolveRuntimePaths();
+                if (string.IsNullOrWhiteSpace(_calibraExePath) || !File.Exists(_calibraExePath))
+                {
+                    SetDlgCheckState(false, "CalibraDLG.exe nao encontrado");
+                    AppendLog("Check DLG: CalibraDLG.exe nao encontrado.");
+                    return;
+                }
+
+                var ch = _channel.SelectedIndex + 1;
+                var tSensor = _sensor.SelectedIndex;
+                var iGain = _gain.SelectedIndex;
+                var iLpf = _lpf.SelectedIndex == 0 ? 0 : _lpf.SelectedIndex - 1;
+                var iSensPwr = _sensPwr.SelectedIndex;
+                var outDir = _calibOutDir;
+                if (string.IsNullOrWhiteSpace(outDir))
+                {
+                    var exeDir = Path.GetDirectoryName(_calibraExePath) ?? Environment.CurrentDirectory;
+                    outDir = Path.Combine(exeDir, "out");
+                }
+                Directory.CreateDirectory(outDir);
+                var outPath = Path.Combine(outDir, $"calib_CH{ch}.json").Replace('\\', '/');
+
+                using var checkProc = new Process
+                {
+                    StartInfo = new ProcessStartInfo
+                    {
+                        FileName = _calibraExePath,
+                        Arguments = "--ipc",
+                        UseShellExecute = false,
+                        RedirectStandardInput = true,
+                        RedirectStandardOutput = true,
+                        CreateNoWindow = true
+                    }
+                };
+
+                checkProc.Start();
+
+                var cfg = string.Format(CultureInfo.InvariantCulture,
+                    "{{\"op\":\"config\",\"ch\":{0},\"tSensor\":{1},\"iGain\":{2},\"iLPF\":{3},\"iSensPwr\":{4},\"out_path\":\"{5}\"}}",
+                    ch, tSensor, iGain, iLpf, iSensPwr, outPath);
+                checkProc.StandardInput.WriteLine(cfg);
+                checkProc.StandardInput.Flush();
+
+                bool ok = false;
+                string detail = "timeout sem resposta";
+                var deadline = DateTime.UtcNow.AddSeconds(3);
+
+                while (DateTime.UtcNow < deadline)
+                {
+                    var remain = deadline - DateTime.UtcNow;
+                    if (remain <= TimeSpan.Zero) break;
+
+                    var readTask = checkProc.StandardOutput.ReadLineAsync();
+                    var done = await Task.WhenAny(readTask, Task.Delay(remain));
+                    if (done != readTask) break;
+
+                    var line = readTask.Result;
+                    if (line == null) break;
+                    AppendLog($"Check DLG RX: {line}");
+
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(line);
+                        var root = doc.RootElement;
+                        var op = root.TryGetProperty("op", out var opProp) ? opProp.GetString() ?? "" : "";
+                        if (op == "config_ok")
+                        {
+                            ok = true;
+                            detail = "comunicacao OK";
+                            break;
+                        }
+                        if (op == "error")
+                        {
+                            detail = root.TryGetProperty("message", out var msgProp)
+                                ? msgProp.GetString() ?? "erro"
+                                : "erro";
+                            break;
+                        }
+                    }
+                    catch
+                    {
+                        // Ignore non-JSON lines during check.
+                    }
+                }
+
+                try
+                {
+                    checkProc.StandardInput.WriteLine("{\"op\":\"cancel\"}");
+                    checkProc.StandardInput.Flush();
+                }
+                catch
+                {
+                    // ignore cancel write error
+                }
+                if (!checkProc.WaitForExit(800))
+                {
+                    try { checkProc.Kill(); } catch { /* ignore */ }
+                }
+
+                SetDlgCheckState(ok, detail);
+                AppendLog(ok ? "Check DLG: OK." : $"Check DLG: falhou ({detail}).");
+            }
+            catch (Exception ex)
+            {
+                SetDlgCheckState(false, ex.Message);
+                AppendLog($"Check DLG: excecao ({ex.Message}).");
+            }
+            finally
+            {
+                _checkDlg.Enabled = true;
+            }
         }
 
         private async Task CapturePointAsync()
@@ -393,7 +656,11 @@ namespace CalibraDLG_UI
 
                 if (op == "config_ok")
                 {
-                    UI(() => SetStatus("DLG pronto."));
+                    UI(() =>
+                    {
+                        SetStatus("DLG pronto.");
+                        AppendLog("Runtime: DLG pronto.");
+                    });
                     return;
                 }
 
@@ -410,6 +677,7 @@ namespace CalibraDLG_UI
                         _refPoints.Add(refVal);
                         _rawPoints.Add(raw);
                         UpdateErrorLabel();
+                        AppendLog($"Ponto {_capturedPoints}/{_expectedPoints} capturado. ref={refVal:G6} bruto={raw:G6}.");
                         _pendingPoint?.TrySetResult(true);
                     });
                     return;
@@ -429,6 +697,7 @@ namespace CalibraDLG_UI
                         _start.Enabled = true;
                         _cancel.Enabled = false;
                         SetStatus("Concluido.");
+                        AppendLog("Calibracao concluida e arquivo salvo.");
                     });
                     return;
                 }
@@ -442,6 +711,7 @@ namespace CalibraDLG_UI
                         _capture.Enabled = false;
                         _finish.Enabled = false;
                         _cancel.Enabled = false;
+                        AppendLog("Calibracao cancelada.");
                     });
                     return;
                 }
@@ -452,6 +722,7 @@ namespace CalibraDLG_UI
                     UI(() =>
                     {
                         SetStatus($"Erro: {msg}");
+                        AppendLog($"Runtime erro: {msg}.");
                         _pendingPoint?.TrySetResult(true);
                     });
                 }
@@ -483,6 +754,22 @@ namespace CalibraDLG_UI
         private void SetStatus(string text)
         {
             _status.Text = text;
+        }
+
+        private void AppendLog(string text)
+        {
+            var ts = DateTime.Now.ToString("HH:mm:ss", CultureInfo.InvariantCulture);
+            var line = $"[{ts}] {text}";
+            if (_logBox.TextLength > 0) _logBox.AppendText(Environment.NewLine);
+            _logBox.AppendText(line);
+            _logBox.SelectionStart = _logBox.TextLength;
+            _logBox.ScrollToCaret();
+        }
+
+        private void SetDlgCheckState(bool ok, string detail)
+        {
+            _dlgCheckStatus.Text = ok ? $"DLG: OK - {detail}" : $"DLG: X - {detail}";
+            _dlgCheckStatus.ForeColor = ok ? Color.DarkGreen : Color.DarkRed;
         }
 
         private void UI(Action action)
@@ -590,6 +877,7 @@ namespace CalibraDLG_UI
             _finish.Enabled = false;
             SendLine("{\"op\":\"finish\"}");
             SetStatus("Finalizando...");
+            AppendLog("Calibracao: finalizar solicitado.");
         }
 
         private void CancelCalib()
@@ -598,6 +886,7 @@ namespace CalibraDLG_UI
             _finishRequested = false;
             SendLine("{\"op\":\"cancel\"}");
             SetStatus("Cancelando...");
+            AppendLog("Calibracao: cancelamento solicitado.");
         }
 
         private void ShowLegend()
@@ -640,7 +929,7 @@ namespace CalibraDLG_UI
 
                 _items = new List<(string Title, string Body)>
                 {
-                    ("Executavel", "Arquivo CalibraDLG.exe que realiza a calibracao via IPC. O UI apenas orquestra."),
+                    ("Runtime", "O UI resolve automaticamente CalibraDLG.exe e o destino da calibracao. Nao e necessario selecionar executavel manualmente."),
                     ("Canal", "Seleciona o canal fisico do DLG (CH1..CH8). Use o canal onde o sensor esta ligado."),
                     ("Sensor", "Tipo de sensor (tSensor). O indice deve seguir o manual. Ex: ponte completa, meia ponte, ponte 1/4."),
                     ("Ganho", "Ganho analogico (iGain). Aumenta a amplitude do sinal antes da conversao. Valores altos saturam mais facil."),

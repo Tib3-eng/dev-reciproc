@@ -58,7 +58,8 @@ CalibraDLG_UI (WinForms):
 - Legend button + tooltips provide detailed explanations (including LPF as low-pass filter index).
 - Table headers have tooltips (Indice/Referencia/Bruto/Amostras) and legend entries mirror them.
 - Capture button sits next to "Valor de referencia" field; Start comes after Capture.
-- Executable path is required because UI launches CalibraDLG.exe --ipc and talks via STDIN/STDOUT; JSON file is only the final output.
+- CalibraDLG_UI resolve automaticamente o caminho do CalibraDLG.exe (sem campo de selecao manual do executavel).
+- CalibraDLG_UI direciona a saida da calibracao para a pasta do dlg_logger_ipc.exe (calib_CHn.json) para aplicacao automatica nos ensaios seguintes.
 - UI shows running error (RMSE) computed from current points (raw->ref linear fit).
 - RMSE label shows percent relative to reference span; Finish button now reports status if process is missing or point pending.
 - Finish/Cancel set "Finalizando/Cancelando" and status auto-resets on process end if no final message arrives.
