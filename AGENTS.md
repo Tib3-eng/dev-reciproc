@@ -77,8 +77,8 @@ Supervisório (Python/Tk):
 - A aba "configuracoes adicionais" inclui botao "Configurar canais" para abrir CalibraDLG_UI diretamente, com bloqueio se ensaio/processos estiverem ativos.
 - Botao "Configurar Eixos Y (Min / Max)" abre popup compacto com 2 linhas (Temperatura/Grafico 1 e Atrito-forca/Grafico 2), com modo Automatico (padrao) e campos Min/Max manuais.
 - Taxa padrao de aquisicao no pipeline externo (DLG + Drive) ajustada para 50 Hz; manter ambas iguais para sincronismo.
-- wait_and_merge has fallback merge in Python if merge_logs fails or merge.csv is missing.
-- Outputs go to Desktop\\Repositorio\\<dd-mm-aaaa - Estudo X - Nome do ensaio>\\<REP N> with info.csv, schedule.csv, dlg.csv, drive.csv, merge.csv.
+- wait_and_merge has fallback merge in Python if merge_logs fails or resultado_ensaio.csv is missing.
+- Outputs go to Desktop\\Repositorio\\<dd-mm-aaaa - Estudo X - Nome do ensaio>\\<REP N> with info_ensaio.csv, schedule.csv, dlg.csv, drive.csv, resultado_ensaio.csv.
 - Duplicidade de pasta e bloqueio de inicio consideram data + estudo + nome + repeticao (subpasta REP N).
 - abrir_configurar_canais resolves CalibraDLG_UI.exe automatically via orchestrator runtime helpers.
 - Check status: DLG uses UDP ACQSTOP/SETCH/SETUP/START (8 canais) and waits for ACQDATA (no ICMP ping).
@@ -117,7 +117,7 @@ DriveA5 (Modbus RTU / libmodbus):
 - a5_speed_logger --ipc: aceita STOP via stdin para encerramento antecipado com a mesma rotina de parada.
 - a5_speed_logger --ipc: aceita PAUSE/RESUME. Em pause aplica rampa ate 0 rpm e para; em resume volta com rampa de setpoint e desloca deadlines (sem contar tempo pausado).
 - a5_speed_logger aplica rampa linear de setpoint (3 s) entre trocas de segmento, pause/resume e stop de ensaio para reduzir tranco no motor.
-- merge_logs: junta dlg.csv + drive.csv por indice de linha e gera merge.csv com colunas: idx,t_s,ch1..ch8,pos,rpm,dlg_err,drive_pos_err,drive_rpm_err.
+- merge_logs: junta dlg.csv + drive.csv por indice de linha e gera CSV de resultado com colunas: idx,t_s,ch1..ch8,pos,rpm,dlg_err,drive_pos_err,drive_rpm_err.
 Field notes (DriveA5, based on recent tests):
 - Relative mode (P11-04=0) is more consistent than absolute, but still drifts if completion threshold is loose.
 - P05-21 (positioning completion threshold) around 20 caused ~20 count residual; lowering to 5 or 2 is recommended for tighter closure.
@@ -137,8 +137,8 @@ CSV conventions
 - ASCII logs and CSV only.
 - Fixed headers and units. Use "NULL" rows only for real losses.
 - Write outputs into out/ subfolders (gitignored) when creating artifacts.
-- Supervisor (novo_tribometro.py) grava em: Desktop\\Repositorio\\<Nome do ensaio - Estudo>.
-  Arquivos padrao: info.csv, schedule.csv, dlg.csv, drive.csv, merge.csv.
+- Supervisor (novo_tribometro.py) grava em: Desktop\\Repositorio\\<dd-mm-aaaa - Estudo X - Nome do ensaio>\\<REP N>.
+  Arquivos padrao: info_ensaio.csv, schedule.csv, dlg.csv, drive.csv, resultado_ensaio.csv.
 
 Roadmap (short)
 - Load calibration (a,b) from file and apply on-the-fly in DLG logger.

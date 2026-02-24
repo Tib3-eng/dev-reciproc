@@ -243,6 +243,89 @@ def _set_status(label, ok):
         label.config(text='X', fg='red')
 
 
+def _subprocess_no_window_kwargs():
+    """
+    Evita abrir console "piscando" ao executar utilitarios C em app Tk.
+    """
+    kwargs = {}
+    if os.name == 'nt':
+        creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+        kwargs['creationflags'] = creationflags
+        if hasattr(subprocess, 'STARTUPINFO') and hasattr(subprocess, 'STARTF_USESHOWWINDOW'):
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            kwargs['startupinfo'] = startupinfo
+    return kwargs
+
+
+def _dlg_check_once(dlg_exe, dlg_ip, dlg_port, bind_port):
+    """
+    Executa um check curto do DLG via dlg_logger_ipc em modo IPC.
+    Retorna (ok, detalhe_log).
+    """
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as tmp:
+        tmp_path = tmp.name
+
+    cmd = [
+        dlg_exe,
+        '--out', tmp_path,
+        '--duration', '2',
+        '--rate', f"{getattr(orch, 'DEFAULT_RATE_HZ', 50.0):.0f}",
+        '--ip', str(dlg_ip),
+        '--port', str(dlg_port),
+        '--bind-port', str(bind_port),
+        '--ipc',
+    ]
+
+    detail = ''
+    ok = False
+    try:
+        res = subprocess.run(
+            cmd,
+            input='START\n',
+            capture_output=True,
+            text=True,
+            timeout=10,
+            **_subprocess_no_window_kwargs()
+        )
+        out_txt = ((res.stdout or '') + '\n' + (res.stderr or '')).upper()
+        if 'DATA_OK' in out_txt:
+            ok = True
+        elif 'DATA_TIMEOUT' in out_txt:
+            detail = 'timeout sem ACQDATA'
+        elif 'FALHA AO ABRIR UDP' in out_txt:
+            detail = 'falha ao abrir UDP/bind'
+        elif res.returncode != 0:
+            detail = f'rc={res.returncode}'
+    except subprocess.TimeoutExpired:
+        detail = 'timeout executando logger'
+    except Exception as e:
+        detail = f'erro ({e})'
+
+    # Fallback por CSV: considera valido se existir ao menos uma linha com err=0.
+    if not ok:
+        try:
+            with open(tmp_path, 'r', encoding='utf-8') as f:
+                next(f, None)
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split(',')
+                    if parts and parts[-1].strip() == '0':
+                        ok = True
+                        break
+        except Exception:
+            pass
+
+    try:
+        os.remove(tmp_path)
+    except Exception:
+        pass
+
+    return ok, detail
+
+
 # Check simples de comunicacao (DLG + Drive)
 def check_status():
     log_msg('Check status: iniciando.')
@@ -259,49 +342,27 @@ def check_status():
         if not dlg_exe:
             log_msg('DLG check: dlg_logger_ipc.exe nao encontrado.')
         else:
-            log_msg('DLG check: executando dlg_logger_ipc (1s)...')
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as tmp:
-                tmp_path = tmp.name
             dlg_ip = getattr(orch, 'DEFAULT_DLG_IP', '192.168.1.100')
             dlg_port = getattr(orch, 'DEFAULT_DLG_PORT', 41401)
-            cmd = [
-                dlg_exe,
-                '--out', tmp_path,
-                '--duration', '1',
-                '--rate', f"{getattr(orch, 'DEFAULT_RATE_HZ', 50.0):.0f}",
-                '--ip', str(dlg_ip),
-                '--port', str(dlg_port),
-                '--bind-port', '0',
-            ]
-            try:
-                subprocess.run(cmd, capture_output=True, text=True, timeout=5)
-            except subprocess.TimeoutExpired:
-                log_msg('DLG check: timeout executando logger.')
-
-            try:
-                with open(tmp_path, 'r', encoding='utf-8') as f:
-                    # pula cabecalho
-                    next(f, None)
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        # err e a ultima coluna
-                        parts = line.split(',')
-                        if parts and parts[-1].strip() == '0':
-                            dlg_ok = True
-                            break
-            except Exception:
-                pass
-            try:
-                os.remove(tmp_path)
-            except Exception:
-                pass
+            log_msg('DLG check: executando dlg_logger_ipc (ipc, 2s)...')
+            # Primeiro tenta a mesma porta de bind do logger real (41402).
+            # Se falhar (porta ocupada), tenta porta efemera.
+            attempts = [41402, 0]
+            detail = ''
+            for bind_port in attempts:
+                dlg_ok, detail = _dlg_check_once(dlg_exe, dlg_ip, dlg_port, bind_port)
+                if dlg_ok:
+                    break
+                if bind_port == 41402:
+                    log_msg('DLG check: tentativa em 41402 falhou; tentando porta efemera...')
 
             if dlg_ok:
                 log_msg('DLG check: ok.')
             else:
-                log_msg('DLG check: nenhuma amostra valida.')
+                if detail:
+                    log_msg(f'DLG check: nenhuma amostra valida ({detail}).')
+                else:
+                    log_msg('DLG check: nenhuma amostra valida.')
     except Exception as e:
         log_msg(f'DLG check: erro ({e}).')
 
@@ -323,7 +384,13 @@ def check_status():
         else:
             # COM4 e padrao do projeto
             cmd = [drive_exe, 'COM4', '--diag']
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            res = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                **_subprocess_no_window_kwargs()
+            )
             drive_ok = (res.returncode == 0)
             if drive_ok:
                 log_msg('Drive check: ok.')
@@ -682,11 +749,11 @@ def salvar_arquivo():
     os.makedirs(caminho_pasta, exist_ok=True)
 
     # Nomes padrao dos arquivos dentro da subpasta
-    caminho_arquivo_1 = os.path.join(caminho_pasta, "info.csv")   # metadados do ensaio
+    caminho_arquivo_1 = os.path.join(caminho_pasta, "info_ensaio.csv")   # metadados do ensaio
     caminho_arquivo_2 = os.path.join(caminho_pasta, "dlg.csv")    # mantido para compatibilidade
     caminho_dlg_csv = os.path.join(caminho_pasta, "dlg.csv")
     caminho_drive_csv = os.path.join(caminho_pasta, "drive.csv")
-    caminho_merge_csv = os.path.join(caminho_pasta, "merge.csv")
+    caminho_merge_csv = os.path.join(caminho_pasta, "resultado_ensaio.csv")
     caminho_schedule_csv = os.path.join(caminho_pasta, "schedule.csv")
 
     # Cria arquivos vazios (evita erros de permissao na hora do append)
@@ -1353,7 +1420,7 @@ def start_acquisition():
     
     try:
         # -----------------------------------------------------------------------------
-        # MUDANCA CONSCIENTE: metadados agora em CSV (info.csv) com 2-3 colunas.
+        # MUDANCA CONSCIENTE: metadados agora em CSV (info_ensaio.csv) com 2-3 colunas.
         # Formato:
         #   campo,valor,valor2
         # -----------------------------------------------------------------------------

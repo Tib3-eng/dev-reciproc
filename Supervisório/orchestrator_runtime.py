@@ -80,10 +80,10 @@ def build_output_paths(base_dir: str, nome_ensaio: str, estudo: str) -> dict:
 
     return {
         "folder": folder_path,
-        "info_csv": os.path.join(folder_path, "info.csv"),
+        "info_csv": os.path.join(folder_path, "info_ensaio.csv"),
         "dlg_csv": os.path.join(folder_path, "dlg.csv"),
         "drive_csv": os.path.join(folder_path, "drive.csv"),
-        "merge_csv": os.path.join(folder_path, "merge.csv"),
+        "merge_csv": os.path.join(folder_path, "resultado_ensaio.csv"),
         "schedule_csv": os.path.join(folder_path, "schedule.csv"),
     }
 
