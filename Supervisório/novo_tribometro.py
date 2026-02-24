@@ -1,6 +1,8 @@
 import os
 import json
 import time
+import sys
+from datetime import datetime
 import threading
 import subprocess
 import tempfile
@@ -47,6 +49,7 @@ external_run_state = None
 
 # Persistencia simples de configuracoes do supervisório.
 DEFAULT_REPO_BASE = os.path.join(os.path.expanduser("~"), "Desktop", "Repositorio")
+DEFAULT_RELACAO = 1.0
 APP_SETTINGS_DIR = os.path.join(
     os.getenv("LOCALAPPDATA") or os.path.expanduser("~"),
     "LATRIB"
@@ -76,6 +79,41 @@ APP_SETTINGS = _load_app_settings()
 REPO_BASE = APP_SETTINGS.get("repo_base", DEFAULT_REPO_BASE)
 if not isinstance(REPO_BASE, str) or not REPO_BASE.strip():
     REPO_BASE = DEFAULT_REPO_BASE
+try:
+    RELACAO_MECANICA = float(APP_SETTINGS.get("relacao", DEFAULT_RELACAO))
+except Exception:
+    RELACAO_MECANICA = DEFAULT_RELACAO
+if RELACAO_MECANICA <= 0:
+    RELACAO_MECANICA = DEFAULT_RELACAO
+
+
+def _resource_path(name):
+    """
+    Resolve resources in source mode and PyInstaller one-file mode.
+    """
+    base_dir = getattr(sys, "_MEIPASS", os.path.dirname(__file__))
+    return os.path.join(base_dir, name)
+
+
+def _apply_app_icon(app_root):
+    """
+    Apply custom icon to the window/taskbar when available.
+    """
+    try:
+        ico = _resource_path("logo.ico")
+        if os.path.exists(ico):
+            app_root.iconbitmap(ico)
+    except Exception:
+        pass
+
+    try:
+        png = _resource_path("logo.png")
+        if os.path.exists(png):
+            img = tkinter.PhotoImage(file=png)
+            app_root._logo_img = img
+            app_root.iconphoto(True, img)
+    except Exception:
+        pass
 
 
 def _set_repo_base(path):
@@ -88,6 +126,32 @@ def _set_repo_base(path):
     if "repo_base_var" in globals():
         repo_base_var.set(REPO_BASE)
     log_msg(f"Diretorio base definido para: {REPO_BASE}")
+
+
+def _set_relacao_mecanica(valor):
+    global RELACAO_MECANICA, APP_SETTINGS
+    RELACAO_MECANICA = valor
+    APP_SETTINGS["relacao"] = RELACAO_MECANICA
+    _save_app_settings(APP_SETTINGS)
+    if "relacao_var" in globals():
+        relacao_var.set(f"{RELACAO_MECANICA:.6g}")
+    log_msg(f"Relacao mecanica definida para: {RELACAO_MECANICA:.6g}")
+
+
+def salvar_relacao_mecanica():
+    txt = relacao_var.get().strip().replace(",", ".")
+    if not txt:
+        messagebox.showwarning("Relacao", "Informe um valor para a relacao.")
+        return
+    try:
+        valor = float(txt)
+    except Exception:
+        messagebox.showwarning("Relacao", "Relacao invalida. Use numero maior que zero.")
+        return
+    if valor <= 0:
+        messagebox.showwarning("Relacao", "Relacao deve ser maior que zero.")
+        return
+    _set_relacao_mecanica(valor)
 
 
 def selecionar_repo_base():
@@ -126,11 +190,7 @@ def abrir_configurar_canais():
         return
 
     repo_root = orch.find_repo_root()
-    candidates = [
-        os.path.join(repo_root, "CalibraDLG_UI", "bin", "Release", "net6.0-windows", "CalibraDLG_UI.exe"),
-        os.path.join(repo_root, "CalibraDLG_UI.exe"),
-    ]
-    exe = next((c for c in candidates if os.path.exists(c)), None)
+    exe = orch.find_calibra_ui_exe(repo_root)
     if not exe:
         messagebox.showerror(
             "Configurar canais",
@@ -583,33 +643,42 @@ def salvar_arquivo():
     global caminho_dlg_csv, caminho_drive_csv, caminho_merge_csv, caminho_schedule_csv
 
     # ---------------------------------------------------------------------------------
-    # MUDANCA CONSCIENTE: removemos a caixa de dialogo e padronizamos a pasta.
-    # Pasta base: Desktop\\Repositorio
-    # Subpasta: "Nome do ensaio - Estudo"
-    # Se a subpasta ja existir, bloqueamos o inicio do ensaio.
+    # Estrutura padrao:
+    # Pasta base: REPO_BASE
+    # Pasta do ensaio: "dd-mm-aaaa - Estudo X - Nome ensaio"
+    # Subpasta de repeticao: "REP N"
+    # Bloqueio de duplicidade considera a repeticao.
     # ---------------------------------------------------------------------------------
     nome_ensaio = entries_left["Nome do ensaio"].get().strip()
     estudo = entries_left["Estudo"].get().strip()
+    repeticao = entries_left["Repetição"].get().strip()
 
-    # Normaliza nome da pasta para Windows (sem caracteres proibidos)
-    nome_pasta = orch.sanitize_folder_name(f"{nome_ensaio} - {estudo}")
-    caminho_pasta = os.path.join(REPO_BASE, nome_pasta)
+    # Windows nao aceita "/" em nome de pasta, por isso usamos dd-mm-aaaa.
+    data_str = datetime.now().strftime("%d-%m-%Y")
+
+    # Normaliza nomes para Windows (sem caracteres proibidos).
+    nome_pasta_ensaio = orch.sanitize_folder_name(f"{data_str} - Estudo {estudo} - {nome_ensaio}")
+    nome_subpasta_rep = orch.sanitize_folder_name(f"REP {repeticao}")
+    caminho_pasta_raiz = os.path.join(REPO_BASE, nome_pasta_ensaio)
+    caminho_pasta = os.path.join(caminho_pasta_raiz, nome_subpasta_rep)
 
     # Garante pasta base
     if not os.path.exists(REPO_BASE):
         os.makedirs(REPO_BASE, exist_ok=True)
 
-    # Bloqueia se ja existe
+    # Bloqueia se repeticao ja existe para o mesmo ensaio.
     if os.path.exists(caminho_pasta):
         messagebox.showwarning(
             "Nome já existe",
-            "Já existe um ensaio com este nome.\n\n"
-            "Altere 'Nome do ensaio' ou 'Estudo' para continuar."
+            "Já existe um ensaio com esta combinação:\n"
+            "data + estudo + nome + repetição.\n\n"
+            "Altere 'Repetição' (ou os demais campos) para continuar."
         )
         caminho_arquivo_1 = ""
         caminho_arquivo_2 = ""
         return
 
+    os.makedirs(caminho_pasta_raiz, exist_ok=True)
     os.makedirs(caminho_pasta, exist_ok=True)
 
     # Nomes padrao dos arquivos dentro da subpasta
@@ -719,7 +788,7 @@ def velocidades():
             raio_mm = float(ent_raio.get().strip().replace(",", "."))
         except Exception:
             raio_mm = 0.0
-        rpm_alvo = orch.rpm_from_mm_s(vel_atual_mms, raio_mm) if raio_mm > 0 else 0
+        rpm_alvo = orch.rpm_from_mm_s(vel_atual_mms, raio_mm, RELACAO_MECANICA) if raio_mm > 0 else 0
         _set_target_labels(f"{vel_atual_mms} mm/s", f"{rpm_alvo} rpm")
 
         # 3. Manda o comando para a máquina
@@ -1313,6 +1382,7 @@ def start_acquisition():
             # Raio e Forca
             coluna_raio = float(ent_raio.get().strip().replace(',','.'))
             f.write(f"Raio [mm],{coluna_raio},\n")
+            f.write(f"Relacao mecanica (i),{RELACAO_MECANICA},\n")
             coluna_forca = float(ent_forca.get().strip().replace(',','.'))
             f.write(f"Força normal [N],{coluna_forca},\n")
 
@@ -1386,7 +1456,7 @@ def start_acquisition():
         # Monta schedule (rpm, duracao_s)
         schedule = []
         for vel_mm_s, dur_s in zip(lista_velocidades_digitadas, lista_duracao):
-            rpm = orch.rpm_from_mm_s(vel_mm_s, raio_mm)
+            rpm = orch.rpm_from_mm_s(vel_mm_s, raio_mm, RELACAO_MECANICA)
             schedule.append((rpm, dur_s))
         rpm_schedule = [rpm for rpm, _ in schedule]
 
@@ -1428,6 +1498,9 @@ def start_acquisition():
             try:
                 if caminho_pasta and os.path.exists(caminho_pasta):
                     shutil.rmtree(caminho_pasta, ignore_errors=True)
+                    pasta_pai = os.path.dirname(caminho_pasta)
+                    if pasta_pai and os.path.isdir(pasta_pai) and not os.listdir(pasta_pai):
+                        os.rmdir(pasta_pai)
             except Exception:
                 pass
             messagebox.showerror("Erro ao iniciar", f"Falha ao iniciar loggers C.\n\n{e}")
@@ -2121,6 +2194,7 @@ soma_duracoes = 0
 # cria interface gráfica
 root = tkinter.Tk()
 root.title("Software reciprocating LATRIB")
+_apply_app_icon(root)
 # root.geometry('600x600')
 
 # Canais fixos: 8 canais analogicos habilitados por padrao.
@@ -2215,19 +2289,39 @@ tkinter.Label(
 
 tkinter.Label(
     cfg_frame,
-    text="Calibracao de canais",
+    text="Relacao mecanica (i)",
     font=("Arial", 10, "bold")
 ).grid(row=3, column=0, sticky="w", padx=6, pady=(8, 4), columnspan=3)
 
+relacao_var = tkinter.StringVar(value=f"{RELACAO_MECANICA:.6g}")
+entry_relacao = tkinter.Entry(cfg_frame, textvariable=relacao_var)
+entry_relacao.grid(row=4, column=0, sticky="ew", padx=6, pady=(2, 4))
+
+btn_salvar_rel = tkinter.Button(cfg_frame, text="Salvar relacao", command=salvar_relacao_mecanica)
+btn_salvar_rel.grid(row=4, column=1, sticky="w", padx=6, pady=(2, 4))
+
+tkinter.Label(
+    cfg_frame,
+    text="Formula RPM: (i * v * 60) / (2 * pi * raio), onde i = relacao.",
+    anchor="w",
+    justify="left"
+).grid(row=5, column=0, columnspan=3, sticky="w", padx=6, pady=(2, 10))
+
+tkinter.Label(
+    cfg_frame,
+    text="Calibracao de canais",
+    font=("Arial", 10, "bold")
+).grid(row=6, column=0, sticky="w", padx=6, pady=(8, 4), columnspan=3)
+
 btn_cfg_canais = tkinter.Button(cfg_frame, text="Configurar canais", command=abrir_configurar_canais)
-btn_cfg_canais.grid(row=4, column=0, sticky="w", padx=6, pady=(2, 6))
+btn_cfg_canais.grid(row=7, column=0, sticky="w", padx=6, pady=(2, 6))
 
 tkinter.Label(
     cfg_frame,
     text="Recomendado: sem ensaio ativo e sem processos de aquisicao em segundo plano.",
     anchor="w",
     justify="left"
-).grid(row=5, column=0, columnspan=3, sticky="w", padx=6, pady=(2, 8))
+).grid(row=8, column=0, columnspan=3, sticky="w", padx=6, pady=(2, 8))
 
 #'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 

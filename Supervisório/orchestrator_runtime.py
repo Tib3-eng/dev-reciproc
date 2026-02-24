@@ -99,16 +99,16 @@ def write_schedule_csv(path: str, schedule: List[Tuple[int, float]]) -> None:
             w.writerow([rpm, f"{dur_s:.6f}"])
 
 
-def rpm_from_mm_s(vel_mm_s: float, raio_mm: float) -> int:
+def rpm_from_mm_s(vel_mm_s: float, raio_mm: float, relacao: float = 1.0) -> int:
     """
     Convert linear speed (mm/s) to RPM using radius in mm.
-    rpm = v * 60 / (2*pi*raio)
+    rpm = (i * v * 60) / (2*pi*raio), where i = relacao.
     """
-    if raio_mm <= 0:
+    if raio_mm <= 0 or relacao <= 0:
         return 0
     # For current tribometer operation we command speed magnitude only.
     # Direction reversals are handled mechanically/sequence-wise, not by negative RPM setpoints.
-    rpm = abs((vel_mm_s * 60.0) / (2.0 * 3.141592653589793 * raio_mm))
+    rpm = abs((relacao * vel_mm_s * 60.0) / (2.0 * 3.141592653589793 * raio_mm))
     # Round to nearest int (Drive expects int16)
     return int(rpm + 0.5 if rpm >= 0 else rpm - 0.5)
 
@@ -180,6 +180,20 @@ def check_executables(repo_root: str) -> dict:
         "merge_exe": merge_exe,
         "missing": missing,
     }
+
+
+def find_calibra_ui_exe(repo_root: str = "") -> Optional[str]:
+    """
+    Locate CalibraDLG_UI executable for "Configurar canais".
+    """
+    candidates = []
+    if repo_root:
+        candidates.extend([
+            os.path.join(repo_root, "CalibraDLG_UI", "bin", "Release", "net6.0-windows", "CalibraDLG_UI.exe"),
+            os.path.join(repo_root, "CalibraDLG_UI.exe"),
+        ])
+
+    return find_exe(candidates, "CalibraDLG_UI.exe")
 
 
 def start_external_run(

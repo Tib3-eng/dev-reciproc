@@ -63,6 +63,8 @@ CalibraDLG_UI (WinForms):
 - UI shows running error (RMSE) computed from current points (raw->ref linear fit).
 - RMSE label shows percent relative to reference span; Finish button now reports status if process is missing or point pending.
 - Finish/Cancel set "Finalizando/Cancelando" and status auto-resets on process end if no final message arrives.
+- Runtime path is auto-resolved; executable path picker was removed.
+- UI includes a small runtime log and "Check DLG" button to validate CalibraDLG.exe + DLG config handshake.
 
 Supervisório (Python/Tk):
 - novo_tribometro.py is the main UI; novo_tribometro.exe is the packaged app.
@@ -71,11 +73,14 @@ Supervisório (Python/Tk):
 - UI mostra "Velocidade alvo atual" (mm/s) e "RPM Alvo atual" (setpoint enviado ao Drive).
 - A UI nao usa mais aba de log; mensagens seguem para console e status visuais.
 - A aba "configuracoes adicionais" permite escolher diretorio base fixo dos ensaios; valor persistido em settings local (APPDATA).
+- A aba "configuracoes adicionais" inclui campo persistente "Relacao mecanica (i)"; RPM alvo usa (i * v * 60) / (2 * pi * raio).
 - A aba "configuracoes adicionais" inclui botao "Configurar canais" para abrir CalibraDLG_UI diretamente, com bloqueio se ensaio/processos estiverem ativos.
 - Botao "Configurar Eixos Y (Min / Max)" abre popup compacto com 2 linhas (Temperatura/Grafico 1 e Atrito-forca/Grafico 2), com modo Automatico (padrao) e campos Min/Max manuais.
 - Taxa padrao de aquisicao no pipeline externo (DLG + Drive) ajustada para 50 Hz; manter ambas iguais para sincronismo.
 - wait_and_merge has fallback merge in Python if merge_logs fails or merge.csv is missing.
-- Outputs go to Desktop\\Repositorio\\<Nome do ensaio - Estudo> with info.csv, schedule.csv, dlg.csv, drive.csv, merge.csv.
+- Outputs go to Desktop\\Repositorio\\<dd-mm-aaaa - Estudo X - Nome do ensaio>\\<REP N> with info.csv, schedule.csv, dlg.csv, drive.csv, merge.csv.
+- Duplicidade de pasta e bloqueio de inicio consideram data + estudo + nome + repeticao (subpasta REP N).
+- abrir_configurar_canais resolves CalibraDLG_UI.exe automatically via orchestrator runtime helpers.
 - Check status: DLG uses UDP ACQSTOP/SETCH/SETUP/START (8 canais) and waits for ACQDATA (no ICMP ping).
 - Check status bind: tenta 41402 (mesma do logger); se falhar, usa porta efemera e registra no log.
 - Pending: If DLG check still fails, suspect DLG busy in another app or firewall/route issues.
