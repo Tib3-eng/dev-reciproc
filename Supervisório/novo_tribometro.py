@@ -1,3 +1,48 @@
+﻿"""
+novo_tribometro.py
+------------------
+Interface grafica principal (Tkinter) do supervisorio do tribometro.
+
+Objetivo geral:
+- Coletar entradas do operador (ensaio, etapas, velocidades e parametros).
+- Orquestrar ensaio usando executaveis externos (dlg_logger_ipc + a5_speed_logger).
+- Exibir estado de execucao e graficos em tempo quase real durante o ensaio.
+
+Arquitetura resumida:
+- Camada de UI: widgets, validacoes de formulario e feedback visual.
+- Camada de controle: start/pause/resume/stop, cronometro e estado da execucao.
+- Camada de integracao: chamadas para orchestrator_runtime (processos e merge).
+
+Modos presentes no arquivo:
+- Versao atual: pipeline externo via orchestrator_runtime (USE_EXTERNAL_RUNNER=True).
+- Fluxo da versao anterior: rotinas locais go/go_p mantidas para referencia tecnica.
+
+Saidas de ensaio:
+- Desktop\\Repositorio\\<data - estudo - nome>\\REP N\\
+  info_ensaio.csv, schedule.csv, dlg.csv, drive.csv, resultado_ensaio.csv.
+
+Pontos de atencao para manutencao:
+- Evitar alterar protocolo IPC textual sem ajustar executaveis C.
+- Manter taxa do DLG e do Drive alinhadas para sincronismo de linhas.
+- Preservar validacoes de estado para nao permitir concorrencia de ensaios.
+
+Resumo de funcoes chave:
+- _load_app_settings/_save_app_settings: persistencia de configuracoes locais.
+- check_status: check rapido de comunicacao com DLG e Drive.
+- start_acquisition/pause_acquisition/stop_acquisition: controle de ensaio na UI.
+- _wait_dlg_ok_and_start_timer/_tail_dlg_csv_for_graphs: sincronismo de inicio e grafico.
+- update1/update2/update3: atualizacao periodica das curvas no matplotlib.
+"""
+# Bibliotecas padrao (Python):
+# - os: caminhos, diretorios e operacoes de sistema de arquivos.
+# - json: leitura/escrita de configuracoes persistidas em JSON.
+# - time: relogio, sleeps e controle de temporizacao.
+# - sys: acesso a dados do runtime (ex.: _MEIPASS no PyInstaller).
+# - datetime: timestamps para nomeacao de pastas/arquivos de ensaio.
+# - threading: tarefas em paralelo sem bloquear a UI Tkinter.
+# - subprocess: execucao de processos externos (loggers C e utilitarios).
+# - tempfile: arquivos temporarios para checks rapidos.
+# - shutil: operacoes de alto nivel em arquivos/pastas (ex.: rmtree).
 import os
 import json
 import time
@@ -7,17 +52,28 @@ import threading
 import subprocess
 import tempfile
 import shutil
+
+# UI (Tkinter):
+# - tkinter: widgets base e janela principal.
+# - messagebox: dialogs de alerta/erro/confirmacao.
+# - filedialog: selecao de pastas/arquivos.
+# - ttk: widgets tematicos (Notebook, etc.).
 import tkinter
 from tkinter import messagebox, filedialog
 from tkinter import ttk
 
+# Bibliotecas externas para calculo/plot:
+# - numpy: suporte numerico (ex.: geracao de frames para animacao).
+# - matplotlib: graficos embutidos na UI Tkinter.
 import numpy as np
 from matplotlib.animation import FuncAnimation
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
-# Modulos do hardware DLG/LDTP (podem nao existir no ambiente do usuario final)
-# Quando ausentes, o modo externo (DLG+Drive em C) continua funcionando.
+# Compatibilidade legada (Lynx/LDTP):
+# - O fluxo principal atual usa executaveis C (dlg_logger_ipc + a5_speed_logger) via orchestrator_runtime.
+# - Este bloco evita crash em PCs sem LDTP e mantem chamadas antigas (myModule.*) como no-op.
+# - Remover somente quando nao houver mais referencias a LDTP_Const/myModule neste arquivo.
 try:
     import LDTP_Const
     import myModule
@@ -41,23 +97,44 @@ except Exception as e:
 
     myModule = _MyModuleStub()
 
+# orchestrator_runtime centraliza a orquestracao do pipeline externo:
+# inicia/paralisa executaveis C, envia comandos IPC e realiza merge final.
 import orchestrator_runtime as orch
 
 # Execucao dos loggers C em background (DLG + Drive + merge)
+# Switch de modo: True usa pipeline externo (executaveis C); False usa fluxo da versao anterior em Python.
+# No geral a gente vai trabalhar com ele em true por que os outros executáveis (Programas C) que "coordenam" ensaios.
 USE_EXTERNAL_RUNNER = True
+# external_run_state guarda o RunState retornado pelo orchestrator:
+# handles de processo, caminhos de CSV e parametros da execucao em curso.
 external_run_state = None
 
 # Persistencia simples de configuracoes do supervisório.
+# Caminho padrao de saida caso o usuario ainda nao tenha configurado.
 DEFAULT_REPO_BASE = os.path.join(os.path.expanduser("~"), "Desktop", "Repositorio")
+# Relacao mecanica default (i) usada na conversao mm/s -> rpm.
 DEFAULT_RELACAO = 1.0
 APP_SETTINGS_DIR = os.path.join(
     os.getenv("LOCALAPPDATA") or os.path.expanduser("~"),
     "LATRIB"
 )
+# Arquivo JSON de settings do usuario (persistencia local da UI).
 APP_SETTINGS_PATH = os.path.join(APP_SETTINGS_DIR, "supervisorio_settings.json")
 
 
 def _load_app_settings():
+    """
+    Carrega as configuracoes persistidas do supervisório.
+
+    Fluxo:
+    1) Tenta abrir APP_SETTINGS_PATH em modo leitura.
+    2) Faz parse JSON para objeto Python.
+    3) Aceita apenas dict; qualquer outro tipo vira {}.
+    4) Em erro (arquivo ausente/corrompido/permissao), retorna {}.
+
+    Returns:
+        dict: dicionario de configuracoes validas ou vazio.
+    """
     try:
         with open(APP_SETTINGS_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -67,6 +144,17 @@ def _load_app_settings():
 
 
 def _save_app_settings(data):
+    """
+    Salva configuracoes do supervisório em JSON no APPDATA.
+
+    Args:
+        data (dict): mapa de configuracoes a persistir.
+
+    Side effects:
+        - Cria a pasta APP_SETTINGS_DIR se necessario.
+        - Sobrescreve APP_SETTINGS_PATH.
+        - Em caso de erro, suprime excecao para nao interromper UI.
+    """
     try:
         os.makedirs(APP_SETTINGS_DIR, exist_ok=True)
         with open(APP_SETTINGS_PATH, "w", encoding="utf-8") as f:
@@ -75,10 +163,18 @@ def _save_app_settings(data):
         pass
 
 
+# APP_SETTINGS guarda o conteudo bruto carregado do JSON do usuario.
 APP_SETTINGS = _load_app_settings()
+
+# REPO_BASE define a pasta raiz de saida dos ensaios.
+# - prioridade: valor salvo pelo usuario.
+# - fallback: DEFAULT_REPO_BASE.
 REPO_BASE = APP_SETTINGS.get("repo_base", DEFAULT_REPO_BASE)
 if not isinstance(REPO_BASE, str) or not REPO_BASE.strip():
     REPO_BASE = DEFAULT_REPO_BASE
+
+# RELACAO_MECANICA e usada na conversao mm/s -> rpm:
+# rpm = (i * v * 60) / (2 * pi * raio), onde i = RELACAO_MECANICA.
 try:
     RELACAO_MECANICA = float(APP_SETTINGS.get("relacao", DEFAULT_RELACAO))
 except Exception:
@@ -89,7 +185,15 @@ if RELACAO_MECANICA <= 0:
 
 def _resource_path(name):
     """
-    Resolve resources in source mode and PyInstaller one-file mode.
+    Encontra caminho de recursos em dois cenarios de execucao:
+    - modo fonte (.py): usa pasta do arquivo atual (__file__).
+    - modo PyInstaller one-file: usa sys._MEIPASS.
+
+    Args:
+        name (str): nome do recurso (ex.: 'logo.ico').
+
+    Returns:
+        str: caminho absoluto esperado para o recurso.
     """
     base_dir = getattr(sys, "_MEIPASS", os.path.dirname(__file__))
     return os.path.join(base_dir, name)
@@ -97,7 +201,16 @@ def _resource_path(name):
 
 def _apply_app_icon(app_root):
     """
-    Apply custom icon to the window/taskbar when available.
+    Aplica icones da aplicacao na janela/barra de tarefas.
+
+    Args:
+        app_root (tkinter.Tk): janela principal da aplicacao.
+
+    Side effects:
+        - Tenta aplicar logo.ico via iconbitmap.
+        - Tenta aplicar logo.png via iconphoto.
+        - Guarda referencia em app_root._logo_img para evitar GC da imagem.
+        - Em falha, ignora para nao travar a inicializacao da UI.
     """
     try:
         ico = _resource_path("logo.ico")
@@ -117,6 +230,12 @@ def _apply_app_icon(app_root):
 
 
 def _set_repo_base(path):
+    """
+    Atualiza REPO_BASE em memoria, persiste em JSON e sincroniza UI.
+
+    Args:
+        path (str): novo diretorio base para salvar ensaios.
+    """
     global REPO_BASE, APP_SETTINGS
     if not path:
         return
@@ -129,6 +248,12 @@ def _set_repo_base(path):
 
 
 def _set_relacao_mecanica(valor):
+    """
+    Atualiza relacao mecanica global, persiste em JSON e sincroniza UI.
+
+    Args:
+        valor (float): valor positivo da relacao mecanica i.
+    """
     global RELACAO_MECANICA, APP_SETTINGS
     RELACAO_MECANICA = valor
     APP_SETTINGS["relacao"] = RELACAO_MECANICA
@@ -139,6 +264,15 @@ def _set_relacao_mecanica(valor):
 
 
 def salvar_relacao_mecanica():
+    """
+    Handler da UI para validar e salvar o campo de relacao mecanica.
+
+    Fluxo:
+    1) Le texto do entry relacao_var.
+    2) Normaliza virgula para ponto.
+    3) Valida float > 0.
+    4) Chama _set_relacao_mecanica().
+    """
     txt = relacao_var.get().strip().replace(",", ".")
     if not txt:
         messagebox.showwarning("Relacao", "Informe um valor para a relacao.")
@@ -155,6 +289,13 @@ def salvar_relacao_mecanica():
 
 
 def selecionar_repo_base():
+    """
+    Abre dialog de pasta e define REPO_BASE com validacoes basicas.
+
+        - Mostra filedialog para usuario escolher pasta.
+        - Garante existencia da pasta.
+        - Em erro, mostra messagebox e nao altera configuracao.
+    """
     initial_dir = REPO_BASE if os.path.isdir(REPO_BASE) else os.path.expanduser("~")
     path = filedialog.askdirectory(
         title="Selecionar diretorio base dos ensaios",
@@ -170,7 +311,14 @@ def selecionar_repo_base():
     _set_repo_base(path)
 
 
+# Verifica se existe processo externo de DLG/Drive ainda rodando.
 def _external_pipeline_ativo():
+    """
+    Verifica se algum processo do pipeline externo esta vivo.
+
+    Returns:
+        bool: True se dlg_proc ou drive_proc estiver em execucao.
+    """
     if external_run_state is None:
         return False
     try:
@@ -181,7 +329,16 @@ def _external_pipeline_ativo():
         return False
 
 
+# Abre a UI de calibracao de canais, bloqueando quando ha ensaio/processos ativos.
 def abrir_configurar_canais():
+    """
+    Abre CalibraDLG_UI.exe para configurar/capturar calibracao de canais.
+
+    Regras:
+    - Bloqueia abertura se ha ensaio ativo ou pipeline externo rodando.
+    - Encontra caminho do executavel via orchestrator_runtime.
+    - Abre processo em background via subprocess.Popen.
+    """
     if _is_running() or _external_pipeline_ativo():
         messagebox.showwarning(
             "Configurar canais",
@@ -204,8 +361,18 @@ def abrir_configurar_canais():
     except Exception as e:
         messagebox.showerror("Configurar canais", f"Falha ao abrir CalibraDLG_UI.\n\n{e}")
 
-# Log simples para a aba de debug (quando existir)
+# Log simples para a aba de debug (quando existir), removi ela nessa versão, mas é util enquanto desenvolvimento.
 def log_msg(msg):
+    """
+    Registra mensagem no console e, se existir, no widget de log da UI.
+
+    Args:
+        msg (str): mensagem de status/erro para diagnostico.
+
+    Side effects:
+        - Imprime linha com timestamp no stdout.
+        - Agenda append thread-safe no Tk via root.after.
+    """
     ts = time.strftime('%H:%M:%S')
     line = f"[{ts}] {msg}"
     print(line)
@@ -234,7 +401,15 @@ def log_msg(msg):
 if not HAVE_LDTP:
     log_msg(f"Aviso: LDTP_Const/myModule nao encontrados; controle analogico interno desativado ({_LDTP_IMPORT_ERROR}).")
 
+# Atualiza um label de status para OK/X com cor correspondente.
 def _set_status(label, ok):
+    """
+    Atualiza um indicador visual simples de status (OK/X).
+
+    Args:
+        label (tkinter.Label | None): label alvo da UI.
+        ok (bool): True para estado saudavel, False para falha.
+    """
     if label is None:
         return
     if ok:
@@ -243,9 +418,19 @@ def _set_status(label, ok):
         label.config(text='X', fg='red')
 
 
+# Monta parametros de subprocesso no Windows para evitar console piscando.
+# Honestamente, essa parte eu pedi pro chatGPT remover o console que estava abrindo em alguns momentos
+# Resolveu então vai ficar kkkkk
 def _subprocess_no_window_kwargs():
     """
-    Evita abrir console "piscando" ao executar utilitarios C em app Tk.
+    Retorna kwargs para subprocess no Windows sem janela de console.
+
+    Returns:
+        dict: argumentos opcionais para subprocess.run/Popen.
+
+    Contexto:
+        O supervisório e uma app Tkinter; sem essas flags, cada utilitario
+        C pode abrir uma janela de console visivel para o usuario.
     """
     kwargs = {}
     if os.name == 'nt':
@@ -258,10 +443,28 @@ def _subprocess_no_window_kwargs():
     return kwargs
 
 
+# Executa um check curto do DLG via logger IPC e retorna resultado/detalhe.
+# Boa parte das funcoes a baixo estão relacionadas a rotina de check status que foi adicionada
+# Mas sao bons exemplos da comunicacao Programa -> DLG
 def _dlg_check_once(dlg_exe, dlg_ip, dlg_port, bind_port):
     """
-    Executa um check curto do DLG via dlg_logger_ipc em modo IPC.
-    Retorna (ok, detalhe_log).
+    Executa um teste curto de aquisicao DLG via dlg_logger_ipc em modo IPC.
+
+    Args:
+        dlg_exe (str): caminho do executavel dlg_logger_ipc.exe.
+        dlg_ip (str): IP do equipamento DLG.
+        dlg_port (int): porta UDP do DLG (tipicamente 41401).
+        bind_port (int): porta local de bind para receber pacotes.
+
+    Returns:
+        tuple[bool, str]:
+            - ok=True quando houver evidencias de dados validos (DATA_OK ou err=0 em CSV).
+            - detalhe com motivo de falha quando aplicavel.
+
+    Protocolo usado:
+        - Processo e iniciado com --ipc.
+        - Este codigo envia "START\\n" no stdin do processo.
+        - O logger responde no stdout com marcadores como DATA_OK/DATA_TIMEOUT.
     """
     with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as tmp:
         tmp_path = tmp.name
@@ -276,6 +479,10 @@ def _dlg_check_once(dlg_exe, dlg_ip, dlg_port, bind_port):
         '--bind-port', str(bind_port),
         '--ipc',
     ]
+    # cmd acima inicia um logger headless de curta duracao:
+    # - escreve CSV temporario em tmp_path
+    # - fica aguardando START no stdin por estar em modo --ipc
+    # - tenta receber ACQDATA do DLG na porta bind_port
 
     detail = ''
     ok = False
@@ -288,6 +495,9 @@ def _dlg_check_once(dlg_exe, dlg_ip, dlg_port, bind_port):
             timeout=10,
             **_subprocess_no_window_kwargs()
         )
+        # Analise de resposta:
+        # - stdout/stderr podem conter DATA_OK ou DATA_TIMEOUT.
+        # - returncode != 0 normalmente indica erro operacional do logger.
         out_txt = ((res.stdout or '') + '\n' + (res.stderr or '')).upper()
         if 'DATA_OK' in out_txt:
             ok = True
@@ -326,8 +536,19 @@ def _dlg_check_once(dlg_exe, dlg_ip, dlg_port, bind_port):
     return ok, detail
 
 
-# Check simples de comunicacao (DLG + Drive)
+# Check simples de comunicacao (DLG + Drive) acionado pelo botao de status.
 def check_status():
+    """
+    Valida conectividade operacional com os dois lados de hardware.
+
+    Fluxo:
+    1) DLG: executa dlg_logger_ipc por ~2 s em IPC e busca DATA_OK.
+    2) Drive: executa a5_pos_cli --diag na COM4.
+    3) Atualiza labels visuais de status (DLG/Drive).
+
+    Observacao:
+        Este check verifica comunicacao de aplicacao/protocolo.
+    """
     log_msg('Check status: iniciando.')
 
     dlg_ok = False
@@ -336,80 +557,143 @@ def check_status():
     repo_root = orch.find_repo_root()
 
     # ---- DLG ----
+    # Este bloco valida "na pratica" se existe comunicacao com o DLG:
+    # em vez de ping ICMP, ele sobe o logger IPC por poucos segundos e
+    # verifica se chega ao menos uma amostra ACQDATA valida.
     try:
+        # check_executables() retorna um dicionario com caminhos dos .exe
+        # que o supervisorio precisa (dlg_logger_ipc, a5_speed_logger etc.).
         exe_info = orch.check_executables(repo_root)
+        # Pegamos somente o executavel do logger DLG para o check atual.
         dlg_exe = exe_info.get('dlg_exe')
         if not dlg_exe:
+            # Sem executavel nao existe como testar protocolo/acquisicao.
+            # Aqui nao e erro fatal da UI; apenas registramos o diagnostico.
             log_msg('DLG check: dlg_logger_ipc.exe nao encontrado.')
         else:
+            # Usa constantes do orchestrator quando disponiveis.
+            # getattr com fallback evita quebra se a constante nao existir
+            # (mantem compatibilidade com versoes antigas do modulo).
             dlg_ip = getattr(orch, 'DEFAULT_DLG_IP', '192.168.1.100')
             dlg_port = getattr(orch, 'DEFAULT_DLG_PORT', 41401)
             log_msg('DLG check: executando dlg_logger_ipc (ipc, 2s)...')
             # Primeiro tenta a mesma porta de bind do logger real (41402).
             # Se falhar (porta ocupada), tenta porta efemera.
+            # - 41402: replica o cenario normal de execucao do pipeline.
+            # - 0: pede ao SO uma porta livre qualquer (fallback robusto).
             attempts = [41402, 0]
+            # detail carrega o motivo da ultima falha retornado por
+            # _dlg_check_once (ex.: timeout sem ACQDATA, falha de bind UDP).
             detail = ''
             for bind_port in attempts:
+                # _dlg_check_once executa um mini teste:
+                # 1) sobe dlg_logger_ipc em --ipc
+                # 2) envia START via stdin (message passing)
+                # 3) tenta receber dados do DLG por ~2 s
+                # 4) retorna (ok, detail)
+                # Parametros:
+                # - dlg_exe: caminho do executavel a testar
+                # - dlg_ip/dlg_port: destino UDP do equipamento DLG
+                # - bind_port: porta local para receber ACQDATA
                 dlg_ok, detail = _dlg_check_once(dlg_exe, dlg_ip, dlg_port, bind_port)
                 if dlg_ok:
+                    # Achou amostra valida: nao precisa novas tentativas.
                     break
                 if bind_port == 41402:
+                    # Log explicito para mostrar que o fallback foi acionado.
                     log_msg('DLG check: tentativa em 41402 falhou; tentando porta efemera...')
 
             if dlg_ok:
+                # dlg_ok=True significa "recebeu dado valido no mini teste".
                 log_msg('DLG check: ok.')
             else:
+                # Sem amostra valida, priorizamos mensagem com causa tecnica.
                 if detail:
                     log_msg(f'DLG check: nenhuma amostra valida ({detail}).')
                 else:
+                    # Caso raro: falha sem detalhe textual especifico.
                     log_msg('DLG check: nenhuma amostra valida.')
     except Exception as e:
+        # Ultima defesa: erros inesperados do check nao podem derrubar a tela.
         log_msg(f'DLG check: erro ({e}).')
-
+   
     # ---- Drive ----
+    # Este bloco valida comunicacao serial/Modbus com o DriveA5.
+    # O objetivo e confirmar que o CLI consegue abrir a porta e ler
     try:
-        # Preferir a5_pos_cli (diag) para nao mexer em parametros
+        # Preferir a5_pos_cli --diag:
+        # - comando curto de diagnostico
+        # - evita logica de ensaio longo
+        # - menor risco de alterar estado operacional
+        # candidates lista caminhos comuns de build em ordem de preferencia.
         candidates = [
             os.path.join(repo_root, 'DriveA5', 'build', 'Release', 'a5_pos_cli.exe'),
             os.path.join(repo_root, 'DriveA5', 'build', 'a5_pos_cli.exe'),
         ]
+        # drive_exe recebe o primeiro caminho existente.
         drive_exe = None
         for c in candidates:
             if os.path.exists(c):
                 drive_exe = c
+                # Para no primeiro valido para evitar ambiguidade de versao.
                 break
 
         if not drive_exe:
+            # Sem executavel nao ha como testar serial/Modbus.
             log_msg('Drive check: a5_pos_cli.exe nao encontrado.')
         else:
             # COM4 e padrao do projeto
+            # cmd:
+            # - drive_exe: executavel de diagnostico
+            # - COM4: porta serial esperada neste setup
+            # - --diag: teste basico de comunicacao
             cmd = [drive_exe, 'COM4', '--diag']
             res = subprocess.run(
                 cmd,
+                # captura stdout/stderr para evitar poluir o console da UI.
                 capture_output=True,
+                # text=True converte bytes para str automaticamente.
                 text=True,
+                # timeout curto evita travar o check se a porta nao responder.
                 timeout=5,
+                # Em Windows, oculta janela de console do subprocess.
                 **_subprocess_no_window_kwargs()
             )
+            # --diag retorna 0 quando leituras Modbus basicas foram bem-sucedidas.
+            # Convencao:
+            # - rc=0   -> drive_ok=True
+            # - rc!=0  -> drive_ok=False
             drive_ok = (res.returncode == 0)
             if drive_ok:
                 log_msg('Drive check: ok.')
             else:
                 log_msg('Drive check: falhou (diag).')
     except Exception as e:
+        # Erros inesperados sao logados sem interromper o supervisorio.
         log_msg(f'Drive check: erro ({e}).')
 
     try:
+        # Atualiza indicadores visuais de status apos concluir ambos checks.
         _set_status(status_dlg_value, dlg_ok)
         _set_status(status_drive_value, drive_ok)
     except Exception:
+        # Ignora erro de UI (ex.: widget indisponivel em transicao de tela).
         pass
 
-# INICIALIZAÇÃO DE VARIÁVEIS PADRÃO
+# INICIALIZACAO DE ESTADO GLOBAL DO ENSAIO.
+# Observacao: este arquivo mistura fluxo atual e da versao anterior; por isso existem
+# variaveis historicas usadas em blocos especificos.
+#
+# aux: tamanho maximo da janela de pontos exibida nos graficos.
 aux = 2000
+# freq: taxa base para rotinas e escala de tempo visual.
 freq = 50.0
+# running: estado geral do ensaio.
 running = False
+# ip: endereco de referencia para rotinas legadas de hardware.
 ip = '127.0.0.1'
+# channels: descricao logica de canais para inicializar buffers locais.
+# Estrutura de cada item: [ip, tipo_de_canal, reservado].
 channels = []
 for _ in range(8): channels.append([ip, LDTP_Const.LDTP_CHTYPE_ANIN, 0])
 channels.append([ip, LDTP_Const.LDTP_CHTYPE_DIGIN, 0])
@@ -425,22 +709,27 @@ caminho_schedule_csv = ""
 
 # Inicializa listas de amostras
 
+# widgets da tabela de etapas (entrada do usuario).
 lista_entries_velocidade = []
 lista_entries_distancia = []
 lista_labels_voltas_cursos = []
 lista_labels_duracao = []
-# allSamps agora servirá apenas como BUFFER temporário para salvar no disco
+# allSamps: buffer da versao anterior para escrita local.
 allSamps = [[] for _ in range(numChannels)] 
+# graSamps: buffer principal consumido por update1/update2/update3.
 graSamps = [[] for _ in range(numChannels)]
+# sampsTimestamp: eixo temporal associado aos pontos em graSamps.
 sampsTimestamp = []
+# Estruturas legadas de planejamento de etapas por tensao/tempo.
 tensao_vel = []
 duracao = []
 soma_tempos_vel = []
+# Controle do cronometro exibido na UI.
 start_time = 0
 timer_started = False
 
 # Controle de escala Y (auto por padrao).
-# Mantemos valores padrao para evitar NameError mesmo sem UI dedicada.
+# Mantemos valores padrao para evitar NameError.
 y1_auto = True
 y2_auto = True
 y1_min = 0.0
@@ -455,19 +744,18 @@ p_atrito_max = []
 p_atrito_min = []
 p_coluna_velocidade = []
 
-# Configuração do tamanho do bloco para salvar no disco (ex: a cada 1000 linhas)
+# Configuracao do tamanho do bloco para salvar no disco (ex: a cada 1000 linhas)
 tamanho_bloco = 1000 
 
 
 # Nicolas
-'''
-É responsável por simular a aquisição de dados em tempo real dos gráficos da Temperatura e Força.
-Ela abre o arquivo _T.txt. Lê uma linha, processa e dá um time.sleep(1.0/200.0) para simular que a aquisição está ocorrendo a 200 amostras por segundo.
-
-Ela acumula os dados no buffer_escrita e, a cada 1000 linhas, salva no arquivo final. Isso evita desgastar o disco.
-Sweep: É esta função que verifica se o gráfico encheu (if len(graSamps[0]) >= aux). Se encheu, ela limpa a lista para o gráfico começar a desenhar de novo.
-
-'''
+# go():
+# - Le amostras de um arquivo *_T.txt (modo de simulacao da versao anterior).
+# - Converte cada linha para floats, atualiza buffers de grafico e tempo.
+# - Grava em blocos no arquivo de saida para reduzir I/O por linha.
+# - Usa variaveis globais:
+#   running/is_paused para fluxo, aux/freq para janela temporal,
+#   graSamps/sampsTimestamp para plot, caminho_arquivo_2 para persistencia.
 def go():
     global running, aux, freq, start_time, contador_amostras_total
     global graSamps, allSamps, sampsTimestamp
@@ -505,7 +793,7 @@ def go():
                 clean_line = line.strip()
                 # Verifica se é dado numérico
                 if len(clean_line) > 0 and (clean_line[0].isdigit() or clean_line[0] == '-') and ';' in clean_line:
-                    f_in.seek(last_pos) # Volta para o início da linha de dados válida
+                    f_in.seek(last_pos) # Volta para o inicio da linha de dados valida
                     break
             
             print("iniciando aquisição...")
@@ -565,8 +853,8 @@ def go():
                         sampsTimestamp.append(tempo_agora)
 
                         # 2. PROCESSAMENTO DOS CANAIS
-                        # Monta uma string para salvar no arquivo de saída txt
-                        ## (primeiro valor é o tempo/coluna 0)
+                        # Monta uma string para salvar no arquivo de saida txt
+                        ## (primeiro valor e o tempo/coluna 0)
                         linha_para_salvar = f"{vals[0]:.3f}" # Timestamp
                         
                         # Loop para percorrer cada canal de sensor (0 a 8)
@@ -605,24 +893,28 @@ def go():
             if len(buffer_escrita) > 0 and caminho_arquivo_2 != "":
                  with open(caminho_arquivo_2, 'a') as f_out:
                     f_out.writelines(buffer_escrita)
-            
+            # --- FINALIZACAO ---
             print("Aquisição finalizada.")
             running = False
 
     except Exception as e:
-        print(f"Erro crítico na thread go: {e}")
+        print(f"Erro critico na thread go: {e}")
         running = False
 
 
 # Nicolas
-################# FUNÇÃO GO PARA O TERCEIRO GRÁFICO (ARQUIVO _P)
+################# funcao grafico para terceiro grafico (ARQUIVO _P)
 '''
-# Ela abre o arquivo _P e lê linha por linha
-# O Gráfico 3 não é de tempo contínuo, é ponto a ponto (stroke). A função lê o tempo em que aquele stroke aconteceu e fica em pausa (while) esperando o relógio principal (função go) chegar naquele tempo.
+# Ela abre o arquivo _P e le linha por linha
+# O Grafico 3 nao e de tempo continuo, e ponto a ponto (stroke). A funcao le o tempo em que aquele stroke aconteceu e fica em pausa (while) esperando o relogio principal (funcao go) chegar naquele tempo.
 
 #Exemplo: O stroke 5 aconteceu no segundo 10. A função go_p lê isso e espera a simulação chegar no segundo 10. Quando chega, ela libera os dados.
 '''
 
+# go_p():
+# - Le arquivo *_P.txt com dados por stroke (grafico 3).
+# - Sincroniza cada ponto com o tempo produzido por go() usando sampsTimestamp.
+# - Atualiza listas p_strokes/p_atrito_* consumidas por update3().
 def go_p():
     """Lê o arquivo processado (_P.txt) para o Gráfico 3 de Atrito"""
     global running, p_strokes, p_atrito_ef, p_atrito_max, p_atrito_min, p_coluna_velocidade
@@ -684,7 +976,7 @@ def go_p():
                         vel_3graf = float(parts[9].replace(',', '.'))
                         
                         # Adiciona os valores nas listas globais para a função update3 desenhar
-                        p_strokes.append(strk)
+                        # EXTRACAO DOS DADOS PARA O GRAFICO
                         p_atrito_ef.append(ef)
                         p_atrito_max.append(mx)
                         p_atrito_min.append(mn)
@@ -699,11 +991,21 @@ def go_p():
 ##########################################################################################3
 
 
+# fechar_janela():
+# - Envia comando digital da versao anterior para seguranca (SetDigOut).
+# - Finaliza o loop da interface Tkinter.
 def fechar_janela():
     myModule.SetDigOut(ip, 0, 1, 0)
     root.quit()
 
 
+# salvar_arquivo():
+# - Monta caminho de saida no formato:
+#   REPO_BASE/<data - estudo - ensaio>/REP N/
+# - Bloqueia duplicidade da mesma repeticao.
+# - Define caminhos padrao: info_ensaio.csv, dlg.csv, drive.csv,
+#   resultado_ensaio.csv e schedule.csv.
+# - Inicializa arquivos vazios para evitar erro de append posterior.
 def salvar_arquivo():
     
     global caminho_arquivo_1, caminho_arquivo_2, caminho_pasta
@@ -763,71 +1065,23 @@ def salvar_arquivo():
    
 
 
+# converte():
+# - Stub da versao anterior (desativado).
+# - Historicamente chamaria conversor.exe para etapa de pos-processamento.
 def converte(): 
     pass
 
-    '''
-    # Caminho do programa e parâmetros
-    programa1 = r'conversor.exe'
-
-    # trocar por eventuaus parametros que o programa possa vir a precisar
-    """
-    parametro1_programa2 = str(freq)
-    parametro2_programa2 = str(timer)
-    parametro3_programa2 = str(ip)
-    parametro4_programa2 = str(filePath)
-    parametro5_programa2 = str(caminho_arquivo_1)
-    """
-
-    # Criando a lista de argumentos (incluindo o programa e seus parâmetros)
-    comando1 = [programa1]
-
-    # Chamando o programa e capturando a saída
-    resultado = subprocess.run(comando1, capture_output=True, text=True)
-
-    # Imprimir a saída do programa chamado
-    print('Saída do programa:')
-    print(resultado.stdout)
-
-    # Se ocorrer algum erro, imprima a mensagem de erro
-    if resultado.stderr:
-        print('Erro:')
-        print(resultado.stderr)
-    '''
-
-
+# gera_grafico():
+# - Stub da versao anterior (desativado).
+# - Historicamente chamaria grafico3_9.exe apos o ensaio.
 def gera_grafico():
     pass
-    '''
-    time.sleep(360)
-    # Caminho do programa e parâmetros
-    programa2 = r'grafico3_9.exe'
-
-    # trocar por eventuaus parametros que o programa possa vir a precisar
-    """
-    parametro1_programa2 = str(freq)
-    parametro2_programa2 = str(timer)
-    parametro3_programa2 = str(ip)
-    parametro4_programa2 = str(filePath)
-    parametro5_programa2 = str(caminho_arquivo_1)
-    """
-
-    # Criando a lista de argumentos (incluindo o programa e seus parâmetros)
-    comando2 = [programa2]
-
-    # Chamando o programa e capturando a saída
-    resultado = subprocess.run(comando2, capture_output=True, text=True)
-
-    # Imprimir a saída do programa chamado
-    print('Saída do programa:')
-    print(resultado.stdout)
-
-    # Se ocorrer algum erro, imprima a mensagem de erro
-    if resultado.stderr:
-        print('Erro:')
-        print(resultado.stderr)
-    '''
-
+# velocidades():
+# - Executa cronograma de velocidades no modo da versao anterior (analogico/LDTP).
+# - Entrada: lista_velocidades_digitadas e lista_duracao (segundos).
+# - Para cada etapa: calcula rpm de referencia para UI, envia SetAnOutV
+#   e respeita pausa/parada zerando tensao quando necessario.
+# - Efeito colateral principal: comando direto de hardware via myModule.
 def velocidades():
     if not HAVE_LDTP:
         log_msg('LDTP nao disponivel; controle analogico interno desativado.')
@@ -846,7 +1100,7 @@ def velocidades():
         if running != "true":
             break
             
-        # 1. Pega os dados dessa etapa específica
+        # 1. Pega os dados dessa etapa especifica
         vel_atual_mms = lista_velocidades_digitadas[i]  # Valor para mostrar (mm/s)
         duracao_atual_s = lista_duracao[i]              # Duração dessa etapa (segundos)
 
@@ -855,6 +1109,7 @@ def velocidades():
             raio_mm = float(ent_raio.get().strip().replace(",", "."))
         except Exception:
             raio_mm = 0.0
+        # rpm_from_mm_s(v, raio, relacao) retorna int rpm para exibir/enviar.
         rpm_alvo = orch.rpm_from_mm_s(vel_atual_mms, raio_mm, RELACAO_MECANICA) if raio_mm > 0 else 0
         _set_target_labels(f"{vel_atual_mms} mm/s", f"{rpm_alvo} rpm")
 
@@ -884,15 +1139,13 @@ def velocidades():
                 time.sleep(0.1)
                 continue 
 
-            # SE ESTIVER RODANDO (NÃO PAUSADO):
+            # SE ESTIVER RODANDO (NAO PAUSADO):
             else:
                 # Se estava parado antes, religa o motor na velocidade certa
                 if motor_estava_parado:
                     myModule.SetAnOutV(ip, tensao_para_enviar, 0, 100)
                     _set_target_labels(f"{vel_atual_mms} mm/s", f"{rpm_alvo} rpm")
                     motor_estava_parado = False
-
-                # Desconta o tempo
                 passo = 0.1
                 if passo > tempo_rest: 
                     passo = tempo_rest
@@ -903,7 +1156,7 @@ def velocidades():
         if running != "true":
             break
 
-    # Quando terminar tudo, mostra "Fim" ou zera
+    # Quando terminar tudo zera
     if running == "true":
         try:
             label_ensaio_estado.config(text="Finalizado", fg="green")
@@ -921,6 +1174,9 @@ def velocidades():
 
 
 
+# _format_hms(seconds):
+# - Recebe segundos (int/float/texto conversivel) e devolve HH:MM:SS.
+# - Garante limites minimos (nunca retorna tempo negativo).
 def _format_hms(seconds):
     try:
         seconds = int(seconds)
@@ -933,6 +1189,11 @@ def _format_hms(seconds):
     s = seconds % 60
     return f"{h}:{m:02d}:{s:02d}"
 
+# atualiza_decorrido():
+# - Atualiza label de tempo da UI a cada ~200 ms.
+# - Considera pausa (congela contador) e opcionalmente calcula restante
+#   quando existe duracao total do schedule.
+# - Usa start_time/timer_started/is_paused/tempo_pause_inicio.
 def atualiza_decorrido():
     """Atualiza o cronometro (tempo restante se houver duracao total)."""
     # Aceita tanto bool quanto string "true" para evitar travar o timer.
@@ -974,6 +1235,9 @@ def atualiza_decorrido():
     except Exception:
         pass
 
+# _start_timer_now():
+# - Marca start_time com time.time() e habilita timer_started.
+# - Ponto unico para "iniciar cronometro oficial" do ensaio.
 def _start_timer_now():
     """Inicia o cronometro no instante atual (thread-safe via root.after)."""
     global start_time, timer_started
@@ -981,9 +1245,15 @@ def _start_timer_now():
     timer_started = True
     atualiza_decorrido()
 
+# _is_running():
+# - Abstracao para tratar comportamento da versao anterior: running pode ser bool ou string "true".
+# - Retorna bool padrao para facilitar condicionais.
 def _is_running():
     return (running == "true") or (running is True)
 
+# _set_target_labels(vel_txt, rpm_txt):
+# - Atualiza os textos de "Velocidade alvo atual" e "RPM Alvo atual".
+# - Faz update thread-safe via root.after quando possivel.
 def _set_target_labels(vel_txt=None, rpm_txt=None):
     def _do():
         if vel_txt is not None:
@@ -1002,9 +1272,15 @@ def _set_target_labels(vel_txt=None, rpm_txt=None):
     except Exception:
         _do()
 
+# _set_targets_stopped():
+# - Conveniencia para retornar labels de alvo ao estado parado.
 def _set_targets_stopped():
     _set_target_labels("0 mm/s", "0 rpm")
 
+# _update_vel_label_from_schedule(...):
+# - Thread de UI que acompanha o tempo decorrido e seleciona etapa ativa.
+# - Mostra mm/s e rpm alvo correspondentes ao schedule atual.
+# - Le arrays de velocidade/duracao e opcionalmente lista de rpm pronta.
 def _update_vel_label_from_schedule(vel_mm_s_list, dur_s_list, rpm_list=None):
     """
     Atualiza o label de velocidade baseado no schedule (modo externo).
@@ -1058,6 +1334,13 @@ def _update_vel_label_from_schedule(vel_mm_s_list, dur_s_list, rpm_list=None):
         _set_target_labels(v_txt, rpm_txt)
 
         time.sleep(0.2)
+# _wait_dlg_ok_and_start_timer(...):
+# - Monitora dlg.csv ate observar N linhas validas (err=0).
+# - So entao inicia o cronometro oficial, evitando "tempo correndo sem dado".
+# - Parametros:
+#   dlg_csv_path: arquivo monitorado.
+#   min_ok: numero minimo de amostras validas.
+#   timeout_s: limite maximo de espera.
 def _wait_dlg_ok_and_start_timer(dlg_csv_path, min_ok=3, timeout_s=15):
     """
     Aguarda N amostras validas do DLG (err=0) e so entao inicia o cronometro.
@@ -1112,6 +1395,10 @@ def _wait_dlg_ok_and_start_timer(dlg_csv_path, min_ok=3, timeout_s=15):
     except Exception as e:
         log_msg(f"DLG: erro aguardando amostras ({e}).")
 
+# _tail_dlg_csv_for_graphs(...):
+# - Faz tail do dlg.csv em tempo real durante ensaio externo.
+# - Converte linhas para buffers de plot (graSamps/sampsTimestamp).
+# - Em err=1 ou NULL, grava NaN para manter alinhamento temporal.
 def _tail_dlg_csv_for_graphs(dlg_csv_path):
     """
     Alimenta os graficos com dados do DLG (modo externo).
@@ -1172,6 +1459,16 @@ def _tail_dlg_csv_for_graphs(dlg_csv_path):
                         del graSamps[i][:-aux]
     except Exception as e:
         log_msg(f"DLG: erro lendo dlg.csv para graficos ({e}).")
+# start_acquisition():
+# - Funcao central de inicio de ensaio.
+# - Etapas principais:
+#   1) valida campos de formulario e tabela de etapas.
+#   2) prepara pasta/arquivos de saida.
+#   3) monta schedule (rpm, duracao_s).
+#   4) inicia pipeline externo (padrao) via orch.start_external_run(...)
+#      ou fluxo da versao anterior (go/go_p/velocidades) quando externo estiver desativado.
+# - Side effects:
+#   atualiza labels de estado, cronometro, threads de merge e plot.
 def start_acquisition():
 
     global running
@@ -1389,11 +1686,11 @@ def start_acquisition():
         return
         
 
-### FIM DAS VALIDAÇÕES
+### FIM DAS VALIDACOES
 ###########################################################################################################################
-    ####### INÍCIO DO PROGRAMA - GERAÇÃO DA PASTA E ARQUIVOS TXT
+    ####### INICIO DO PROGRAMA - GERACAO DA PASTA E ARQUIVOS TXT
 
-    # Reseta a variável antes de chamar (garante que não pegue lixo de memória)
+    # Reseta a variavel antes de chamar (garante que nao pegue lixo de memoria)
     global caminho_arquivo_1, caminho_arquivo_2
     caminho_arquivo_1 = ""
     caminho_arquivo_2 = "" 
@@ -1412,10 +1709,10 @@ def start_acquisition():
 
     salvar_arquivo()
 
-    # Se o usuário clicou em "Cancelar" na janela de salvar, a variável continuará vazia.
-    # Se estiver vazia, damos um 'return' para CANCELAR o início da aquisição.
+    # Se o usuario clicou em "Cancelar" na janela de salvar, a variavel continuara vazia.
+    # Se estiver vazia, damos um 'return' para cancelar o inicio da aquisicao.
     if not caminho_arquivo_1 or not caminho_arquivo_2:
-        print("Início cancelado: Nenhum local escolhido para salvar.")
+        print("Inicio cancelado: Nenhum local escolhido para salvar.")
         return
     
     try:
@@ -1423,7 +1720,6 @@ def start_acquisition():
         # MUDANCA CONSCIENTE: metadados agora em CSV (info_ensaio.csv) com 2-3 colunas.
         # Formato:
         #   campo,valor,valor2
-        # -----------------------------------------------------------------------------
         with open(caminho_arquivo_1, 'w', encoding='utf-8') as f:
             f.write("campo,valor,valor2\n")
 
@@ -1473,10 +1769,10 @@ def start_acquisition():
             f.write(f"Caminho da pasta,{caminho_pasta},\n")
 
     except Exception as e:
-        messagebox.showerror("Erro de Arquivo", f"Não foi possível gravar o arquivo de Entrada\n{e}")
+        messagebox.showerror("Erro de Arquivo", f"Nao foi possivel gravar o arquivo de Entrada\n{e}")
         return
     
-    ########## PREENCHER AS LISTAS COM AS VELOCIDADES E DURAÇÃO OBTIDAS
+    ########## PREENCHER AS LISTAS COM AS VELOCIDADES E DURACAO OBTIDAS
     lista_velocidades_digitadas = []
     lista_duracao = []
     # Percorre os 11 itens da interface
@@ -1485,7 +1781,7 @@ def start_acquisition():
         # --- PARTE DA VELOCIDADE (Vem de um Entry -> usa .get()) ---
         texto_vel = lista_entries_velocidade[i].get().strip()
         
-        # --- PARTE DA DURAÇÃO (Vem de um Label -> usa .cget("text")) ---
+        # --- PARTE DA DURACAO (Vem de um Label -> usa .cget("text")) ---
         texto_dur = lista_labels_duracao[i].cget("text").strip()
 
         # Só processa se tiver velocidade digitada E se a duração calculada for válida
@@ -1493,7 +1789,6 @@ def start_acquisition():
             try:
                 # Converte a Velocidade
                 valor_vel = float(texto_vel.replace(',', '.'))
-                
                 # Converte a Duração (que já foi calculada em minutos no Label)
                 # Se você precisar converter para segundos aqui, multiplique por 60
                 valor_dur = (float(texto_dur.replace(',', '.')) * 60)
@@ -1523,6 +1818,8 @@ def start_acquisition():
         # Monta schedule (rpm, duracao_s)
         schedule = []
         for vel_mm_s, dur_s in zip(lista_velocidades_digitadas, lista_duracao):
+            # Entrada: velocidade linear (mm/s), raio (mm), relacao mecanica.
+            # Saida: setpoint inteiro em rpm para o logger do Drive.
             rpm = orch.rpm_from_mm_s(vel_mm_s, raio_mm, RELACAO_MECANICA)
             schedule.append((rpm, dur_s))
         rpm_schedule = [rpm for rpm, _ in schedule]
@@ -1542,8 +1839,17 @@ def start_acquisition():
             "schedule_csv": caminho_schedule_csv,
         }
 
-        # Dispara os executaveis em background
-        # (repo_root = pasta do projeto; robusto para exe)
+        # Dispara os executaveis em background.
+        # start_external_run(...) recebe:
+        # - repo_root: raiz do projeto para localizar .exe.
+        # - out_paths: caminhos de saida (dlg/drive/merge/schedule).
+        # - schedule: lista [(rpm, duracao_s), ...] para o drive.
+        # - duration_s/rate_hz: janela total e taxa-alvo de amostragem.
+        # - bind_port/com_port/slave/baud/parity: parametros de comunicacao.
+        #
+        # Retorno esperado:
+        # - objeto RunState com handles de processo (dlg_proc/drive_proc)
+        #   e caminhos usados durante o ensaio.
         repo_root = orch.find_repo_root()
         global external_run_state
         try:
@@ -1591,7 +1897,9 @@ def start_acquisition():
         global timer_started
         timer_started = False
 
-        # Thread que aguarda fim e faz merge (nao bloqueia GUI)
+        # Thread que aguarda fim e faz merge (nao bloqueia GUI).
+        # orch.wait_and_merge(state_snapshot) bloqueia ate os dois processos
+        # encerrarem, e depois gera resultado_ensaio.csv.
         state_snapshot = external_run_state
         def _wait_and_merge():
             try:
@@ -1704,6 +2012,10 @@ def start_acquisition():
     # atualiza_decorrido() ja chamado em _start_timer_now()
 
 
+# pause_acquisition():
+# - Alterna entre pausado/rodando.
+# - Modo externo: envia PAUSE/RESUME via IPC para drive e dlg.
+# - Modo da versao anterior: congela contagem local e controle analogico.
 def pause_acquisition():
     global is_paused, start_time, tempo_pause_inicio, running, external_run_state
     
@@ -1718,6 +2030,9 @@ def pause_acquisition():
 
         if not is_paused:
             try:
+                # pause_run(state) envia IPC:
+                #   drive_proc <- "PAUSE\\n"
+                #   dlg_proc   <- "PAUSE\\n"
                 orch.pause_run(external_run_state)
             except Exception as e:
                 messagebox.showerror("Erro ao pausar", f"Falha ao pausar ensaio externo.\n\n{e}")
@@ -1734,6 +2049,9 @@ def pause_acquisition():
             return
 
         try:
+            # resume_run(state) envia IPC:
+            #   dlg_proc   <- "RESUME\\n"
+            #   drive_proc <- "RESUME\\n"
             orch.resume_run(external_run_state)
         except Exception as e:
             messagebox.showerror("Erro ao retomar", f"Falha ao retomar ensaio externo.\n\n{e}")
@@ -1778,6 +2096,10 @@ def pause_acquisition():
         atualiza_decorrido()
 
 
+# stop_acquisition():
+# - Solicita confirmacao do usuario e encerra ensaio em seguranca.
+# - Modo externo: envia STOP e aguarda fechamento/merge final.
+# - Modo da versao anterior: zera tensao e limpa buffers/plots.
 def stop_acquisition():
     global running, is_paused, ip, timer_started, tempo_pause_inicio
     global graSamps, sampsTimestamp, p_strokes, p_atrito_ef, p_atrito_max, p_atrito_min, p_coluna_velocidade
@@ -1799,6 +2121,8 @@ def stop_acquisition():
                 external_run_state = None
                 def _stop_external():
                     try:
+                        # stop_run(state) tenta parada graciosa por IPC ("STOP"),
+                        # aguarda flush/fechamento e so entao usa terminate/kill.
                         orch.stop_run(state_snapshot)
                     except Exception as e:
                         log_msg(f"Erro ao solicitar parada externa: {e}")
@@ -1853,6 +2177,10 @@ def stop_acquisition():
 # Nicolas
 # update1(frame): Limpa o ax1, verifica os canais ativos, processa o tempo baseada na frequência e plota o gráfico (ax1.plot) da temperatura.
 # Ela é chamada automaticamente e repetidamente pelo Matplotlib através da ferramenta de animação no fim do código.
+# update1(frame):
+# - Renderiza grafico 1 (temperatura) usando CH2 do DLG.
+# - Aplica regra de janela deslizante em minutos (sampsTimestamp).
+# - Respeita configuracao de eixo Y automatico/manual.
 def update1(frame):
     # Acessa a lista de tempos reais
     global sampsTimestamp 
@@ -1877,7 +2205,7 @@ def update1(frame):
     def plotar_canal(idx, cor, label):
         if len(graSamps) > idx:
             raw_dados = graSamps[idx]
-            # Garante que não vai acessar índices inexistentes
+            # Garante que nao vai acessar indices inexistentes
             tam = min(len(sampsTimestamp), len(raw_dados))
             
             if tam > 0:
@@ -1923,6 +2251,10 @@ def update1(frame):
     if not y1_auto:
         ax1.set_ylim(y1_min, y1_max)
 
+# update2(frame):
+# - Renderiza grafico 2 (forca/atrito) usando CH1 do DLG.
+# - Usa mesmo eixo temporal do grafico 1 para alinhamento visual.
+# - Respeita configuracao de eixo Y automatico/manual.
 def update2(frame):
     global sampsTimestamp
 
@@ -1975,6 +2307,10 @@ def update2(frame):
 
 # Nicolas
 # Limpa o ax3, gerencia o segundo eixo y (ax3_twin) e plota as curvas de atrito e velocidade
+# update3(frame):
+# - Renderiza grafico 3 por stroke (coef. atrito efetivo/max/min).
+# - Mantem eixo secundario para velocidade por coluna no mesmo subplot.
+# - Opera sobre listas p_strokes/p_atrito_* alimentadas por go_p().
 def update3(frame):
     global ax3_twin
     if not _is_running(): 
@@ -2011,11 +2347,11 @@ def update3(frame):
 
         # Ajusta Eixo X para seguir os Strokes
         # Faz o gráfico acompanhar o crescimento dos strokes.
-        # Define o mínimo como 0 e o máximo como o último stroke registrado.
+        # Define o minimo como 0 e o maximo como o ultimo stroke registrado.
         if p_strokes:
             ax3.set_xlim(0, max(p_strokes[-1], 100))
 
-    # --- CONFIGURAÇÃO VISUAL AX3 ---
+    # --- CONFIGURACAO VISUAL AX3 ---
     # Eixo y esquerdo
     ax3.set_xlabel('Strokes', fontsize=9)
     ax3.set_ylabel('Coef. Atrito [-]', fontsize=9)
@@ -2025,7 +2361,7 @@ def update3(frame):
 
     # Eixo y direito
     ax3_twin.set_ylabel('Vel', fontsize=9, color='black')
-    ax3_twin.yaxis.set_label_position("right") # Garante que o texto Vel fique na direita
+    ax3_twin.set_facecolor('white')
     ax3_twin.yaxis.tick_right()
     ax3_twin.tick_params(axis='y', labelcolor='black', labelsize=8)
 
@@ -2040,6 +2376,9 @@ def update3(frame):
 
 
 
+# get_ip():
+# - Stub da versao anterior; funcionalidade historica de leitura manual de IP.
+# - Mantido para evitar NameError em referencias antigas.
 def get_ip():
     pass
     '''
@@ -2051,6 +2390,8 @@ def get_ip():
 '''
 
 """
+# get_nome():
+# - Stub da versao anterior para compatibilidade com versoes antigas da UI.
 def get_nome():
     global nome  # Declare ip as a global variable
     nome = receive_nome_entry.get()  # Update the global variable with the entry value
@@ -2058,6 +2399,9 @@ def get_nome():
 """
 
 
+# get_aux():
+# - Le valor do spinbox de pontos e atualiza aux.
+# - aux controla quantos pontos ficam visiveis na janela dos graficos.
 def get_aux():
     global aux
     try:
@@ -2068,6 +2412,9 @@ def get_aux():
 
 
 
+# alterar_escala_tempo():
+# - Converte minutos digitados na UI para numero de amostras (aux).
+# - Formula: aux = minutos * 60 * freq.
 def alterar_escala_tempo():
     """Atualiza a escala do eixo X (min) convertendo para numero de amostras (aux)."""
     global aux
@@ -2091,6 +2438,10 @@ def alterar_escala_tempo():
     except Exception:
         messagebox.showwarning("Valor Invalido", "Escala do eixo X deve ser um numero positivo (minutos).")
 
+# abrir_config_y():
+# - Abre popup compacto para configurar eixo Y dos graficos 1 e 2.
+# - Cada grafico pode ficar em automatico ou manual (min/max).
+# - Aplica validacao numerica e redesenha canvas ao confirmar.
 def abrir_config_y():
     """Abre popup compacto para configurar eixo Y dos graficos 1 (temperatura) e 2 (forca)."""
     global y1_auto, y1_min, y1_max, y2_auto, y2_min, y2_max
@@ -2189,6 +2540,9 @@ def abrir_config_y():
 
     tkinter.Button(btns, text="Aplicar alteracoes", command=_aplicar).grid(row=0, column=0, padx=(0, 6))
     tkinter.Button(btns, text="Cancelar", command=win.destroy).grid(row=0, column=1)
+# aumenta_tensao():
+# - Stub da versao anterior de ajuste manual de tensao analogica (+0.02 V).
+# - Desativado no fluxo atual para evitar comandos indevidos.
 def aumenta_tensao():
     if not HAVE_LDTP:
         messagebox.showwarning('Indisponivel', 'Modulo LDTP nao encontrado. Controle analogico interno desativado.')
@@ -2201,6 +2555,9 @@ def aumenta_tensao():
     myModule.SetAnOutV(ip, tensao, 0, 100)
     '''
 
+# diminui_tensao():
+# - Stub da versao anterior de ajuste manual de tensao analogica (-0.02 V).
+# - Desativado no fluxo atual para evitar comandos indevidos.
 def diminui_tensao():
     if not HAVE_LDTP:
         messagebox.showwarning('Indisponivel', 'Modulo LDTP nao encontrado. Controle analogico interno desativado.')
@@ -2215,9 +2572,20 @@ def diminui_tensao():
 
 # Guia "supervisorio" desativada; mantemos stub para evitar NameError.
 def get_channels():
+    """
+    Stub da versao anterior de configuracao de canais.
+
+    Contexto:
+        Em versoes antigas havia fluxo manual de selecao de canais.
+        No fluxo atual, canais do DLG sao tratados pelo logger externo e
+        pela calibracao dedicada (CalibraDLG/CalibraDLG_UI).
+    """
     pass
 
 # variáveis globais
+# Variaveis globais historicas da UI (mantidas por compatibilidade).
+# Nota: parte dessas variaveis duplica estado definido acima; como este arquivo
+# evoluiu em camadas, ainda existem referencias legadas espalhadas no codigo.
 ip = '190.29.92.63'
 timer = 0
 tempo_total_aqc = 0
@@ -2242,6 +2610,7 @@ running = False
 is_paused = False    
 tempo_pause_inicio = 0
 
+# Buffers legados de cronograma por tensao/tempo.
 tensao_vel = []
 qte_vel = 0
 duracao = []
@@ -2477,6 +2846,9 @@ for i in range(5):
 
     label2_dir.grid_rowconfigure(i + 2, weight=0)
 
+# muda_estado_lub():
+# - Habilita/desabilita campos de material/% quando "Lubrificado" muda.
+# - Tambem aciona recalculo derivado das tabelas quando necessario.
 def muda_estado_lub():
     esta_lubrificado = lubrificado_var.get()
     
@@ -2567,6 +2939,9 @@ lbl_curso.grid(row=1, column=3, sticky="e")
 entry_curso = tkinter.Entry(labelframe1_baixo, width=10)
 entry_curso.grid(row=1, column=4, padx=5, sticky="w")
 
+# muda_estado_reciprocante():
+# - Habilita/desabilita campo de curso conforme checkbox "Reciprocating".
+# - Dispara recalc de voltas/cursos/duracao para manter UI consistente.
 def muda_estado_reciprocante():
     if reciprocante_var.get():
         chk_reciprocante.config(selectcolor="blue")
@@ -2585,6 +2960,11 @@ def muda_estado_reciprocante():
         calcular_voltas_cursos_duracao()
 
 
+# calcular_voltas_cursos_duracao(event=None):
+# - Recalcula colunas derivadas da tabela de etapas:
+#   voltas, numero de cursos e duracao estimada.
+# - Entrada vem de velocidade/distancia/curso informados pelo usuario.
+# - Atualiza labels linha a linha na tabela inferior.
 def calcular_voltas_cursos_duracao(event=None):
     """
     Atualiza as colunas Voltas/Cursos e Duracao com base em:
@@ -2944,7 +3324,7 @@ fig1 = Figure(figsize=(6.5, 1.9), dpi=100)
 ax1 = fig1.add_subplot(111)
 
 # AJUSTE DE MARGENS GRAF. 1:
-# top=0.92: Sobe o gráfico (perto do topo, pois não tem mais título)
+# top=0.92: Sobe o grafico (perto do topo, pois nao tem mais titulo)
 # bottom=0.20: Dá espaço para o eixo X não cortar
 fig1.subplots_adjust(top=0.92, bottom=0.20)
 
@@ -2989,6 +3369,7 @@ print(f"{para_salvar}")
 # salva o arquivo]
 np.savetxt('valores.txt', allSamps[para_salvar])
 """
+
 
 
 

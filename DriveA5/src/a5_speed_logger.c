@@ -1,8 +1,41 @@
-// a5_speed_logger.c
-// Headless DriveA5 speed-mode logger (position + RPM) -> CSV.
-// - Reads a schedule CSV (rpm,duration_s) and applies RPM segments.
-// - Logs fixed number of rows (duration * rate), inserts NULL on read error.
-// - Waits for START on stdin when --ipc is used.
+/*
+a5_speed_logger.c
+-----------------
+Logger sem UI para ensaios em modo velocidade no Drive A5.
+
+Objetivo geral:
+- Executar um schedule de segmentos (rpm,duration_s) e registrar telemetria.
+- Coletar posicao + rpm em taxa fixa, com slots perdidos marcados como NULL.
+- Integrar com supervisorio via IPC textual (START/PAUSE/RESUME/STOP).
+
+Fluxo principal:
+1) Parse de argumentos e carregamento do schedule CSV.
+2) Setup opcional do drive para modo velocidade (P06-03 como fonte unica).
+3) Espera START (quando --ipc) e entra no loop de segmentos com rampa.
+4) Leitura periodica de posicao/rpm por deadline real (QPC), sem drift.
+5) STOP reforcado no fim/interrupcao e fechamento do CSV.
+
+Variaveis/configuracoes principais:
+- REG_*: registradores usados para controle de velocidade e telemetria.
+- WORD_RUN/WORD_RDY: palavras Modbus para RUN e parada imediata.
+- CMD_* e FAST_*: timeouts para escrita/comando e leitura rapida.
+- RAMP_TIME_S: duracao da rampa linear entre setpoints.
+- seg_t: segmento de schedule (rpm + duracao + tempo final acumulado).
+- rpm_ramp_t: estado da rampa ativa de transicao de velocidade.
+
+Resumo de funcoes:
+- set_timeouts_us/trim/make_port_path: utilitarios de IO serial e texto.
+- read_*: leitura de registradores com fallback/cache de modo FC03/FC04.
+- read_s32: leitura 32-bit respeitando ordem de palavras.
+- setup_speed_mode: aplica parametros para estabilizar modo velocidade.
+- cmd_run/cmd_stop/cmd_vdi_stop/cmd_rpm: comandos de atuacao no drive.
+- qpc_now_ticks/qpc_freq_ticks: temporizacao de alta precisao para deadlines.
+- stop_drive_now: rotina de parada segura com rampa curta e reforco de STOP.
+- ipc_poll_command: parse de comandos recebidos por stdin.
+- round_to_int/ramp_begin/ramp_eval: utilitarios da logica de rampa.
+- parse_two_numbers/load_schedule: parse de linhas do schedule.
+- print_usage/main: entrada principal do executavel.
+*/
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,7 +61,7 @@ enum {
     REG_P06_02  = 0x0602, // speed command source
     REG_P0C_09  = 0x0C09, // comm VDI enable
     REG_P31_00  = 0x3100, // VDI virtual
-    REG_P0B_07  = 0x0B07, // P0B-07 (abs pos, 32-bit) - legacy
+    REG_P0B_07  = 0x0B07, // P0B-07 (abs pos, 32-bit) - historical naming
     REG_P0B_09  = 0x0B09, // P0B-09 (pos per revolution, 0..65535)
     REG_P0B_00  = 0x0B00, // P0B-00 (actual motor speed, rpm)
     REG_P05_02  = 0x0502, // P05-02 (command units per revolution)

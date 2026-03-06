@@ -1,16 +1,29 @@
 """
 orchestrator_runtime.py
 -----------------------
-Small, focused orchestrator used by novo_tribometro.py.
+Orquestrador de execucao usado pelo novo_tribometro.py.
 
-Goals:
-- Keep novo_tribometro.py changes minimal.
-- Start/stop headless C loggers (DLG + Drive) and merge outputs.
-- Create deterministic file structure in Desktop\\Repositorio.
+Objetivo geral:
+- Concentrar neste modulo toda a logica de runtime do ensaio (processos,
+  arquivos e sincronizacao), para manter a interface grafica mais limpa.
 
-Important:
-- This module avoids any UI work. It only manages files/processes.
-- All paths are explicit to keep behavior predictable and debuggable.
+Objetivos praticos:
+- Iniciar e parar os executaveis C em modo sem interface grafica (DLG + Drive).
+- Controlar os processos por IPC de linha unica (stdin/stdout), com comandos
+  como START, PAUSE, RESUME e STOP.
+- Gerar estrutura de saida previsivel (pasta + CSVs) para facilitar auditoria.
+- Rodar merge final dos logs e entregar um CSV consolidado ao supervisorio.
+
+Escopo:
+- Resolver caminhos de executaveis.
+- Criar e validar caminhos de saida.
+- Ligar/desligar subprocessos externos com parametros explicitos.
+- Aplicar alternativa de merge em Python quando o merge em C falhar.
+
+Fora de escopo:
+- Nao desenha UI.
+- Nao atualiza widgets Tkinter.
+- Nao implementa calibracao nem controle detalhado de hardware.
 """
 
 import csv
@@ -26,7 +39,7 @@ from typing import List, Tuple, Optional
 
 
 # -------------------------------
-# Configuration defaults (can be overridden by caller)
+# Configuracoes padrao (podem ser sobrescritas por quem chama o modulo)
 # -------------------------------
 DEFAULT_RATE_HZ = 50.0
 DEFAULT_DLG_IP = "192.168.1.100"
@@ -37,29 +50,38 @@ DEFAULT_BIND_PORT = 41402
 
 @dataclass
 class RunState:
-    # Process handles
+    # Handles dos subprocessos em execucao.
     dlg_proc: subprocess.Popen
     drive_proc: subprocess.Popen
-    # File paths
+    # Caminhos de arquivos de saida do ensaio.
     dlg_csv: str
     drive_csv: str
     merge_csv: str
     schedule_csv: str
-    # Executables (for debugging)
+    # Caminhos dos executaveis usados (util para diagnostico em log).
     dlg_exe: str
     drive_exe: str
     merge_exe: str
-    # Run settings
+    # Parametros de execucao aplicados neste ensaio.
     duration_s: float
     rate_hz: float
+    # Estado logico de pausa observado pelo orquestrador.
     paused: bool = False
 
 
 def sanitize_folder_name(name: str) -> str:
     """
-    Windows-safe folder name:
-    - replace reserved characters with '_'
-    - trim trailing dots/spaces (Windows disallows)
+    Normaliza um nome de pasta para ser aceito no Windows.
+
+    Regras aplicadas:
+    - Substitui caracteres reservados por "_".
+    - Remove ponto/espaco no final (nao permitido no Windows).
+
+    Parametros:
+        name: nome sugerido para pasta.
+
+    Retorna:
+        Nome seguro para criacao de diretorio.
     """
     invalid = '<>:"/\\\\|?*'
     out = ''.join('_' if c in invalid else c for c in name)
@@ -69,8 +91,23 @@ def sanitize_folder_name(name: str) -> str:
 
 def build_output_paths(base_dir: str, nome_ensaio: str, estudo: str) -> dict:
     """
-    Build the standardized output folder and file names.
-    Raises FileExistsError if the folder already exists.
+    Monta a estrutura padrao de saida para um ensaio.
+
+    Fluxo:
+    1) Gera nome de pasta com sanitize_folder_name().
+    2) Cria a pasta do ensaio.
+    3) Retorna caminhos padrao dos CSVs usados no pipeline.
+
+    Parametros:
+        base_dir: pasta base (ex.: Desktop\\Repositorio).
+        nome_ensaio: nome informado no formulario.
+        estudo: identificador de estudo/repeticao.
+
+    Retorna:
+        dict com caminhos: folder, info_csv, dlg_csv, drive_csv, merge_csv, schedule_csv.
+
+    Excecoes:
+        FileExistsError: quando a pasta ja existe (evita sobrescrever ensaio).
     """
     folder_name = sanitize_folder_name(f"{nome_ensaio} - {estudo}")
     folder_path = os.path.join(base_dir, folder_name)
@@ -90,7 +127,15 @@ def build_output_paths(base_dir: str, nome_ensaio: str, estudo: str) -> dict:
 
 def write_schedule_csv(path: str, schedule: List[Tuple[int, float]]) -> None:
     """
-    schedule: list of (rpm, duration_s)
+    Escreve o cronograma do Drive em CSV.
+
+    Formato esperado:
+    - cabecalho: rpm,duration_s
+    - linhas: (rpm, duracao_em_segundos)
+
+    Parametros:
+        path: caminho de saida do schedule.csv.
+        schedule: lista de tuplas (rpm, duration_s).
     """
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -101,22 +146,46 @@ def write_schedule_csv(path: str, schedule: List[Tuple[int, float]]) -> None:
 
 def rpm_from_mm_s(vel_mm_s: float, raio_mm: float, relacao: float = 1.0) -> int:
     """
-    Convert linear speed (mm/s) to RPM using radius in mm.
-    rpm = (i * v * 60) / (2*pi*raio), where i = relacao.
+    Converte velocidade linear (mm/s) para RPM.
+
+    Formula:
+        rpm = (i * v * 60) / (2*pi*raio)
+    onde:
+        i = relacao mecanica
+        v = velocidade linear em mm/s
+        raio = raio em mm
+
+    Parametros:
+        vel_mm_s: velocidade linear.
+        raio_mm: raio do movimento.
+        relacao: relacao mecanica (i).
+
+    Retorna:
+        RPM inteiro arredondado para uso no Drive.
     """
     if raio_mm <= 0 or relacao <= 0:
         return 0
-    # For current tribometer operation we command speed magnitude only.
-    # Direction reversals are handled mechanically/sequence-wise, not by negative RPM setpoints.
+    # No fluxo atual, enviamos somente magnitude de velocidade.
+    # Inversao de sentido e tratada pela sequencia mecanica, nao por RPM negativo.
     rpm = abs((relacao * vel_mm_s * 60.0) / (2.0 * 3.141592653589793 * raio_mm))
-    # Round to nearest int (Drive expects int16)
+    # Arredonda para inteiro mais proximo (Drive recebe setpoint inteiro).
     return int(rpm + 0.5 if rpm >= 0 else rpm - 0.5)
 
 
 def find_exe(candidates: List[str], fallback_name: Optional[str] = None) -> Optional[str]:
     """
-    Return the first existing executable among candidates,
-    otherwise try PATH (fallback_name).
+    Procura um executavel em uma lista de caminhos candidatos.
+
+    Fluxo:
+    1) Retorna o primeiro caminho existente em `candidates`.
+    2) Se nao achar e houver `fallback_name`, tenta localizar via PATH.
+
+    Parametros:
+        candidates: lista de caminhos absolutos/relativos esperados.
+        fallback_name: nome do executavel para busca em PATH.
+
+    Retorna:
+        Caminho encontrado ou None.
     """
     for c in candidates:
         if c and os.path.exists(c):
@@ -128,8 +197,20 @@ def find_exe(candidates: List[str], fallback_name: Optional[str] = None) -> Opti
 
 def find_repo_root(start: Optional[Path] = None) -> str:
     """
-    Try to locate the repo root by walking upwards and finding DLG4000 + DriveA5.
-    This is robust for both source runs and PyInstaller (sys.frozen).
+    Localiza a raiz do repositorio subindo diretorios.
+
+    Criterio de deteccao:
+    - Diretorio que contenha simultaneamente `DLG4000` e `DriveA5`.
+
+    Observacao:
+    - Funciona tanto em execucao por fonte (.py) quanto em executavel
+      empacotado (PyInstaller / sys.frozen).
+
+    Parametros:
+        start: caminho inicial opcional para iniciar a busca.
+
+    Retorna:
+        Caminho da raiz do repo, ou cwd como alternativa.
     """
     if start is None:
         if getattr(sys, "frozen", False):
@@ -142,14 +223,26 @@ def find_repo_root(start: Optional[Path] = None) -> str:
     for parent in [start] + list(start.parents):
         if (parent / "DLG4000").exists() and (parent / "DriveA5").exists():
             return str(parent)
-    # Fallback to current working directory
+    # Alternativa: usa o diretorio atual para evitar excecao.
     return os.getcwd()
 
 
 def check_executables(repo_root: str) -> dict:
     """
-    Locate required executables and report missing ones.
-    Returns dict with keys: dlg_exe, drive_exe, merge_exe, missing (list).
+    Encontra os executaveis obrigatorios do pipeline externo.
+
+    Executaveis esperados:
+    - dlg_logger_ipc.exe
+    - a5_speed_logger.exe
+    - merge_logs.exe
+
+    Parametros:
+        repo_root: raiz do repositorio.
+
+    Retorna:
+        dict com:
+        - dlg_exe, drive_exe, merge_exe: caminhos resolvidos (ou None)
+        - missing: lista de descricoes dos executaveis nao encontrados
     """
     dlg_exe = find_exe([
         os.path.join(repo_root, "DLG4000", "bin", "dlg_logger_ipc.exe"),
@@ -184,7 +277,13 @@ def check_executables(repo_root: str) -> dict:
 
 def find_calibra_ui_exe(repo_root: str = "") -> Optional[str]:
     """
-    Locate CalibraDLG_UI executable for "Configurar canais".
+    Localiza o executavel CalibraDLG_UI.exe para o botao "Configurar canais".
+
+    Parametros:
+        repo_root: raiz do repositorio (opcional).
+
+    Retorna:
+        Caminho do executavel ou None.
     """
     candidates = []
     if repo_root:
@@ -213,13 +312,39 @@ def start_external_run(
     show_console: bool = False,
 ) -> RunState:
     """
-    Launch DLG logger + Drive logger (headless).
-    - Uses --ipc: each process prints READY and waits for START on stdin.
-    - Writes schedule.csv before launching.
+    Inicia o ensaio em modo externo (executaveis C sem interface).
+
+    Fluxo resumido:
+    1) Escreve schedule.csv.
+    2) Encontra executaveis obrigatorios.
+    3) Sobe logger DLG e logger Drive com --ipc.
+    4) Aguarda READY.
+    5) Envia START no DLG.
+    6) Aguarda DLG sinalizar primeira amostra valida (DATA_OK).
+    7) Envia START no Drive.
+
+    A ordem DLG -> Drive reduz risco de o motor iniciar sem aquisicao valida.
+    Ocasiando menos percas de dados por aquisicoes com problemas.
+    Parametros:
+        repo_root: raiz do repositorio para localizar .exe.
+        out_paths: caminhos de saida (dlg_csv, drive_csv, merge_csv, schedule_csv).
+        schedule: lista de etapas (rpm, duracao_s).
+        duration_s: duracao total do ensaio.
+        rate_hz: taxa alvo de aquisicao.
+        dlg_ip/dlg_port: destino UDP do DLG.
+        bind_ip/bind_port: bind local para recebimento UDP.
+        com_port/slave_id/baud/parity: parametros seriais do Drive.
+        show_console: quando False, tenta ocultar janela de console no Windows.
+
+    Retorna:
+        RunState com handles de processo, caminhos e parametros da execucao.
+
+    Excecoes:
+        FileNotFoundError: quando algum executavel obrigatorio nao e encontrado.
     """
     write_schedule_csv(out_paths["schedule_csv"], schedule)
 
-    # Locate executables (relative to repo root)
+    # Encontra executaveis a partir da raiz do repositorio.
     if not repo_root:
         repo_root = find_repo_root()
     exe_info = check_executables(repo_root)
@@ -235,7 +360,7 @@ def start_external_run(
     if not show_console and hasattr(subprocess, "CREATE_NO_WINDOW"):
         creationflags = subprocess.CREATE_NO_WINDOW
 
-    # Launch DLG logger (headless)
+    # Sobe logger do DLG em modo IPC (aguarda START no stdin).
     dlg_cmd = [
         dlg_exe,
         "--out", out_paths["dlg_csv"],
@@ -256,7 +381,7 @@ def start_external_run(
         creationflags=creationflags,
     )
 
-    # Launch Drive logger (headless)
+    # Sobe logger do Drive em modo IPC (aguarda START no stdin).
     drive_cmd = [
         drive_exe,
         "--port", com_port,
@@ -279,11 +404,13 @@ def start_external_run(
         creationflags=creationflags,
     )
 
-    # Wait for READY (best-effort, short timeout)
+    # READY e melhor esforco: evita deadlock se o logger nao emitir a linha.
     _wait_ready(dlg_proc, "DLG")
     _wait_ready(drive_proc, "Drive")
 
-    # Start DLG first, wait for first data, then start Drive
+    # Sequencia de start:
+    # 1) DLG inicia e confirma primeira amostra.
+    # 2) Drive inicia depois (sincronismo mais confiavel).
     _send_start(dlg_proc)
     _wait_data_ready(dlg_proc, timeout_s=6.0)
     _send_start(drive_proc)
@@ -305,8 +432,20 @@ def start_external_run(
 
 def wait_and_merge(state: RunState) -> int:
     """
-    Wait for both loggers to finish and run merge tool.
-    Returns merge exit code.
+    Aguarda termino dos dois loggers e executa o merge.
+
+    Fluxo:
+    1) Espera DLG encerrar.
+    2) Espera Drive encerrar.
+    3) Tenta merge em C (merge_logs.exe).
+    4) Se merge em C falhar ou nao gerar arquivo, aplica alternativa em Python.
+
+    Parametros:
+        state: estado retornado por start_external_run().
+
+    Retorna:
+        Codigo de retorno do merge.
+        - Quando alternativa Python e usado com sucesso, retorna 0.
     """
     state.dlg_proc.wait()
     state.drive_proc.wait()
@@ -323,7 +462,7 @@ def wait_and_merge(state: RunState) -> int:
     except Exception:
         merge_rc = -1
 
-    # Safety net: if C merge failed or output is missing, generate merge in Python.
+    # Rede de seguranca: se merge em C falhar, gera resultado em Python.
     if merge_rc != 0 or not os.path.exists(state.merge_csv):
         _merge_csv_fallback(state.dlg_csv, state.drive_csv, state.merge_csv)
         return 0
@@ -333,9 +472,19 @@ def wait_and_merge(state: RunState) -> int:
 
 def _merge_csv_fallback(dlg_csv: str, drive_csv: str, out_csv: str) -> None:
     """
-    Fallback merge implemented in Python.
-    Keeps output schema compatible with merge_logs.c:
+    Merge de alternativa implementado em Python.
+
+    Objetivo:
+    - Manter o pipeline operacional mesmo sem merge_logs.exe.
+    - Preservar a estrutura de colunas esperada no resultado final.
+
+    Estrutura de saida:
       idx,t_s,ch1..ch8,pos,rpm,dlg_err,drive_pos_err,drive_rpm_err
+
+    Regras:
+    - Faz merge por indice de linha (zip_longest).
+    - Onde faltar dado, escreve "NULL" nos campos de medicao.
+    - Campos de erro ausentes recebem "1" como alternativa conservadora.
     """
     with open(dlg_csv, "r", newline="", encoding="utf-8") as fdlg, \
          open(drive_csv, "r", newline="", encoding="utf-8") as fdrv, \
@@ -344,7 +493,7 @@ def _merge_csv_fallback(dlg_csv: str, drive_csv: str, out_csv: str) -> None:
         rd_drv = csv.reader(fdrv)
         w = csv.writer(fout)
 
-        # skip headers
+        # Ignora cabecalhos dos dois arquivos de entrada.
         next(rd_dlg, None)
         next(rd_drv, None)
 
@@ -360,7 +509,8 @@ def _merge_csv_fallback(dlg_csv: str, drive_csv: str, out_csv: str) -> None:
 
             ch = []
             for i in range(8):
-                col = 3 + i  # ch1 starts at col 3 in dlg.csv (0-based)
+                # Em dlg.csv, ch1 inicia na coluna 3 (indice base 0).
+                col = 3 + i
                 ch.append(dlg[col] if len(dlg) > col and dlg[col] else "NULL")
 
             pos = drv[3] if len(drv) > 3 and drv[3] else "NULL"
@@ -375,24 +525,32 @@ def _merge_csv_fallback(dlg_csv: str, drive_csv: str, out_csv: str) -> None:
 
 def stop_run(state: Optional[RunState]) -> None:
     """
-    Stop both processes with a graceful STOP request first, then terminate fallback.
+    Para os dois processos com prioridade para encerramento gracioso.
+
+    Estrategia:
+    1) Envia STOP via IPC para DLG e Drive (melhor esforco).
+    2) Aguarda curto periodo para flush/fechamento limpo.
+    3) Se ainda vivos, aplica terminate() e depois kill() como ultimo recurso.
+
+    Parametros:
+        state: estado do ensaio em execucao.
     """
     if not state:
         return
     procs = (state.dlg_proc, state.drive_proc)
 
-    # 1) Best-effort graceful stop (loggers running with --ipc can read STOP from stdin).
+    # 1) Encerramento gracioso via IPC.
     for p in procs:
         _send_ipc(p, "STOP")
 
-    # 2) Give both loggers time to flush/close after STOP (partial run merge safety).
+    # 2) Aguarda ambos fecharem para reduzir risco de arquivo parcial.
     deadline = time.time() + 6.0
     while time.time() < deadline:
         if all((not p) or (p.poll() is not None) for p in procs):
             return
         time.sleep(0.05)
 
-    # 3) Fallback terminate/kill.
+    # 3) Alternativa forcada.
     for p in procs:
         if p and p.poll() is None:
             try:
@@ -407,8 +565,16 @@ def stop_run(state: Optional[RunState]) -> None:
 
 def _wait_ready(proc: subprocess.Popen, tag: str, timeout_s: float = 5.0) -> None:
     """
-    Best-effort wait for 'READY' line from the logger.
-    If nothing arrives, we continue (to avoid deadlock).
+    Aguarda linha "READY" emitida pelo logger (melhor esforco).
+
+    Importante:
+    - Se READY nao chegar no timeout, a funcao nao levanta excecao.
+    - O objetivo e evitar deadlock em casos de loggers silenciosos.
+
+    Parametros:
+        proc: processo alvo.
+        tag: identificador textual (mantido para logs futuros).
+        timeout_s: tempo maximo de espera.
     """
     if not proc or not proc.stdout:
         return
@@ -428,8 +594,14 @@ def _send_start(proc: subprocess.Popen) -> None:
 
 def _send_ipc(proc: Optional[subprocess.Popen], command: str) -> bool:
     """
-    Best-effort single-line IPC command sender.
-    Returns True when the write succeeds.
+    Envia comando IPC de uma linha para o processo.
+
+    Parametros:
+        proc: processo alvo (com stdin aberto).
+        command: comando textual sem quebra de linha.
+
+    Retorna:
+        True quando o envio e flush foram bem-sucedidos; False caso contrario.
     """
     if not proc or proc.poll() is not None or not proc.stdin:
         return False
@@ -443,8 +615,11 @@ def _send_ipc(proc: Optional[subprocess.Popen], command: str) -> bool:
 
 def pause_run(state: Optional[RunState]) -> None:
     """
-    Pause both loggers.
-    Drive is paused first so motor stop is requested immediately.
+    Pausa os dois loggers.
+
+    Ordem adotada:
+    - Drive primeiro, para solicitar desaceleracao/parada do motor o quanto antes.
+    - DLG depois, para acompanhar a pausa do pipeline.
     """
     if not state:
         return
@@ -455,8 +630,11 @@ def pause_run(state: Optional[RunState]) -> None:
 
 def resume_run(state: Optional[RunState]) -> None:
     """
-    Resume both loggers.
-    DLG resumes first to keep timeline alignment with merged data.
+    Retoma os dois loggers apos pausa.
+
+    Ordem adotada:
+    - DLG primeiro para preservar alinhamento temporal do merge.
+    - Drive depois para retomar movimento.
     """
     if not state:
         return
@@ -467,9 +645,18 @@ def resume_run(state: Optional[RunState]) -> None:
 
 def _wait_data_ready(proc: subprocess.Popen, timeout_s: float = 5.0) -> bool:
     """
-    Wait for DLG logger to confirm first data sample.
-    Expected lines: DATA_OK or DATA_TIMEOUT.
-    Returns True if DATA_OK, False otherwise.
+    Aguarda confirmacao de primeira amostra do logger DLG.
+
+    Linhas esperadas no stdout:
+    - DATA_OK: primeira amostra valida recebida.
+    - DATA_TIMEOUT: nao recebeu amostra no tempo interno do logger.
+
+    Parametros:
+        proc: processo do logger DLG.
+        timeout_s: tempo maximo de espera.
+
+    Retorna:
+        True se recebeu DATA_OK; False em timeout/falha.
     """
     if not proc or not proc.stdout:
         return False

@@ -1,0 +1,723 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [ 5 0 R 7 0 R 9 0 R 11 0 R 13 0 R 15 0 R 17 0 R ] /Count 7 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Length 2502 >>
+stream
+BT
+/F1 10 Tf
+54 732 Td
+(Guia de Integracao: Supervisorio e Orchestrator Runtime) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Arquivo principal desta documentacao:) Tj
+0 -14 Td
+(- `Supervisorio/orchestrator_runtime.py`) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Arquivo que consome essa API:) Tj
+0 -14 Td
+(- `Supervisorio/novo_tribometro.py`) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Para que este documento existe) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Este documento serve para orientar manutencao do supervisorio no modo externo \(pipeline com) Tj
+0 -14 Td
+(executaveis C\).) Tj
+0 -14 Td
+(A ideia nao e explicar Python basico, e sim deixar claro como o sistema foi dividido, como os) Tj
+0 -14 Td
+(modulos se comunicam e o que pode quebrar quando alguem altera a integracao.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Quando abrir este documento:) Tj
+0 -14 Td
+(- Quando for alterar `novo_tribometro.py` e precisar entender a fronteira com o orchestrator.) Tj
+0 -14 Td
+(- Quando houver falha para iniciar, pausar, retomar, parar ou gerar o merge final.) Tj
+0 -14 Td
+(- Quando for mudar caminhos de executaveis, formato de CSV ou protocolo IPC.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Contexto geral do sistema) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(No projeto atual, o supervisorio nao conversa direto com hardware no fluxo principal. Ele) Tj
+0 -14 Td
+(delega essa parte para executaveis C:) Tj
+0 -14 Td
+(- `dlg_logger_ipc.exe` \(DLG\)) Tj
+0 -14 Td
+(- `a5_speed_logger.exe` \(Drive\)) Tj
+0 -14 Td
+(- `merge_logs.exe` \(merge final\)) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(O `novo_tribometro.py` continua sendo o dono da experiencia de uso \(UI, validacoes, estado) Tj
+0 -14 Td
+(visual, mensagens\), mas o controle operacional do ensaio externo fica no) Tj
+0 -14 Td
+(`orchestrator_runtime.py`.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Essa divisao foi feita para manter a interface mais simples e reduzir risco de regressao quando) Tj
+0 -14 Td
+(mudar detalhes de processo, IPC e merge.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Como supervisorio e orchestrator se comunicam) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(A comunicacao entre os dois e chamada de funcao Python \(import de modulo\), nao rede.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(No `novo_tribometro.py`, as chamadas principais sao:) Tj
+0 -14 Td
+(- `orch.find_repo_root\(\)`) Tj
+0 -14 Td
+(- `orch.check_executables\(...\)`) Tj
+0 -14 Td
+(- `orch.rpm_from_mm_s\(...\)`) Tj
+0 -14 Td
+(- `orch.start_external_run\(...\)`) Tj
+0 -14 Td
+(- `orch.pause_run\(...\)`) Tj
+0 -14 Td
+(- `orch.resume_run\(...\)`) Tj
+0 -14 Td
+(- `orch.stop_run\(...\)`) Tj
+0 -14 Td
+(- `orch.wait_and_merge\(...\)`) Tj
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 4 0 R >>
+endobj
+6 0 obj
+<< /Length 2246 >>
+stream
+BT
+/F1 10 Tf
+54 732 Td
+() Tj
+0 -14 Td
+(Em termos praticos:) Tj
+0 -14 Td
+(- O supervisorio prepara parametros e chama o orchestrator.) Tj
+0 -14 Td
+(- O orchestrator executa subprocessos, envia comandos IPC e devolve estado de execucao.) Tj
+0 -14 Td
+(- O supervisorio usa esse estado para controlar botoes, labels e fluxo do ensaio.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Tecnologia usada e por que) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(1\) `subprocess` \(Python\)) Tj
+0 -14 Td
+(Usado para iniciar os executaveis C e manter handles de processo.) Tj
+0 -14 Td
+(Sem isso, o supervisorio nao conseguiria enviar `START/PAUSE/RESUME/STOP` para os loggers.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(2\) IPC por linha \(`stdin/stdout`\)) Tj
+0 -14 Td
+(Comandos sao texto simples:) Tj
+0 -14 Td
+(- `START`) Tj
+0 -14 Td
+(- `PAUSE`) Tj
+0 -14 Td
+(- `RESUME`) Tj
+0 -14 Td
+(- `STOP`) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Esse protocolo foi escolhido por simplicidade operacional e por ser facil de depurar em log.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(3\) CSV) Tj
+0 -14 Td
+(Arquivos intermediarios e resultado final sao CSV:) Tj
+0 -14 Td
+(- `schedule.csv`) Tj
+0 -14 Td
+(- `dlg.csv`) Tj
+0 -14 Td
+(- `drive.csv`) Tj
+0 -14 Td
+(- `resultado_ensaio.csv`) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(CSV foi mantido para facilitar rastreabilidade, suporte e comparacao entre ensaios.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Fluxo do ensaio \(modo externo\)) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Inicio) Tj
+0 -14 Td
+(1. Supervisorio valida formulario e monta o cronograma.) Tj
+0 -14 Td
+(2. Supervisorio converte mm/s para RPM com `rpm_from_mm_s`.) Tj
+0 -14 Td
+(3. Supervisorio chama `start_external_run`.) Tj
+0 -14 Td
+(4. Orchestrator grava `schedule.csv`.) Tj
+0 -14 Td
+(5. Orchestrator encontra executaveis obrigatorios.) Tj
+0 -14 Td
+(6. Orchestrator sobe DLG e Drive em `--ipc`.) Tj
+0 -14 Td
+(7. Orchestrator aguarda `READY` \(melhor esforco\).) Tj
+0 -14 Td
+(8. Orchestrator envia `START` no DLG.) Tj
+0 -14 Td
+(9. Orchestrator espera `DATA_OK` do DLG.) Tj
+0 -14 Td
+(10. Orchestrator envia `START` no Drive.) Tj
+0 -14 Td
+(11. Orchestrator retorna `RunState` para o supervisorio.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(A ordem DLG antes de Drive existe para reduzir risco de iniciar movimento sem aquisicao valida.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Pausa e retomada) Tj
+ET
+endstream
+endobj
+7 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 6 0 R >>
+endobj
+8 0 obj
+<< /Length 2267 >>
+stream
+BT
+/F1 10 Tf
+54 732 Td
+(- `pause_run\(state\)` pausa Drive primeiro e DLG depois.) Tj
+0 -14 Td
+(- `resume_run\(state\)` retoma DLG primeiro e Drive depois.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Essa ordem prioriza seguranca no pause e alinhamento temporal no resume.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Parada) Tj
+0 -14 Td
+(- `stop_run\(state\)` tenta parada graciosa via IPC \(`STOP`\).) Tj
+0 -14 Td
+(- Se os processos nao fecharem no prazo, aplica `terminate\(\)` e `kill\(\)` como ultimo recurso.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Fim e merge) Tj
+0 -14 Td
+(- `wait_and_merge\(state\)` espera os dois processos terminarem.) Tj
+0 -14 Td
+(- Tenta merge em C \(`merge_logs.exe`\).) Tj
+0 -14 Td
+(- Se falhar ou nao gerar arquivo, usa fallback Python \(`_merge_csv_fallback`\).) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Assinatura de origem do merge) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Para depuracao, o pipeline agora grava um arquivo auxiliar ao lado do resultado final:) Tj
+0 -14 Td
+(- `<resultado_ensaio.csv>.merge_source.txt`) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Conteudo esperado:) Tj
+0 -14 Td
+(- `merge_source=merge_logs_c` quando merge em C foi usado.) Tj
+0 -14 Td
+(- `merge_source=python_fallback` quando fallback Python foi usado.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Esse arquivo existe para eliminar ambiguidade durante testes e manutencao.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Contratos que precisam ser preservados) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(`schedule`) Tj
+0 -14 Td
+(Formato esperado:) Tj
+0 -14 Td
+(- tipo: `List[Tuple[int, float]]`) Tj
+0 -14 Td
+(- conteudo: `\(rpm, duracao_s\)`) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Se mudar esse formato, o logger do Drive pode deixar de interpretar etapas corretamente.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(`out_paths`) Tj
+0 -14 Td
+(Chaves esperadas:) Tj
+0 -14 Td
+(- `dlg_csv`) Tj
+0 -14 Td
+(- `drive_csv`) Tj
+0 -14 Td
+(- `merge_csv`) Tj
+0 -14 Td
+(- `schedule_csv`) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Se renomear chave sem atualizar orchestrator, o start externo quebra por `KeyError` ou caminho) Tj
+0 -14 Td
+(invalido.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(`RunState`) Tj
+0 -14 Td
+(`RunState` e o contrato de estado entre supervisorio e orchestrator.) Tj
+0 -14 Td
+(Ele guarda processos, caminhos e parametros da execucao.) Tj
+0 -14 Td
+(Sem ele, nao ha como pausar/retomar/parar corretamente o ensaio externo.) Tj
+ET
+endstream
+endobj
+9 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 8 0 R >>
+endobj
+10 0 obj
+<< /Length 2161 >>
+stream
+BT
+/F1 10 Tf
+54 732 Td
+() Tj
+0 -14 Td
+(Catalogo de funcoes: o que faz e para que serve na pratica) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(A lista abaixo funciona como referencia de manutencao para quem mexe no supervisorio.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(`sanitize_folder_name\(name\)`) Tj
+0 -14 Td
+(O que faz:) Tj
+0 -14 Td
+(- Limpa nome de pasta para regras do Windows.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Para que serve na pratica:) Tj
+0 -14 Td
+(- Evita erro de criacao de diretorio quando usuario digita caracteres invalidos no nome do) Tj
+0 -14 Td
+(  ensaio.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(`build_output_paths\(base_dir, nome_ensaio, estudo\)`) Tj
+0 -14 Td
+(O que faz:) Tj
+0 -14 Td
+(- Cria pasta do ensaio e devolve caminhos padrao dos arquivos de saida.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Para que serve na pratica:) Tj
+0 -14 Td
+(- Padroniza onde cada arquivo vai ser escrito, evitando variacao de estrutura entre maquinas.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(`write_schedule_csv\(path, schedule\)`) Tj
+0 -14 Td
+(O que faz:) Tj
+0 -14 Td
+(- Escreve o cronograma do Drive em CSV com colunas `rpm,duration_s`.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Para que serve na pratica:) Tj
+0 -14 Td
+(- O logger do Drive consome esse arquivo para saber setpoints e duracoes.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(`rpm_from_mm_s\(vel_mm_s, raio_mm, relacao=1.0\)`) Tj
+0 -14 Td
+(O que faz:) Tj
+0 -14 Td
+(- Converte velocidade linear para RPM inteiro.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Para que serve na pratica:) Tj
+0 -14 Td
+(- Garante que a UI possa trabalhar em mm/s enquanto o Drive recebe RPM.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Ponto de atencao:) Tj
+0 -14 Td
+(- A funcao usa magnitude \(`abs`\), sem sinal negativo.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(`find_repo_root\(start=None\)`) Tj
+0 -14 Td
+(O que faz:) Tj
+0 -14 Td
+(- Tenta descobrir raiz do repositorio subindo diretorios.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Para que serve na pratica:) Tj
+0 -14 Td
+(- Permite localizar executaveis mesmo quando app roda de caminhos diferentes.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(`check_executables\(repo_root\)`) Tj
+0 -14 Td
+(O que faz:) Tj
+0 -14 Td
+(- Verifica existencia de `dlg_logger_ipc.exe`, `a5_speed_logger.exe` e `merge_logs.exe`.) Tj
+0 -14 Td
+() Tj
+ET
+endstream
+endobj
+11 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 10 0 R >>
+endobj
+12 0 obj
+<< /Length 2034 >>
+stream
+BT
+/F1 10 Tf
+54 732 Td
+(Para que serve na pratica:) Tj
+0 -14 Td
+(- Evita iniciar ensaio sem binarios necessarios.) Tj
+0 -14 Td
+(- Retorna lista `missing` para mensagem clara de erro.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(`find_calibra_ui_exe\(repo_root=""\)`) Tj
+0 -14 Td
+(O que faz:) Tj
+0 -14 Td
+(- Localiza `CalibraDLG_UI.exe`.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Para que serve na pratica:) Tj
+0 -14 Td
+(- Botao "Configurar canais" usa essa funcao para abrir a UI de calibracao sem hardcode fragil.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(`start_external_run\(...\)`) Tj
+0 -14 Td
+(O que faz:) Tj
+0 -14 Td
+(- Inicia de fato o pipeline externo \(DLG + Drive\) e devolve `RunState`.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Para que serve na pratica:) Tj
+0 -14 Td
+(- E a porta principal do supervisorio para iniciar um ensaio externo.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Pontos de atencao:) Tj
+0 -14 Td
+(- Depende do formato de `schedule`.) Tj
+0 -14 Td
+(- Depende de `out_paths` completos.) Tj
+0 -14 Td
+(- Sequencia DLG->DATA_OK->Drive e intencional e nao deve ser invertida sem analise.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(`wait_and_merge\(state\)`) Tj
+0 -14 Td
+(O que faz:) Tj
+0 -14 Td
+(- Espera processos encerrarem e gera `resultado_ensaio.csv`.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Para que serve na pratica:) Tj
+0 -14 Td
+(- Garante consolidacao do ensaio no final.) Tj
+0 -14 Td
+(- Ativa fallback Python quando merge C falhar.) Tj
+0 -14 Td
+(- Escreve assinatura de origem do merge.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(`stop_run\(state\)`) Tj
+0 -14 Td
+(O que faz:) Tj
+0 -14 Td
+(- Envia `STOP` e tenta encerramento gracioso, com fallback forcado.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Para que serve na pratica:) Tj
+0 -14 Td
+(- Encerrar ensaio com menor risco de truncar arquivos.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(`pause_run\(state\)`) Tj
+0 -14 Td
+(O que faz:) Tj
+0 -14 Td
+(- Envia `PAUSE` para Drive e DLG.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Para que serve na pratica:) Tj
+0 -14 Td
+(- Congela o ensaio sem perder contexto de execucao.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(`resume_run\(state\)`) Tj
+0 -14 Td
+(O que faz:) Tj
+ET
+endstream
+endobj
+13 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 12 0 R >>
+endobj
+14 0 obj
+<< /Length 2369 >>
+stream
+BT
+/F1 10 Tf
+54 732 Td
+(- Envia `RESUME` para DLG e Drive.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Para que serve na pratica:) Tj
+0 -14 Td
+(- Retoma ensaio pausado mantendo alinhamento temporal do pipeline.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Funcoes internas de apoio \(usar so quando realmente necessario\)) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(`find_exe\(candidates, fallback_name=None\)`) Tj
+0 -14 Td
+(Utilitario para encontrar executavel em lista de caminhos e, opcionalmente, no PATH.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(`_wait_ready\(proc, tag, timeout_s=5.0\)`) Tj
+0 -14 Td
+(Le stdout ate encontrar `READY` \(ou timeout\).) Tj
+0 -14 Td
+(Usado para reduzir risco de enviar comando cedo demais.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(`_send_start\(proc\)`) Tj
+0 -14 Td
+(Atalho para `_send_ipc\(proc, "START"\)`.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(`_send_ipc\(proc, command\)`) Tj
+0 -14 Td
+(Escrita de comando IPC por linha no stdin do processo.) Tj
+0 -14 Td
+(Retorna sucesso/falha de envio.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(`_wait_data_ready\(proc, timeout_s=5.0\)`) Tj
+0 -14 Td
+(Aguarda `DATA_OK` ou `DATA_TIMEOUT` do DLG.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(`_merge_csv_fallback\(dlg_csv, drive_csv, out_csv\)`) Tj
+0 -14 Td
+(Merge em Python para contingencia.) Tj
+0 -14 Td
+(Mantem a mesma estrutura de colunas do resultado consolidado.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(`_write_merge_signature\(out_csv, source\)`) Tj
+0 -14 Td
+(Grava arquivo auxiliar com origem do merge \(`merge_logs_c` ou `python_fallback`\).) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Guia rapido para edicao segura no supervisorio) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(1. Nao mude formato de `schedule` sem revisar logger do Drive.) Tj
+0 -14 Td
+(2. Nao mude chaves de `out_paths` sem revisar orchestrator.) Tj
+0 -14 Td
+(3. Nao remova `RunState` do fluxo de pause/resume/stop.) Tj
+0 -14 Td
+(4. Nao altere ordem de start DLG->Drive sem validar impacto em sincronismo.) Tj
+0 -14 Td
+(5. Se mudar schema de `dlg.csv` ou `drive.csv`, ajuste tambem `_merge_csv_fallback`.) Tj
+0 -14 Td
+(6. Se mudar nomes/caminhos de executaveis, ajuste `check_executables`.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Diagnostico rapido de problemas) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+("Executaveis nao encontrados") Tj
+0 -14 Td
+(- Conferir build e pastas de saida.) Tj
+0 -14 Td
+(- Conferir retorno de `check_executables`.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Ensaio nao inicia) Tj
+0 -14 Td
+(- Conferir se DLG emite `DATA_OK`.) Tj
+ET
+endstream
+endobj
+15 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 14 0 R >>
+endobj
+16 0 obj
+<< /Length 786 >>
+stream
+BT
+/F1 10 Tf
+54 732 Td
+(- Conferir rede/porta do DLG e disponibilidade do equipamento.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Merge ausente ou incompleto) Tj
+0 -14 Td
+(- Verificar se `merge_source.txt` indica C ou fallback.) Tj
+0 -14 Td
+(- Se fallback frequente, investigar por que merge em C falha no ambiente.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Pause/Resume sem efeito) Tj
+0 -14 Td
+(- Confirmar inicio com `--ipc`.) Tj
+0 -14 Td
+(- Confirmar que `external_run_state` ainda aponta para processos vivos.) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(---) Tj
+0 -14 Td
+() Tj
+0 -14 Td
+(Este documento deve ser atualizado junto com qualquer mudanca de:) Tj
+0 -14 Td
+(- protocolo IPC) Tj
+0 -14 Td
+(- schema de CSV) Tj
+0 -14 Td
+(- comportamento de start/stop/pause/resume) Tj
+0 -14 Td
+(- localizacao/nome de executaveis) Tj
+ET
+endstream
+endobj
+17 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 16 0 R >>
+endobj
+xref
+0 18
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000163 00000 n 
+0000000233 00000 n 
+0000002787 00000 n 
+0000002913 00000 n 
+0000005211 00000 n 
+0000005337 00000 n 
+0000007656 00000 n 
+0000007782 00000 n 
+0000009996 00000 n 
+0000010124 00000 n 
+0000012211 00000 n 
+0000012339 00000 n 
+0000014761 00000 n 
+0000014889 00000 n 
+0000015727 00000 n 
+trailer
+<< /Size 18 /Root 1 0 R >>
+startxref
+15855
+%%EOF

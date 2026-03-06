@@ -1,5 +1,44 @@
-// Simple position command for Lichuan A5 via Modbus RTU (internal multi-segment)
-// Uses P11 segment 1 and VDI to trigger PosInSen.
+/*
+a5_pos_cli.c
+------------
+CLI avancada para controle de posicao do Drive A5 via Modbus RTU.
+
+Objetivo geral:
+- Configurar e executar movimento por posicao usando parametros P11 + VDI.
+- Disponibilizar modos de diagnostico, oscilacao, ajuste de posicao e zeragem.
+- Registrar telemetria de verificacao para facilitar analise de erros em bancada.
+
+Fluxo principal:
+1) Parse de argumentos (modo comando) ou entrada em menu interativo.
+2) Abertura da sessao Modbus e leitura de parametros de suporte.
+3) Escrita ordenada dos parametros de posicao e comando de movimento.
+4) Monitoramento de posicao/erro/desvio ate criterio de conclusao.
+5) Registro em CSV de diagnostico e encerramento limpo.
+
+Variaveis/configuracoes principais:
+- DEFAULT_*: configuracao serial padrao (COM/baud/paridade/etc.).
+- REG_*: mapa de registradores Modbus usados no fluxo de posicao.
+- FUNIN_* e VDI_*: mapeamento de funcoes digitais usadas para disparo PosInSen.
+- g_zero_*: offset de zero em software quando "home now" nao responde.
+- g_word_order/g_units_*: cache para leituras 32-bit e escala de posicao.
+- g_log/g_last_*: estado de log e ultimas medidas para diagnostico.
+
+Resumo de funcoes:
+- trim/ask_*: utilitarios de entrada e parse de argumentos interativos.
+- log_open/log_close: ciclo de vida do CSV de diagnostico local.
+- com_list_* e make_port_path: descoberta/formato de portas COM.
+- get_word_order/get_units_per_rev: parametros base para leituras 32-bit.
+- compute_auto_timeout_ms: timeout dinamico conforme distancia e rpm.
+- read_*/write_* (u16/s32): IO Modbus com retry/log/verify.
+- probe_connection/diag_*: verificacoes de comunicacao e consistencia.
+- configure_vdi/vdi_mapping_ok: aplica e confere mapeamento de entradas virtuais.
+- wait_pos_settle: espera estabilizacao por erro/desvio/tempo.
+- run_*: modos principais (diag, stop, command, osc, update, zero).
+- interactive_mode/main: interface de usuario e selecao de fluxo.
+*/
+
+// Comando de posicao para Lichuan A5 via Modbus RTU (multisegmento interno).
+// Usa segmento P11-1 e VDI para disparar PosInSen.
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>

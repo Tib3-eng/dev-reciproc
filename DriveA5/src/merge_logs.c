@@ -1,6 +1,27 @@
-// merge_logs.c
-// Merge DLG (8ch) + Drive (pos+rpm) CSV logs by row index.
-// Output CSV: idx,t_s,ch1..ch8,pos,rpm,dlg_err,drive_pos_err,drive_rpm_err
+/*
+merge_logs.c
+------------
+Merge em C dos CSVs do DLG e do Drive por indice de linha.
+
+Objetivo geral:
+- Unificar logs parciais (dlg.csv + drive.csv) em resultado_ensaio.csv.
+- Preservar indicadores de erro de cada origem (DLG e Drive) no arquivo final.
+- Oferecer caminho rapido/compilado para merge no fim do ensaio.
+
+Fluxo principal:
+1) Parse de argumentos --dlg, --drive e --out.
+2) Abertura dos 2 arquivos de entrada e do arquivo de saida.
+3) Leitura linha a linha, alinhando pelo indice (com fallback incremental).
+4) Escrita da linha consolidada com colunas fixas de resultado.
+5) Gravacao de assinatura "<out>.merge_source.txt" para rastreabilidade.
+
+Resumo de funcoes:
+- trim: remove espacos/quebras para parse robusto.
+- split_csv: separa colunas por virgula sem alocacao dinamica.
+- print_usage: mensagem de uso da CLI.
+- write_merge_signature: grava marcador textual da origem do merge.
+- main: orquestra todo o merge e valida erros de IO.
+*/
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,6 +51,15 @@ static int split_csv(char *line, char **cols, int max_cols){
 static void print_usage(void){
     puts("Uso:");
     puts("  merge_logs --dlg <dlg.csv> --drive <drive.csv> --out <merged.csv>");
+}
+
+static void write_merge_signature(const char *out_path, const char *source){
+    char sig_path[2048];
+    _snprintf(sig_path, sizeof(sig_path), "%s.merge_source.txt", out_path);
+    FILE *fsig = fopen(sig_path, "w");
+    if(!fsig) return;
+    fprintf(fsig, "merge_source=%s\n", source);
+    fclose(fsig);
 }
 
 int main(int argc, char **argv){
@@ -124,5 +154,6 @@ int main(int argc, char **argv){
     fclose(fdlg);
     fclose(fdrv);
     fclose(fout);
+    write_merge_signature(out_path, "merge_logs_c");
     return 0;
 }

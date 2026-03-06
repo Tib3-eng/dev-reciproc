@@ -1,5 +1,37 @@
+/*
+a5_cli.c
+--------
+CLI basica para validar comunicacao Modbus RTU com o Drive A5.
+
+Objetivo geral:
+- Oferecer comandos simples de bancada (RUN, STOP, set RPM, leitura de posicao).
+- Permitir teste padrao de 10 rpm por 120 s com log CSV para verificacao rapida.
+- Servir como ferramenta enxuta de diagnostico, separada do fluxo do supervisorio.
+
+Escopo:
+- Interface textual por menu.
+- Conexao serial via libmodbus.
+- Operacoes minimas de controle/telemetria.
+
+Variaveis/configuracoes principais:
+- SLAVE_ID/REG_*: endereco do escravo e registradores Modbus usados.
+- WORD_RUN/WORD_RDY: palavras de comando para estado do drive.
+- CMD_* e FAST_*: perfis de timeout para comando e amostragem.
+- session_t: estado da sessao serial ativa (porta + contexto modbus).
+
+Resumo de funcoes:
+- trim/ask_int: leitura e saneamento de entrada do usuario.
+- qpc_now_s/sleep_until: base de tempo para loop de amostragem.
+- set_timeouts_us: aplica timeout curto/longo na sessao modbus.
+- com_list_* e make_port_path: descoberta e formatacao de portas COM.
+- sess_open/sess_close: abre e fecha sessao de comunicacao.
+- cmd_run/cmd_stop/cmd_rpm: comandos de controle do drive.
+- read_pos_p0b09/read_pos_fast: leitura de posicao por registrador.
+- cmd_test_10rpm_120s_200hz: teste padrao com gravacao CSV.
+- print_header/print_menu/main: interface principal da ferramenta.
+*/
+
 // ---- C std
-// ---- Commit teste 2
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -17,19 +49,19 @@
 #include <modbus.h>
 
 /*
-  Simplified project:
-  - Only reads P0B-09 (position 0..65535, wraps each revolution)
-  - No probing, no PPR, no zeroing, no calibration, no old stress tests
+  Projeto simplificado:
+  - Leitura principal em P0B-09 (posicao 0..65535, com wrap por volta)
+  - Sem probing avancado, sem PPR, sem zeragem e sem testes antigos de estresse
 
   Menu:
-    1) Select COM
-    2) Connect
-    3) Disconnect
+    1) Selecionar COM
+    2) Conectar
+    3) Desconectar
     4) RUN
     5) STOP
-    6) Set RPM
-    7) Read position (P0B-09)
-    8) Test: 10 rpm, 120 s, target 200 Hz -> CSV (t_s,pos,rev)
+    6) Definir RPM
+    7) Ler posicao (P0B-09)
+    8) Teste: 10 rpm, 120 s, alvo 200 Hz -> CSV (t_s,pos,rev)
 */
 
 enum {

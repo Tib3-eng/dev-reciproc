@@ -1,3 +1,38 @@
+/*
+calibra_dlg.c
+-------------
+Ferramenta de calibracao do DLG4000 (modo interativo e modo IPC).
+
+Objetivo geral:
+- Capturar valores brutos do DLG em pontos de referencia informados pelo usuario/UI.
+- Ajustar reta de calibracao (a, b) e salvar JSON para consumo posterior do logger.
+- Permitir integracao com CalibraDLG_UI via protocolo JSON lines em stdin/stdout.
+
+Fluxo principal:
+1) Inicializa rede/sockets e aplica configuracao de canal.
+2) Inicia stream do DLG e aguarda primeiro pacote valido.
+3) Para cada ponto, coleta amostras, calcula bruto medio e registra referencia.
+4) Ajusta modelo linear e salva arquivo de calibracao em disco.
+5) Finaliza aquisicao e encerra recursos.
+
+Variaveis/configuracoes principais:
+- DLG_IP/DLG_PORT: endpoint UDP do hardware.
+- LOCAL_BIND_*: endereco local de recepcao (porta de retorno do DLG).
+- IDX_FREQ/BURSTS/NSIG: parametros de aquisicao usados na calibracao.
+- CAPTURE_* e DRAIN_*: timeouts para coleta por ponto e limpeza de socket.
+- DEFAULT_IGAIN_IDX/DEFAULT_ILPF/DEFAULT_SENSPWR_IDX: config padrao de canal.
+
+Resumo de funcoes:
+- send_cmd/open_udp/stop_acq/acq_setup_single/acq_start: camada de protocolo DLG.
+- wait_first_packet/drain_socket/restart_stream: sincronizacao e recuperacao de stream.
+- ensure_out_dir* e read_line: utilitarios de arquivo/console.
+- stdin_is_console/ensure_console/wait_before_exit/exit_with_pause: UX de terminal.
+- ask_int/ask_double/print_*_menu: entrada guiada no modo interativo.
+- json_get_*: parser leve de JSON para protocolo IPC.
+- ipc_send_error/ipc_send_ok/run_ipc: loop de servico para UI externa.
+- run_interactive: fluxo de calibracao assistido por prompts.
+- main: escolhe modo de execucao e trata ciclo de vida do processo.
+*/
 #define WIN32_LEAN_AND_MEAN
 
 #include <winsock2.h>

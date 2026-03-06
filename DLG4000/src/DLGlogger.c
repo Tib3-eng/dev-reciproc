@@ -1,7 +1,37 @@
-/* DLGlogger.c — Console UI: test comms + 1 Hz monitor (CH1, half-bridge)
- * Build via CMake (target: DLGlogger). Logs ASCII only.
- */
+﻿/*
+DLGlogger.c
+-----------
+Ferramenta de referencia para diagnostico direto do DLG4000 em modo console.
 
+Objetivo geral:
+- Validar comunicacao UDP com o DLG e confirmar recepcao de pacotes ACQDATA.
+- Aplicar configuracao de canal CH1 (sensor, ganho e excitacao) antes da aquisicao.
+- Exibir monitoramento simples em 1 Hz para inspecao rapida durante bancada.
+
+Escopo deste programa:
+- Fluxo de teste manual (nao e o pipeline principal do supervisorio).
+- Leitura de calibracao em arquivo quando disponivel.
+- Captura basica para validar integridade do sinal e contagem de perdas.
+
+Variaveis/configuracoes principais:
+- DLG_IP e DLG_PORT: destino UDP do hardware DLG.
+- LOCAL_BIND_IP e LOCAL_BIND_PORT: origem local do socket (porta de recepcao).
+- IDX_FREQ/BURSTS/NSIG: parametros de setup de aquisicao.
+- DEFAULT_*: valores padrao de canal quando nao existe calibracao.
+- gain_values/vexc_values: tabelas de indices aceitos pelo protocolo do DLG.
+
+Resumo de funcoes:
+- send_cmd: envia um pacote UDP bruto para o endereco do DLG.
+- stop_acq: envia ACQSTOP para garantir estado conhecido antes/depois da aquisicao.
+- acq_setup_ch1: monta e envia ACQSETUP para CH1.
+- acq_start: envia ACQSTART para iniciar stream de dados.
+- read_text_file/channel_* /parse_*: leitura e parse de calibracao em arquivo.
+- gain_index_from_value: converte ganho nominal para indice aceito pelo DLG.
+- wait_first_packet: aguarda primeiro ACQDATA valido com tentativas de restart.
+- do_test_comm: executa check curto de comunicacao.
+- do_monitor_1hz: loop de monitoramento em baixa taxa para diagnostico.
+- main: menu principal e orquestracao dos fluxos de teste.
+*/
 #ifndef _CRT_SECURE_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS
 #endif

@@ -1,12 +1,39 @@
-/* dlg_logger_ipc.c
- * Headless DLG4000 logger (8 channels) -> CSV, 200 Hz target.
- * - Waits for START on stdin when --ipc is used.
- * - Logs fixed number of rows (duration * rate), inserts NULL on missing samples.
- * - Uses QPC for local timebase (t_qpc/t_s).
- *
- * NOTE: This does NOT change DLGlogger.c (reference tool).
- *       It is a dedicated headless logger for the supervisor pipeline.
- */
+/*
+dlg_logger_ipc.c
+----------------
+Logger DLG4000 sem UI, usado pelo pipeline externo do supervisorio.
+
+Objetivo geral:
+- Capturar dados de ate 8 canais do DLG e gravar CSV em taxa fixa.
+- Operar por IPC de linha unica (stdin/stdout) para integrar com Python.
+- Entregar comportamento previsivel para ensaio automatizado (inclusive perdas).
+
+Fluxo principal:
+1) Parse de argumentos (saida, taxa, duracao, rede e modo IPC).
+2) Setup do DLG (SETCH/SETUP/START) e sincronizacao do primeiro pacote valido.
+3) Loop de captura por slots de tempo (QPC), com preenchimento de NULL quando faltar dado.
+4) Tratamento de comandos IPC (START/PAUSE/RESUME/STOP) durante a execucao.
+5) Encerramento com ACQSTOP e fechamento limpo dos recursos.
+
+Variaveis/configuracoes principais:
+- DLG_IP_DEFAULT/DLG_PORT_DEFAULT: destino UDP padrao do hardware.
+- LOCAL_BIND_*: origem local de recepcao dos pacotes ACQDATA.
+- DEFAULT_RATE_HZ/DEFAULT_DURATION_S/DEFAULT_CHANNELS: perfil padrao de log.
+- WAIT_FIRST_MS/WAIT_FIRST_SAMPLES: criterios para declarar DATA_OK.
+- DEFAULT_* de canal: fallback quando nao existe calibracao externa.
+
+Resumo de funcoes:
+- ring_*: buffer circular usado para desacoplar recepcao UDP do loop de slots.
+- read_text_file/channel_* /parse_*: leitura e parse de calibracao por canal.
+- gain_index_from_value: converte ganho nominal para indice valido no protocolo.
+- get_exe_dir/ensure_out_dir_for_path: utilitarios de caminho para saida de arquivos.
+- send_cmd/stop_acq/acq_setup_multi/acq_start: comandos de protocolo DLG.
+- qpc_now_ticks/qpc_freq_ticks: base de tempo de alta resolucao no Windows.
+- drain_packets_to_ring: coleta pacotes da rede e coloca no buffer circular.
+- trim/ipc_poll_command: parse de comandos textuais via stdin.
+- print_usage: ajuda de uso em linha de comando.
+- main: orquestra todo o ciclo de vida do logger IPC.
+*/
 
 #ifndef _CRT_SECURE_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS

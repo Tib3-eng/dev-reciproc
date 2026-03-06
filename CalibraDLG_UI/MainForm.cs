@@ -1,3 +1,35 @@
+/*
+MainForm.cs
+-----------
+Tela principal da calibracao DLG (WinForms), integrada ao CalibraDLG.exe via IPC.
+
+Objetivo geral:
+- Guiar o usuario no cadastro de pontos de calibracao (referencia x bruto).
+- Controlar o processo externo CalibraDLG.exe por JSON lines (stdin/stdout).
+- Exibir status, erros, RMSE e salvar resultado em arquivo JSON por canal.
+
+Fluxo principal da tela:
+1) Resolve caminhos de runtime (CalibraDLG.exe e dlg_logger_ipc.exe).
+2) Inicia calibracao (config) com canal/sensor/ganho/LPF/excitacao.
+3) Para cada ponto, envia "point", aguarda retorno e atualiza grade + RMSE.
+4) Finaliza/cancela processo e apresenta resultado ao usuario.
+
+Variaveis principais:
+- _proc/_stdin/_readTask/_cts: controle de ciclo de vida do processo IPC.
+- _refPoints/_rawPoints: base para calculo incremental de erro (RMSE).
+- _pendingPoint: sincroniza requisicao de captura com resposta recebida.
+- _calibraExePath/_calibOutDir: caminhos efetivos usados no runtime.
+- _finishRequested/_cancelRequested: estados de finalizacao em curso.
+
+Resumo de metodos:
+- FindRepoRoot/Get*Candidates/FindFirstExisting/ResolveRuntimePaths:
+  localizacao automatica de executaveis.
+- HandleLine/SendLine/UI: comunicacao IPC e marshaling para thread de UI.
+- SetStatus/AppendLog/SetDlgCheckState/UpdateErrorLabel: atualizacao visual.
+- FinishCalib/CancelCalib/ShowLegend: acoes principais de controle da sessao.
+- Construtor MainForm: cria widgets, tooltips, grade e wiring de eventos.
+*/
+
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
