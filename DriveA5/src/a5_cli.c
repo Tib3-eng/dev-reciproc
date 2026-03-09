@@ -90,6 +90,14 @@ static void trim(char *s){
     if(p!=s) memmove(s,p,strlen(p)+1);
 }
 
+/*
+Funcao: ask_int
+Objetivo: Faz parse/validacao de entrada de dados.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int ask_int(const char *prompt, int def, int *out){
     char b[128];
     printf("%s [%d]: ", prompt, def);
@@ -103,6 +111,14 @@ static int ask_int(const char *prompt, int def, int *out){
     return 1;
 }
 
+/*
+Funcao: qpc_now_s
+Objetivo: Fornece base de tempo para sincronizacao do loop.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static double qpc_now_s(void){
     static LARGE_INTEGER f = {0};
     LARGE_INTEGER c;
@@ -111,6 +127,14 @@ static double qpc_now_s(void){
     return (double)c.QuadPart / (double)f.QuadPart;
 }
 
+/*
+Funcao: sleep_until
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void sleep_until(double t_target_s){
     for(;;){
         double now = qpc_now_s();
@@ -121,6 +145,14 @@ static void sleep_until(double t_target_s){
     }
 }
 
+/*
+Funcao: set_timeouts_us
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void set_timeouts_us(modbus_t *ctx, int resp_us, int byte_us){
     modbus_set_response_timeout(ctx, 0, resp_us);
     modbus_set_byte_timeout(ctx,     0, byte_us);
@@ -129,6 +161,14 @@ static void set_timeouts_us(modbus_t *ctx, int resp_us, int byte_us){
 // ----------------- COM list (QueryDosDevice)
 typedef struct { char **items; int count; } com_list_t;
 
+/*
+Funcao: com_list_free
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void com_list_free(com_list_t *L){
     if(!L) return;
     for(int i=0;i<L->count;++i) free(L->items[i]);
@@ -137,6 +177,14 @@ static void com_list_free(com_list_t *L){
     L->count = 0;
 }
 
+/*
+Funcao: com_list_detect
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static com_list_t com_list_detect(void){
     com_list_t L = {0};
     DWORD cap = 64*1024;
@@ -157,12 +205,28 @@ static com_list_t com_list_detect(void){
     return L;
 }
 
+/*
+Funcao: com_list_print
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void com_list_print(const com_list_t *L){
     if(!L || !L->count){ puts("No COM ports found."); return; }
     puts("Detected COM ports:");
     for(int i=0;i<L->count;++i) printf("  [%d] %s\n", i+1, L->items[i]);
 }
 
+/*
+Funcao: make_port_path
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void make_port_path(const char *shortName, char *out, size_t outsz){
     int num = 0;
     if(_strnicmp(shortName,"COM",3)==0) num = atoi(shortName+3);
@@ -180,6 +244,14 @@ typedef struct {
     int pos_fc;
 } session_t;
 
+/*
+Funcao: sess_close
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void sess_close(session_t *S){
     if(S->ctx){
         if(S->is_connected) modbus_close(S->ctx);
@@ -188,6 +260,14 @@ static void sess_close(session_t *S){
     memset(S,0,sizeof(*S));
 }
 
+/*
+Funcao: sess_open
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int sess_open(session_t *S, const char *port_short){
     if(S->ctx) sess_close(S);
 
@@ -247,6 +327,14 @@ static int cmd_run(session_t *S){
     return 0;
 }
 
+/*
+Funcao: cmd_stop
+Objetivo: Envia comando para controle do fluxo de aquisicao/drive.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int cmd_stop(session_t *S){
     if(!S->is_connected){ puts("Not connected."); return -1; }
     set_timeouts_us(S->ctx, CMD_RESP_US, CMD_BYTE_US);
@@ -263,6 +351,14 @@ static int cmd_stop(session_t *S){
     return -1;
 }
 
+/*
+Funcao: cmd_rpm
+Objetivo: Envia comando para controle do fluxo de aquisicao/drive.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int cmd_rpm(session_t *S, int rpm){
     if(!S->is_connected){ puts("Not connected."); return -1; }
     if(rpm < -32768 || rpm > 32767){ puts("RPM out of range."); return -1; }
@@ -421,6 +517,14 @@ static void print_header(void){
     puts("==============================================");
 }
 
+/*
+Funcao: print_menu
+Objetivo: Exibe informacoes para operador/diagnostico.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void print_menu(const session_t *S, const char *sel){
     printf("\n[Status] Port=%s | Connected=%s | P0B-09 via FC%02d\n",
            (sel && *sel) ? sel : "(none)",
@@ -440,6 +544,14 @@ static void print_menu(const session_t *S, const char *sel){
     printf("Choice: ");
 }
 
+/*
+Funcao: main
+Objetivo: Executa o fluxo principal do programa.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 int main(void){
     print_header();
 

@@ -51,6 +51,8 @@ Resumo de funcoes:
 #include <stdlib.h>
 #include <ctype.h>
 #include <stddef.h>
+#include <share.h>
+#include <stdarg.h>
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -118,17 +120,41 @@ typedef struct {
     int overrun;
 } ring_t;
 
+/*
+Funcao: ring_init
+Objetivo: Opera o buffer circular de amostras em memoria.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void ring_init(ring_t *r, int cap){
     r->buf = (sample_t*)calloc((size_t)cap, sizeof(sample_t));
     r->cap = cap;
     r->head = r->tail = r->count = 0;
     r->overrun = 0;
 }
+/*
+Funcao: ring_free
+Objetivo: Opera o buffer circular de amostras em memoria.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void ring_free(ring_t *r){
     free(r->buf);
     r->buf = NULL;
     r->cap = r->head = r->tail = r->count = 0;
 }
+/*
+Funcao: ring_push
+Objetivo: Opera o buffer circular de amostras em memoria.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void ring_push(ring_t *r, const sample_t *s){
     if(r->count >= r->cap){
         r->overrun++;
@@ -138,6 +164,14 @@ static void ring_push(ring_t *r, const sample_t *s){
     r->head = (r->head + 1) % r->cap;
     r->count++;
 }
+/*
+Funcao: ring_pop
+Objetivo: Opera o buffer circular de amostras em memoria.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int ring_pop(ring_t *r, sample_t *out){
     if(r->count <= 0) return 0;
     *out = r->buf[r->tail];
@@ -145,8 +179,81 @@ static int ring_pop(ring_t *r, sample_t *out){
     r->count--;
     return 1;
 }
+/*
+Funcao: ring_clear
+Objetivo: Opera o buffer circular de amostras em memoria.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void ring_clear(ring_t *r){
     r->head = r->tail = r->count = 0;
+}
+
+static FILE *g_ev = NULL;
+
+/*
+Funcao: ev_close
+Objetivo: Gerencia trilha de log de eventos do processo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
+static void ev_close(void){
+    if(g_ev){
+        fclose(g_ev);
+        g_ev = NULL;
+    }
+}
+
+/*
+Funcao: ev_open_for_out
+Objetivo: Gerencia trilha de log de eventos do processo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
+static void ev_open_for_out(const char *out_path){
+    char ev_path[1024];
+    const char *s1 = strrchr(out_path, '\\');
+    const char *s2 = strrchr(out_path, '/');
+    const char *s = (s1 && s2) ? ((s1 > s2) ? s1 : s2) : (s1 ? s1 : s2);
+    if(s){
+        size_t dlen = (size_t)(s - out_path);
+        if(dlen > sizeof(ev_path) - 64) dlen = sizeof(ev_path) - 64;
+        memcpy(ev_path, out_path, dlen);
+        ev_path[dlen] = 0;
+        strcat(ev_path, "\\dlg_logger_events.log");
+    }else{
+        _snprintf(ev_path, sizeof(ev_path), "dlg_logger_events.log");
+    }
+    g_ev = _fsopen(ev_path, "w", _SH_DENYNO);
+}
+
+/*
+Funcao: ev_logf
+Objetivo: Gerencia trilha de log de eventos do processo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
+static void ev_logf(const char *fmt, ...){
+    if(!g_ev) return;
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    fprintf(g_ev, "[%02u:%02u:%02u.%03u] ",
+            (unsigned)st.wHour, (unsigned)st.wMinute,
+            (unsigned)st.wSecond, (unsigned)st.wMilliseconds);
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(g_ev, fmt, ap);
+    va_end(ap);
+    fputc('\n', g_ev);
+    fflush(g_ev);
 }
 
 /* ---------- Utils ---------- */
@@ -167,6 +274,14 @@ static char* read_text_file(const char* path, size_t* out_sz){
     return buf;
 }
 
+/*
+Funcao: channel_in_header
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int channel_in_header(const char* buf, int ch){
     const char* p = strstr(buf, "\"channels\"");
     if(!p) return 0;
@@ -188,12 +303,28 @@ static int channel_in_header(const char* buf, int ch){
     return 0;
 }
 
+/*
+Funcao: channel_matches
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int channel_matches(const char* buf, int ch){
     char needle[32];
     _snprintf(needle, sizeof(needle), "\"channel\": \"CH%d\"", ch);
     return strstr(buf, needle) != NULL;
 }
 
+/*
+Funcao: parse_fit_value
+Objetivo: Faz parse/validacao de entrada de dados.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int parse_fit_value(const char* buf, const char* key, double* out){
     const char* p = strstr(buf, key);
     if(!p) return 0;
@@ -208,6 +339,14 @@ static int parse_fit_value(const char* buf, const char* key, double* out){
     return 1;
 }
 
+/*
+Funcao: parse_int_value
+Objetivo: Faz parse/validacao de entrada de dados.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int parse_int_value(const char* buf, const char* key, int* out){
     const char* p = strstr(buf, key);
     if(!p) return 0;
@@ -222,6 +361,14 @@ static int parse_int_value(const char* buf, const char* key, int* out){
     return 1;
 }
 
+/*
+Funcao: gain_index_from_value
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int gain_index_from_value(int value){
     for(int i = 0; i < (int)(sizeof(gain_values) / sizeof(gain_values[0])); ++i){
         if(gain_values[i] == value) return i;
@@ -229,6 +376,14 @@ static int gain_index_from_value(int value){
     return -1;
 }
 
+/*
+Funcao: get_exe_dir
+Objetivo: Resolve configuracao/caminho/estado auxiliar do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int get_exe_dir(char *out, size_t out_sz){
     if(!out || out_sz == 0) return 0;
     out[0] = '\0';
@@ -319,6 +474,14 @@ static int load_calib_for_channel(int ch, double* slope, double* intercept,
     return 1;
 }
 
+/*
+Funcao: ensure_out_dir_for_path
+Objetivo: Resolve configuracao/caminho/estado auxiliar do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int ensure_out_dir_for_path(const char *path){
     char tmp[MAX_PATH];
     size_t len = strlen(path);
@@ -337,6 +500,14 @@ static int ensure_out_dir_for_path(const char *path){
     return 0;
 }
 
+/*
+Funcao: send_cmd
+Objetivo: Envia comando para controle do fluxo de aquisicao/drive.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void send_cmd(SOCKET s, const void *p, int len, const struct sockaddr_in *a){
     sendto(s, (const char*)p, len, 0, (const struct sockaddr*)a, sizeof(*a));
 }
@@ -364,6 +535,14 @@ static int open_udp(SOCKET *ps, struct sockaddr_in *addr,
     return 0;
 }
 
+/*
+Funcao: stop_acq
+Objetivo: Envia comando para controle do fluxo de aquisicao/drive.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void stop_acq(SOCKET s, const struct sockaddr_in *addr){
     PktHdr stop = { OP_ACQSTOP, 0 };
     send_cmd(s, &stop, sizeof(stop), addr);
@@ -381,6 +560,14 @@ static void configure_channel(SOCKET s, const struct sockaddr_in *addr,
     send_cmd(s, &cfg, sizeof(cfg), addr);
 }
 
+/*
+Funcao: acq_setup_multi
+Objetivo: Envia comando para controle do fluxo de aquisicao/drive.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void acq_setup_multi(SOCKET s, const struct sockaddr_in *addr, float freq_idx, int nSig){
     PktAcqSetup st; memset(&st, 0, sizeof(st));
     st.code = OP_ACQSETUP;
@@ -393,23 +580,55 @@ static void acq_setup_multi(SOCKET s, const struct sockaddr_in *addr, float freq
     send_cmd(s, &st, sizeof(st), addr);
 }
 
+/*
+Funcao: acq_start
+Objetivo: Envia comando para controle do fluxo de aquisicao/drive.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void acq_start(SOCKET s, const struct sockaddr_in *addr){
     PktHdr start = { OP_ACQSTART, 0 };
     send_cmd(s, &start, sizeof(start), addr);
 }
 
+/*
+Funcao: qpc_now_ticks
+Objetivo: Fornece base de tempo para sincronizacao do loop.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int64_t qpc_now_ticks(void){
     LARGE_INTEGER c;
     QueryPerformanceCounter(&c);
     return (int64_t)c.QuadPart;
 }
 
+/*
+Funcao: qpc_freq_ticks
+Objetivo: Fornece base de tempo para sincronizacao do loop.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int64_t qpc_freq_ticks(void){
     LARGE_INTEGER f;
     QueryPerformanceFrequency(&f);
     return (int64_t)f.QuadPart;
 }
 
+/*
+Funcao: drain_packets_to_ring
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int drain_packets_to_ring(SOCKET s, ring_t *ring, int nSig){
     int got = 0;
     for(;;){
@@ -456,6 +675,14 @@ static int wait_first_samples(SOCKET s, ring_t *ring, int nSig, int min_samples,
     return 0;
 }
 
+/*
+Funcao: trim
+Objetivo: Normaliza texto/entrada para evitar inconsistencias.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void trim(char *s){
     size_t n = strlen(s);
     while(n && (s[n-1]=='\n'||s[n-1]=='\r'||s[n-1]==' '||s[n-1]=='\t')) s[--n]=0;
@@ -470,6 +697,14 @@ typedef enum {
     IPC_CMD_RESUME = 3
 } ipc_cmd_t;
 
+/*
+Funcao: ipc_poll_command
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static ipc_cmd_t ipc_poll_command(int use_ipc){
     static char pending[256];
     static size_t pending_len = 0;
@@ -527,13 +762,30 @@ static ipc_cmd_t ipc_poll_command(int use_ipc){
     return IPC_CMD_NONE;
 }
 
+/*
+Funcao: print_usage
+Objetivo: Exibe informacoes para operador/diagnostico.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void print_usage(void){
     puts("Uso:");
     puts("  dlg_logger_ipc --out <csv> --duration <s> [--rate <hz>] [--ipc]");
     puts("                [--ip <dlg_ip>] [--port <dlg_port>]");
     puts("                [--bind-ip <ip>] [--bind-port <port>]");
+    puts("                [--force-normal <N>]");
 }
 
+/*
+Funcao: main
+Objetivo: Executa o fluxo principal do programa.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 int main(int argc, char **argv){
     const char *out_path = NULL;
     const char *dlg_ip = DLG_IP_DEFAULT;
@@ -542,6 +794,7 @@ int main(int argc, char **argv){
     uint16_t bind_port = LOCAL_BIND_PORT_DEFAULT;
     double rate_hz = DEFAULT_RATE_HZ;
     double duration_s = DEFAULT_DURATION_S;
+    double force_normal_n = 0.0;
     int use_ipc = 0;
 
     for(int i = 1; i < argc; ++i){
@@ -552,6 +805,7 @@ int main(int argc, char **argv){
         if(strcmp(argv[i], "--port") == 0 && i + 1 < argc){ dlg_port = (uint16_t)atoi(argv[++i]); continue; }
         if(strcmp(argv[i], "--bind-ip") == 0 && i + 1 < argc){ bind_ip = argv[++i]; continue; }
         if(strcmp(argv[i], "--bind-port") == 0 && i + 1 < argc){ bind_port = (uint16_t)atoi(argv[++i]); continue; }
+        if(strcmp(argv[i], "--force-normal") == 0 && i + 1 < argc){ force_normal_n = atof(argv[++i]); continue; }
         if(strcmp(argv[i], "--ipc") == 0){ use_ipc = 1; continue; }
         print_usage();
         return 1;
@@ -560,20 +814,29 @@ int main(int argc, char **argv){
         print_usage();
         return 1;
     }
-
     ensure_out_dir_for_path(out_path);
-    FILE *f = fopen(out_path, "w");
+    ev_open_for_out(out_path);
+    ev_logf("START out=%s duration=%.3f rate=%.3f dlg=%s:%u bind=%s:%u ipc=%d force=%.6f",
+            out_path, duration_s, rate_hz, dlg_ip, (unsigned)dlg_port,
+            bind_ip ? bind_ip : "", (unsigned)bind_port, use_ipc, force_normal_n);
+    FILE *f = _fsopen(out_path, "w", _SH_DENYNO);
     if(!f){
         fprintf(stderr, "Falha abrindo CSV: %s\n", out_path);
+        ev_logf("ERROR open csv failed.");
+        ev_close();
         return 1;
     }
-    fprintf(f, "idx,t_qpc,t_s,ch1,ch2,ch3,ch4,ch5,ch6,ch7,ch8,err\n");
+    /* Desabilita buffering para tail em tempo real (graficos e agregador). */
+    setvbuf(f, NULL, _IONBF, 0);
+    fprintf(f, "idx,t_qpc,t_s,ch1,ch2,ch3,ch4,ch5,ch6,ch7,ch8,atrito,err\n");
     fflush(f);
 
     WSADATA wsa;
     if(WSAStartup(MAKEWORD(2,2), &wsa) != 0){
         fprintf(stderr, "WSAStartup falhou.\n");
+        ev_logf("ERROR WSAStartup failed.");
         fclose(f);
+        ev_close();
         return 1;
     }
 
@@ -581,10 +844,13 @@ int main(int argc, char **argv){
     struct sockaddr_in addr;
     if(open_udp(&s, &addr, dlg_ip, dlg_port, bind_ip, bind_port) != 0){
         fprintf(stderr, "Falha ao abrir UDP.\n");
+        ev_logf("ERROR open_udp failed.");
         WSACleanup();
         fclose(f);
+        ev_close();
         return 1;
     }
+    ev_logf("UDP open ok.");
 
     /* Non-blocking socket to drain packets quickly */
     u_long nb = 1;
@@ -621,6 +887,7 @@ int main(int argc, char **argv){
     }
 
     stop_acq(s, &addr);
+    ev_logf("ACQSTOP sent; configuring channels.");
     for(int ch = 1; ch <= DEFAULT_CHANNELS; ++ch){
         int idx = ch - 1;
         configure_channel(s, &addr, ch,
@@ -628,24 +895,31 @@ int main(int argc, char **argv){
     }
     acq_setup_multi(s, &addr, (float)rate_hz, DEFAULT_CHANNELS);
     acq_start(s, &addr);
+    ev_logf("ACQSETUP/START sent.");
 
     if(use_ipc){
         puts("READY");
         fflush(stdout);
+        ev_logf("READY emitted; waiting START.");
         char line[64];
         if(!fgets(line, sizeof(line), stdin)){
+            ev_logf("IPC START read failed.");
             fclose(f);
             closesocket(s);
             WSACleanup();
+            ev_close();
             return 1;
         }
         trim(line);
         if(_stricmp(line, "START") != 0){
+            ev_logf("IPC START invalid token: %s", line);
             fclose(f);
             closesocket(s);
             WSACleanup();
+            ev_close();
             return 1;
         }
+        ev_logf("IPC START received.");
     }
 
     int total_samples = (int)(duration_s * rate_hz + 0.5);
@@ -661,6 +935,7 @@ int main(int argc, char **argv){
     int64_t t_first = 0;
     int got_first = wait_first_samples(s, &ring, DEFAULT_CHANNELS,
                                        WAIT_FIRST_SAMPLES, WAIT_FIRST_MS, &t_first);
+    ev_logf("WAIT_FIRST result=%d ring_count=%d", got_first, ring.count);
     if(got_first){
         start_ticks = t_first;
     }else{
@@ -674,15 +949,20 @@ int main(int argc, char **argv){
         if(got_first) puts("DATA_OK");
         else puts("DATA_TIMEOUT");
         fflush(stdout);
+        ev_logf("DATA state emitted: %s", got_first ? "DATA_OK" : "DATA_TIMEOUT");
     }
 
     int idx = 0;
     int stop_requested = 0;
     int paused = 0;
     int64_t pause_start_ticks = 0;
+    DWORD next_progress_log_ms = GetTickCount() + 1000;
+    int n_have = 0;
+    int n_null = 0;
     while(idx < total_samples){
         ipc_cmd_t ipc_cmd = ipc_poll_command(use_ipc);
         if(ipc_cmd == IPC_CMD_STOP){
+            ev_logf("STOP received at idx=%d/%d", idx, total_samples);
             stop_requested = 1;
             break;
         }
@@ -690,6 +970,7 @@ int main(int argc, char **argv){
             paused = 1;
             pause_start_ticks = qpc_now_ticks();
             ring_clear(&ring);
+            ev_logf("PAUSE received at idx=%d.", idx);
         }else if(ipc_cmd == IPC_CMD_RESUME && paused){
             int64_t now_resume = qpc_now_ticks();
             int64_t paused_ticks = now_resume - pause_start_ticks;
@@ -697,6 +978,7 @@ int main(int argc, char **argv){
             start_ticks += paused_ticks;
             next_ticks += paused_ticks;
             paused = 0;
+            ev_logf("RESUME received at idx=%d paused_ticks=%lld.", idx, (long long)paused_ticks);
         }
 
         if(paused){
@@ -717,27 +999,56 @@ int main(int argc, char **argv){
             int64_t t_qpc = start_ticks + (int64_t)idx * dt_ticks;
 
             if(have){
+                n_have++;
                 char ch_buf[DEFAULT_CHANNELS][32];
+                double ch0_value = 0.0;
+                int ch0_valid = 0;
                 for(int ch = 0; ch < DEFAULT_CHANNELS; ++ch){
                     if(has_calib[ch]){
                         double v = slope[ch] * (double)sm.ch[ch] + intercept[ch];
                         _snprintf(ch_buf[ch], sizeof(ch_buf[ch]), "%.6f", v);
+                        if(ch == 0){
+                            ch0_value = v;
+                            ch0_valid = 1;
+                        }
                     }else{
                         _snprintf(ch_buf[ch], sizeof(ch_buf[ch]), "%d", (int)sm.ch[ch]);
+                        if(ch == 0){
+                            ch0_value = (double)sm.ch[ch];
+                            ch0_valid = 1;
+                        }
                     }
                 }
-                fprintf(f, "%d,%lld,%.6f,%s,%s,%s,%s,%s,%s,%s,%s,0\n",
-                        idx, (long long)t_qpc, t_s,
-                        ch_buf[0], ch_buf[1], ch_buf[2], ch_buf[3],
-                        ch_buf[4], ch_buf[5], ch_buf[6], ch_buf[7]);
+                if(force_normal_n > 0.0 && ch0_valid){
+                    double atrito = ch0_value / force_normal_n;
+                    fprintf(f, "%d,%lld,%.6f,%s,%s,%s,%s,%s,%s,%s,%s,%.6f,0\n",
+                            idx, (long long)t_qpc, t_s,
+                            ch_buf[0], ch_buf[1], ch_buf[2], ch_buf[3],
+                            ch_buf[4], ch_buf[5], ch_buf[6], ch_buf[7],
+                            atrito);
+                }else{
+                    fprintf(f, "%d,%lld,%.6f,%s,%s,%s,%s,%s,%s,%s,%s,NULL,0\n",
+                            idx, (long long)t_qpc, t_s,
+                            ch_buf[0], ch_buf[1], ch_buf[2], ch_buf[3],
+                            ch_buf[4], ch_buf[5], ch_buf[6], ch_buf[7]);
+                }
             }else{
-                fprintf(f, "%d,%lld,%.6f,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,1\n",
+                n_null++;
+                fprintf(f, "%d,%lld,%.6f,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,1\n",
                         idx, (long long)t_qpc, t_s);
             }
             idx++;
             next_ticks += dt_ticks;
         }else{
             Sleep(1);
+        }
+        {
+            DWORD now_ms = GetTickCount();
+            if((LONG)(now_ms - next_progress_log_ms) >= 0){
+                ev_logf("PROGRESS idx=%d/%d have=%d null=%d ring=%d overrun=%d paused=%d",
+                        idx, total_samples, n_have, n_null, ring.count, ring.overrun, paused);
+                next_progress_log_ms = now_ms + 1000;
+            }
         }
     }
 
@@ -747,9 +1058,12 @@ int main(int argc, char **argv){
     }
 
     stop_acq(s, &addr);
+    ev_logf("END idx=%d/%d stop=%d have=%d null=%d ring_overrun=%d",
+            idx, total_samples, stop_requested, n_have, n_null, ring.overrun);
     ring_free(&ring);
     closesocket(s);
     WSACleanup();
     fclose(f);
+    ev_close();
     return 0;
 }

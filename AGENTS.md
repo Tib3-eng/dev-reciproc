@@ -42,16 +42,20 @@ DLG4000 (UDP/WinSock2):
 - CalibraDLG stops/starts acquisition per point to avoid stream stalls between user inputs.
 - CalibraDLG and DLGlogger are not run simultaneously. CalibraDLG writes calibration data to disk; DLGlogger loads and applies it on startup and keeps using it until recalibrated.
 - Bug history: calibration stalled after point 1/2 because wait_first_packet always re-sent ACQSETUP with channel 1, and the stream could stall during long user input; fixed by using the selected channel and restarting ACQ per point with socket drain.
-- dlg_logger_ipc: headless logger (8 canais) com CSV fixo (idx,t_qpc,t_s,ch1..ch8,err). Usa --ipc e espera "START" via stdin.
+- dlg_logger_ipc: headless logger (8 canais) com CSV fixo (idx,t_qpc,t_s,ch1..ch8,atrito,err). Usa --ipc e espera "START" via stdin.
+- dlg_logger_ipc aceita `--force-normal <N>` e calcula `atrito = ch1/forca_normal`; sem forca valida, grava NULL.
 - dlg_logger_ipc grava numero fixo de linhas (duracao * taxa) e injeta NULL quando faltar amostra.
 - dlg_logger_ipc aplica calibracao por canal quando calib.json/calib_CHn.json estiver presente; se nao houver, loga bruto.
-- dlg_logger_ipc espera 3 amostras validas (DATA_OK) antes de iniciar o tempo; o supervisório so inicia o Drive depois disso.
+- dlg_logger_ipc espera 3 amostras validas (DATA_OK) antes de iniciar o tempo; o supervisÃ³rio so inicia o Drive depois disso.
 - dlg_logger_ipc --ipc agora aceita PAUSE/RESUME/STOP. Em pause ele drena e descarta pacotes, congela o tempo local e retoma sem criar slots de catch-up.
+- dlg_logger_ipc escreve `dlg_logger_events.log` ao lado do `dlg.csv` com startup, READY/START, DATA_OK/TIMEOUT, pause/resume, progresso e encerramento.
 
 CalibraDLG (UDP/WinSock2):
 - Modes: interactive console (default) or --ipc (JSON lines over STDIN/STDOUT).
 - IPC ops: config/point/finish/cancel; emits point_result/done/error.
 - JSON output path can be set by IPC; defaults to out/calib.json.
+- Runtime accepts optional `tc_cjc_mode` in `config` for termopar (0=internal, 1=external/TEDs).
+- Runtime writes termopar sidecar metadata as `calib_CHn_tcmeta.json` without changing `calib_CHn.json` schema.
 
 CalibraDLG_UI (WinForms):
 - UI labels/messages are PT-BR (ASCII) and sensor modes use "meia ponte" and "ponte 1/4".
@@ -65,29 +69,47 @@ CalibraDLG_UI (WinForms):
 - Finish/Cancel set "Finalizando/Cancelando" and status auto-resets on process end if no final message arrives.
 - Runtime path is auto-resolved; executable path picker was removed.
 - UI includes a small runtime log and "Check DLG" button to validate CalibraDLG.exe + DLG config handshake.
+- UI exposes "Junta fria (termopar)" in a discrete way and keeps it disabled for non-termopar sensors.
+- UI sends `tc_cjc_mode` only for termopar, preserving legacy IPC payloads for other sensors.
+- UI aplica preset automatico ao selecionar termopar K: iGain=6 (1000), iLPF=1 (UI index "1"), iSensPwr=0 (1.0V), junta fria interna.
 
-Supervisório (Python/Tk):
+SupervisÃ³rio (Python/Tk):
 - novo_tribometro.py is the main UI; novo_tribometro.exe is the packaged app.
 - orchestrator_runtime.py launches dlg_logger_ipc + a5_speed_logger in background and merges logs with merge_logs.
 - conversao mm/s->rpm no orchestrator usa modulo (abs) para enviar setpoint sempre positivo no modo velocidade.
 - UI mostra "Velocidade alvo atual" (mm/s) e "RPM Alvo atual" (setpoint enviado ao Drive).
 - A UI nao usa mais aba de log; mensagens seguem para console e status visuais.
+- Supervisório grava `graph_events.log` por ensaio com diagnostico de confiabilidade dos graficos (DLG tail, voltas por idx, gaps, extremos).
 - A aba "configuracoes adicionais" permite escolher diretorio base fixo dos ensaios; valor persistido em settings local (APPDATA).
-- A aba "configuracoes adicionais" inclui campo persistente "Relacao mecanica (i)"; RPM alvo usa (i * v * 60) / (2 * pi * raio).
+- A aba "configuracoes adicionais" inclui campo persistente "Relacao mecanica (i = D2/D1)"; D1=polia do motor, D2=polia do disco. RPM alvo usa (i * v * 60) / (2 * pi * raio).
+- Tabela da UI: `Voltas_pin` = distancia/(2*pi*raio) e `Voltas_mot` = i * Voltas_pin.
 - A aba "configuracoes adicionais" inclui botao "Configurar canais" para abrir CalibraDLG_UI diretamente, com bloqueio se ensaio/processos estiverem ativos.
 - Botao "Configurar Eixos Y (Min / Max)" abre popup compacto com 2 linhas (Temperatura/Grafico 1 e Atrito-forca/Grafico 2), com modo Automatico (padrao) e campos Min/Max manuais.
+- Grafico 3 usa eixo X em voltas do pino (considera `Relacao mecanica (i)`), nao em voltas do motor.
+- Grafico 3 (atrito por volta) e calculado em tempo real no supervisÃ³rio a partir de `dlg.csv + drive.csv` (sem stream TURN em C).
+- Tail dos CSVs em tempo real (DLG/turnos) usa refresh de EOF no Windows para evitar congelar atualizacao ate o fim do ensaio.
+- Tail dos CSVs em tempo real deve consumir apenas linhas completas (terminadas em '\\n') para evitar parse de linha parcial durante append.
+- Tail threads do supervisÃ³rio usam token de ensaio para evitar duplicacao de pontos entre execucoes consecutivas.
+- start_external_run agora exige READY de DLG/Drive; se algum processo nao responder, o ensaio aborta e encerra subprocessos.
+- start_external_run nao aborta apenas por `DATA_TIMEOUT` inicial do DLG; o cronometro so inicia com amostra valida e o supervisÃ³rio decide abortar por timeout de validacao.
+- start_external_run no supervisÃ³rio usa bind UDP fixo (41402) no logger DLG; evitar bind efemero no pipeline principal para reduzir casos de ensaio sem ACQDATA.
+- Se o cronometro nao iniciar por falta de amostras validas do DLG no tempo limite, o supervisÃ³rio aborta o ensaio externo e encerra subprocessos (evita corrida com dlg.csv todo em erro).
 - Taxa padrao de aquisicao no pipeline externo (DLG + Drive) ajustada para 50 Hz; manter ambas iguais para sincronismo.
 - wait_and_merge has fallback merge in Python if merge_logs fails or resultado_ensaio.csv is missing.
-- Outputs go to Desktop\\Repositorio\\<dd-mm-aaaa - Estudo X - Nome do ensaio>\\<REP N> with info_ensaio.csv, schedule.csv, dlg.csv, drive.csv, resultado_ensaio.csv.
+- wait_and_merge reconstrói `atrito_por_volta.csv` em Python ao final de todo ensaio para garantir consistencia do arquivo final com os CSVs completos.
+- Rebuild offline em Python usa a mesma regra de wrap/backstep do C (sem `%` direto no delta) para evitar sobrecontagem de voltas por jitter.
+- Outputs go to Desktop\\Repositorio\\<dd-mm-aaaa - Estudo X - Nome do ensaio>\\<REP N> with info_ensaio.csv, dlg.csv, drive.csv, atrito_por_volta.csv, resultado_ensaio.csv.
+- Artefatos tecnicos finais ficam em Desktop\\Repositorio\\<...>\\<REP N>\\DadosDev\\:
+  resultado_ensaio.csv.merge_source, schedule.csv, graph_events.log, dlg_logger_events.log, a5_speed_events.log.
 - Duplicidade de pasta e bloqueio de inicio consideram data + estudo + nome + repeticao (subpasta REP N).
 - abrir_configurar_canais resolves CalibraDLG_UI.exe automatically via orchestrator runtime helpers.
 - Check status: DLG uses UDP ACQSTOP/SETCH/SETUP/START (8 canais) and waits for ACQDATA (no ICMP ping).
 - Check status bind: tenta 41402 (mesma do logger); se falhar, usa porta efemera e registra no log.
 - Pending: If DLG check still fails, suspect DLG busy in another app or firewall/route issues.
 - stop_run: envia STOP via stdin (IPC) e espera curto periodo antes de terminate/kill.
-- stop_run no supervisório: ao clicar Parar, estado vira "Finalizando...", envia STOP para ambos, aguarda fechamento e mantem merge final ate salvar arquivos parciais.
+- stop_run no supervisÃ³rio: ao clicar Parar, estado vira "Finalizando...", envia STOP para ambos, aguarda fechamento e mantem merge final ate salvar arquivos parciais.
 - orchestrator_runtime tem pause_run/resume_run e envia PAUSE/RESUME para ambos os processos IPC.
-- Botao Pausar no supervisório externo alterna para Retomar, congela o cronometro e o estado; ao retomar, continua da mesma etapa.
+- Botao Pausar no supervisÃ³rio externo alterna para Retomar, congela o cronometro e o estado; ao retomar, continua da mesma etapa.
 - novo_tribometro captures run state snapshot to avoid race with global external_run_state.
 
 DriveA5 (Modbus RTU / libmodbus):
@@ -108,7 +130,7 @@ DriveA5 (Modbus RTU / libmodbus):
 - a5_pos_cli logs position checks to out/a5_pos_log.csv (raw + logical P0B-07, error, dev, cmd) and caches P05-02 (units/rev) when readable.
 - Standard test: 10 rpm, 120 s, ~200 Hz. CSV: t_s,pos,rev.
 - Revolution count: detect robust wrap (prev > 60000 and pos < 5000).
-- a5_speed_logger: headless logger para modo velocidade (RPM) com schedule CSV (rpm,duration_s). Loga P0B-09 (posicao) e P0B-00 (actual motor speed) em 50 Hz: idx,t_qpc,t_s,pos,rpm,pos_err,rpm_err. Se P05-02 estiver disponivel, escala posicao para 0..(P05-02-1); caso contrario usa bruto 0..65535.
+- a5_speed_logger: headless logger para modo velocidade (RPM) com schedule CSV (rpm,duration_s). Loga P0B-09 (posicao) e P0B-00 (actual motor speed) em 50 Hz: idx,t_qpc,t_s,pos,rpm,pos_err,rpm_err,pos_mod. Se P05-02 estiver disponivel, escala posicao para 0..(P05-02-1); caso contrario usa bruto 0..65535.
 - a5_speed_logger --setup: escreve P02-00=0, P06-00=0, P06-01=3, P06-02=0, P03-02=0, P0C-09=1 e P31-00=0 para usar P06-03 como unica fonte de velocidade (evita offset por A+B).
 - a5_speed_logger fim de ensaio: envia parada imediata reforcada (RPM=0 + CTRL RDY + P31-00=0 com retry curto).
 - a5_speed_logger usa deadline real (QPC/wall-time) para disparar STOP no tempo alvo, mesmo se o loop de aquisicao estiver atrasado.
@@ -117,7 +139,13 @@ DriveA5 (Modbus RTU / libmodbus):
 - a5_speed_logger --ipc: aceita STOP via stdin para encerramento antecipado com a mesma rotina de parada.
 - a5_speed_logger --ipc: aceita PAUSE/RESUME. Em pause aplica rampa ate 0 rpm e para; em resume volta com rampa de setpoint e desloca deadlines (sem contar tempo pausado).
 - a5_speed_logger aplica rampa linear de setpoint (3 s) entre trocas de segmento, pause/resume e stop de ensaio para reduzir tranco no motor.
-- merge_logs: junta dlg.csv + drive.csv por indice de linha e gera CSV de resultado com colunas: idx,t_s,ch1..ch8,pos,rpm,dlg_err,drive_pos_err,drive_rpm_err.
+- a5_speed_logger escreve `a5_speed_events.log` ao lado do `drive.csv` com startup, START, pause/resume, progresso por segundo, erros de leitura e encerramento.
+- merge_logs: junta dlg.csv + drive.csv por indice de linha e gera CSV de resultado com colunas: idx,t_s,ch1..ch8,atrito,pos,rpm,dlg_err,drive_pos_err,drive_rpm_err.
+- Atrito por volta (tempo real e final) e processado em Python no supervisÃ³rio com alinhamento por idx entre `dlg.csv` e `drive.csv`.
+- Regra de voltas em Python usa unwrap orientado por direcao (RPM com deadband) e guarda de plausibilidade de delta para evitar sobre/subcontagem.
+- `atrito_por_volta.csv` e sempre reconstruido no final por `wait_and_merge` usando os CSVs completos.
+- Turn counting (C + Python) usa unwrap orientado por direcao (sinal de RPM com deadband de 5 rpm) para evitar subcontagem quando houver perda de amostras.
+- No supervisorio (agregacao em Python), `P0B-09` usa 1 ciclo por volta de motor e converte para voltas do pino por `voltas_pino = voltas_motor / i` (i = D2/D1).
 Field notes (DriveA5, based on recent tests):
 - Relative mode (P11-04=0) is more consistent than absolute, but still drifts if completion threshold is loose.
 - P05-21 (positioning completion threshold) around 20 caused ~20 count residual; lowering to 5 or 2 is recommended for tighter closure.
@@ -138,7 +166,8 @@ CSV conventions
 - Fixed headers and units. Use "NULL" rows only for real losses.
 - Write outputs into out/ subfolders (gitignored) when creating artifacts.
 - Supervisor (novo_tribometro.py) grava em: Desktop\\Repositorio\\<dd-mm-aaaa - Estudo X - Nome do ensaio>\\<REP N>.
-  Arquivos padrao: info_ensaio.csv, schedule.csv, dlg.csv, drive.csv, resultado_ensaio.csv.
+  Arquivos padrao: info_ensaio.csv, dlg.csv, drive.csv, atrito_por_volta.csv, resultado_ensaio.csv.
+  Pasta tecnica: DadosDev\\ com resultado_ensaio.csv.merge_source, schedule.csv, graph_events.log, dlg_logger_events.log e a5_speed_events.log.
 
 Roadmap (short)
 - Load calibration (a,b) from file and apply on-the-fly in DLG logger.

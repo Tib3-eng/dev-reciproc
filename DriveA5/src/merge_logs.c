@@ -27,6 +27,14 @@ Resumo de funcoes:
 #include <stdlib.h>
 #include <string.h>
 
+/*
+Funcao: trim
+Objetivo: Normaliza texto/entrada para evitar inconsistencias.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void trim(char *s){
     size_t n = strlen(s);
     while(n && (s[n-1]=='\n'||s[n-1]=='\r'||s[n-1]==' '||s[n-1]=='\t')) s[--n]=0;
@@ -34,6 +42,14 @@ static void trim(char *s){
     if(p != s) memmove(s, p, strlen(p)+1);
 }
 
+/*
+Funcao: split_csv
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int split_csv(char *line, char **cols, int max_cols){
     int n = 0;
     char *p = line;
@@ -48,11 +64,27 @@ static int split_csv(char *line, char **cols, int max_cols){
     return n;
 }
 
+/*
+Funcao: print_usage
+Objetivo: Exibe informacoes para operador/diagnostico.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void print_usage(void){
     puts("Uso:");
     puts("  merge_logs --dlg <dlg.csv> --drive <drive.csv> --out <merged.csv>");
 }
 
+/*
+Funcao: write_merge_signature
+Objetivo: Realiza escrita de dados de hardware/arquivo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void write_merge_signature(const char *out_path, const char *source){
     char sig_path[2048];
     _snprintf(sig_path, sizeof(sig_path), "%s.merge_source.txt", out_path);
@@ -62,6 +94,14 @@ static void write_merge_signature(const char *out_path, const char *source){
     fclose(fsig);
 }
 
+/*
+Funcao: main
+Objetivo: Executa o fluxo principal do programa.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 int main(int argc, char **argv){
     const char *dlg_path = NULL;
     const char *drive_path = NULL;
@@ -96,7 +136,7 @@ int main(int argc, char **argv){
     fgets(line_dlg, sizeof(line_dlg), fdlg);
     fgets(line_drv, sizeof(line_drv), fdrv);
 
-    fprintf(fout, "idx,t_s,ch1,ch2,ch3,ch4,ch5,ch6,ch7,ch8,pos,rpm,dlg_err,drive_pos_err,drive_rpm_err\n");
+    fprintf(fout, "idx,t_s,ch1,ch2,ch3,ch4,ch5,ch6,ch7,ch8,atrito,pos,rpm,dlg_err,drive_pos_err,drive_rpm_err\n");
 
     int idx_fallback = 0;
     for(;;){
@@ -139,14 +179,16 @@ int main(int argc, char **argv){
 
         const char *pos = (drv_n >= 4 && drv_cols[3][0]) ? drv_cols[3] : "NULL";
         const char *rpm = (drv_n >= 5 && drv_cols[4][0]) ? drv_cols[4] : "NULL";
-        const char *dlg_err = (dlg_n >= 12 && dlg_cols[11][0]) ? dlg_cols[11] : "1";
+        const char *atrito = (dlg_n >= 13 && dlg_cols[11][0]) ? dlg_cols[11] : "NULL";
+        const char *dlg_err = (dlg_n >= 13 && dlg_cols[12][0]) ? dlg_cols[12]
+                              : (dlg_n >= 12 && dlg_cols[11][0]) ? dlg_cols[11] : "1";
         const char *drv_pos_err = (drv_n >= 6 && drv_cols[5][0]) ? drv_cols[5] : "1";
         const char *drv_rpm_err = (drv_n >= 7 && drv_cols[6][0]) ? drv_cols[6] : "1";
 
-        fprintf(fout, "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n",
+        fprintf(fout, "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n",
                 idx, t_s,
                 ch[0], ch[1], ch[2], ch[3], ch[4], ch[5], ch[6], ch[7],
-                pos, rpm, dlg_err, drv_pos_err, drv_rpm_err);
+                atrito, pos, rpm, dlg_err, drv_pos_err, drv_rpm_err);
 
         idx_fallback++;
     }

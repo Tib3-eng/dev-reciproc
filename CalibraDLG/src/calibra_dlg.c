@@ -69,6 +69,8 @@ static const uint16_t DLG_PORT = 41401;
 #define DEFAULT_IGAIN_IDX 5
 #define DEFAULT_ILPF  0
 #define DEFAULT_SENSPWR_IDX 2
+#define TC_CJC_INTERNAL 0
+#define TC_CJC_EXTERNAL 1
 
 static const int gain_values[] = { 1, 3, 10, 30, 100, 300, 1000, 3000 };
 static const double vexc_values[] = { 1.0, 2.5, 3.3, 5.0, 0.0 };
@@ -113,6 +115,14 @@ static void send_cmd(SOCKET s, const void *p, int len, const struct sockaddr_in 
     sendto(s, (const char *)p, len, 0, (const struct sockaddr *)a, sizeof(*a));
 }
 
+/*
+Funcao: open_udp
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int open_udp(SOCKET *ps, struct sockaddr_in *addr) {
     *ps = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (*ps == INVALID_SOCKET) return -1;
@@ -139,6 +149,14 @@ static int open_udp(SOCKET *ps, struct sockaddr_in *addr) {
     return 0;
 }
 
+/*
+Funcao: stop_acq
+Objetivo: Envia comando para controle do fluxo de aquisicao/drive.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void stop_acq(SOCKET s, const struct sockaddr_in *addr) {
     PktHdr stop = { OP_ACQSTOP, 0 };
     send_cmd(s, &stop, sizeof(stop), addr);
@@ -157,6 +175,14 @@ static void configure_channel(SOCKET s, const struct sockaddr_in *addr, int ch, 
     send_cmd(s, &cfg, sizeof(cfg), addr);
 }
 
+/*
+Funcao: acq_setup_single
+Objetivo: Envia comando para controle do fluxo de aquisicao/drive.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void acq_setup_single(SOCKET s, const struct sockaddr_in *addr, float freq_idx, int ch) {
     PktAcqSetup st;
     memset(&st, 0, sizeof(st));
@@ -168,6 +194,14 @@ static void acq_setup_single(SOCKET s, const struct sockaddr_in *addr, float fre
     send_cmd(s, &st, sizeof(st), addr);
 }
 
+/*
+Funcao: acq_start
+Objetivo: Envia comando para controle do fluxo de aquisicao/drive.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void acq_start(SOCKET s, const struct sockaddr_in *addr) {
     PktHdr start = { OP_ACQSTART, 0 };
     send_cmd(s, &start, sizeof(start), addr);
@@ -192,6 +226,14 @@ static int test_comm(SOCKET s, const struct sockaddr_in *addr, int ch, int tSens
     return 1;
 }
 
+/*
+Funcao: wait_first_packet
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int wait_first_packet(SOCKET s, const struct sockaddr_in *addr, int ch) {
     for (int attempt = 0; attempt < START_RETRIES; ++attempt) {
         DWORD t0 = GetTickCount();
@@ -207,6 +249,14 @@ static int wait_first_packet(SOCKET s, const struct sockaddr_in *addr, int ch) {
     return -1;
 }
 
+/*
+Funcao: drain_socket
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void drain_socket(SOCKET s) {
     DWORD prev_to = TIMEOUT_MS;
     DWORD drain_to = DRAIN_RCVTIMEO_MS;
@@ -221,17 +271,41 @@ static void drain_socket(SOCKET s) {
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char *)&prev_to, sizeof(prev_to));
 }
 
+/*
+Funcao: restart_stream
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int restart_stream(SOCKET s, const struct sockaddr_in *addr, int ch) {
     acq_setup_single(s, addr, IDX_FREQ, ch);
     acq_start(s, addr);
     return wait_first_packet(s, addr, ch);
 }
 
+/*
+Funcao: ensure_out_dir
+Objetivo: Resolve configuracao/caminho/estado auxiliar do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int ensure_out_dir(void) {
     if (_mkdir("out") != 0 && errno != EEXIST) return -1;
     return 0;
 }
 
+/*
+Funcao: ensure_out_dir_for_path
+Objetivo: Resolve configuracao/caminho/estado auxiliar do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int ensure_out_dir_for_path(const char *path) {
     const char *a = strrchr(path, '\\');
     const char *b = strrchr(path, '/');
@@ -251,6 +325,14 @@ static int ensure_out_dir_for_path(const char *path) {
     return 0;
 }
 
+/*
+Funcao: read_line
+Objetivo: Realiza leitura de dados de hardware/arquivo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int read_line(char *buf, size_t size) {
     if (!fgets(buf, (int)size, stdin)) return 0;
     size_t len = strlen(buf);
@@ -260,6 +342,14 @@ static int read_line(char *buf, size_t size) {
     return 1;
 }
 
+/*
+Funcao: stdin_is_console
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int stdin_is_console(void) {
     HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
     DWORD mode = 0;
@@ -269,6 +359,14 @@ static int stdin_is_console(void) {
 
 static int g_allocated_console = 0;
 
+/*
+Funcao: ensure_console
+Objetivo: Resolve configuracao/caminho/estado auxiliar do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int ensure_console(void) {
     if (stdin_is_console()) return 1;
     if (!AllocConsole()) return 0;
@@ -281,6 +379,14 @@ static int ensure_console(void) {
     return stdin_is_console();
 }
 
+/*
+Funcao: wait_before_exit
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void wait_before_exit(void) {
     if (stdin_is_console()) {
         printf("Pressione Enter para sair...\n");
@@ -295,11 +401,27 @@ static void wait_before_exit(void) {
                 MB_OK | MB_ICONERROR);
 }
 
+/*
+Funcao: exit_with_pause
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int exit_with_pause(int code) {
     wait_before_exit();
     return code;
 }
 
+/*
+Funcao: ask_int
+Objetivo: Faz parse/validacao de entrada de dados.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int ask_int(const char *prompt, int minv, int maxv, int *out) {
     char line[128];
     for (;;) {
@@ -316,6 +438,14 @@ static int ask_int(const char *prompt, int minv, int maxv, int *out) {
     }
 }
 
+/*
+Funcao: ask_double
+Objetivo: Faz parse/validacao de entrada de dados.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int ask_double(const char *prompt, double *out) {
     char line[128];
     for (;;) {
@@ -332,6 +462,14 @@ static int ask_double(const char *prompt, double *out) {
     }
 }
 
+/*
+Funcao: print_sensor_menu
+Objetivo: Exibe informacoes para operador/diagnostico.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void print_sensor_menu(void) {
     printf("Tipo de sensor (tSensor):\n");
     printf(" 0 - tensao\n");
@@ -346,6 +484,14 @@ static void print_sensor_menu(void) {
     printf(" 9 - termopar T\n");
 }
 
+/*
+Funcao: print_gain_menu
+Objetivo: Exibe informacoes para operador/diagnostico.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void print_gain_menu(void) {
     printf("Ganho (iGain):\n");
     for (int i = 0; i < (int)(sizeof(gain_values) / sizeof(gain_values[0])); ++i) {
@@ -353,6 +499,14 @@ static void print_gain_menu(void) {
     }
 }
 
+/*
+Funcao: print_vexc_menu
+Objetivo: Exibe informacoes para operador/diagnostico.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void print_vexc_menu(void) {
     printf("Tensao de excitacao (iSensPwr):\n");
     for (int i = 0; i < (int)(sizeof(vexc_values) / sizeof(vexc_values[0])); ++i) {
@@ -397,6 +551,78 @@ static void compute_fit(int npoints, const double *raw, const double *ref,
     if (r2) *r2 = r;
 }
 
+/*
+Funcao: is_thermocouple_sensor
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
+static int is_thermocouple_sensor(int tSensor) {
+    return (tSensor >= 6 && tSensor <= 13) ? 1 : 0;
+}
+
+static const char *tc_cjc_mode_name(int mode) {
+    return (mode == TC_CJC_EXTERNAL) ? "external" : "internal";
+}
+
+/*
+Funcao: build_tcmeta_path
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
+static int build_tcmeta_path(const char *main_path, char *out, size_t outsz) {
+    const char *dot = strrchr(main_path, '.');
+    size_t base_len = strlen(main_path);
+    if (dot && strcmp(dot, ".json") == 0) {
+        base_len = (size_t)(dot - main_path);
+    }
+    if (base_len + strlen("_tcmeta.json") + 1 > outsz) return 0;
+    memcpy(out, main_path, base_len);
+    out[base_len] = '\0';
+    strcat(out, "_tcmeta.json");
+    return 1;
+}
+
+/*
+Funcao: write_tcmeta_json
+Objetivo: Realiza escrita de dados de hardware/arquivo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
+static int write_tcmeta_json(const char *main_path, int ch, int tSensor, int tc_cjc_mode) {
+    char meta_path[320];
+    if (!build_tcmeta_path(main_path, meta_path, sizeof(meta_path))) return 0;
+    if (ensure_out_dir_for_path(meta_path) != 0) return 0;
+
+    FILE *f = fopen(meta_path, "w");
+    if (!f) return 0;
+
+    fprintf(f, "{\n");
+    fprintf(f, "  \"channel\": \"CH%d\",\n", ch);
+    fprintf(f, "  \"tSensor\": %d,\n", tSensor);
+    fprintf(f, "  \"tc_cjc_mode\": %d,\n", tc_cjc_mode);
+    fprintf(f, "  \"tc_cjc_mode_name\": \"%s\"\n", tc_cjc_mode_name(tc_cjc_mode));
+    fprintf(f, "}\n");
+
+    fclose(f);
+    return 1;
+}
+
+/*
+Funcao: json_get_string
+Objetivo: Faz parse/validacao de entrada de dados.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int json_get_string(const char *line, const char *key, char *out, size_t outsz) {
     const char *p = strstr(line, key);
     if (!p) return 0;
@@ -414,6 +640,14 @@ static int json_get_string(const char *line, const char *key, char *out, size_t 
     return (*p == '\"') ? 1 : 0;
 }
 
+/*
+Funcao: json_get_double
+Objetivo: Faz parse/validacao de entrada de dados.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int json_get_double(const char *line, const char *key, double *out) {
     const char *p = strstr(line, key);
     if (!p) return 0;
@@ -428,6 +662,14 @@ static int json_get_double(const char *line, const char *key, double *out) {
     return 1;
 }
 
+/*
+Funcao: json_get_int
+Objetivo: Faz parse/validacao de entrada de dados.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int json_get_int(const char *line, const char *key, int *out) {
     const char *p = strstr(line, key);
     if (!p) return 0;
@@ -442,16 +684,40 @@ static int json_get_int(const char *line, const char *key, int *out) {
     return 1;
 }
 
+/*
+Funcao: ipc_send_error
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void ipc_send_error(const char *msg) {
     printf("{\"op\":\"error\",\"message\":\"%s\"}\n", msg);
     fflush(stdout);
 }
 
+/*
+Funcao: ipc_send_ok
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void ipc_send_ok(const char *op) {
     printf("{\"op\":\"%s\"}\n", op);
     fflush(stdout);
 }
 
+/*
+Funcao: run_ipc
+Objetivo: Controla uma etapa operacional do ensaio.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int run_ipc(void) {
     char line[512];
     int configured = 0;
@@ -461,6 +727,7 @@ static int run_ipc(void) {
     int iLPF = DEFAULT_ILPF;
     int iGainIdx = DEFAULT_IGAIN_IDX;
     int iSensPwr = DEFAULT_SENSPWR_IDX;
+    int tc_cjc_mode = TC_CJC_INTERNAL;
     double gain_nom = gain_values[DEFAULT_IGAIN_IDX];
     double vexc_nom = vexc_values[DEFAULT_SENSPWR_IDX];
     char out_path[256] = "out/calib.json";
@@ -498,10 +765,14 @@ static int run_ipc(void) {
             json_get_int(line, "\"iLPF\"", &iLPF);
             json_get_int(line, "\"iGain\"", &iGainIdx);
             json_get_int(line, "\"iSensPwr\"", &iSensPwr);
+            json_get_int(line, "\"tc_cjc_mode\"", &tc_cjc_mode);
             json_get_string(line, "\"out_path\"", out_path, sizeof(out_path));
 
             if (iGainIdx < 0 || iGainIdx > 7) iGainIdx = DEFAULT_IGAIN_IDX;
             if (iSensPwr < 0 || iSensPwr > 4) iSensPwr = DEFAULT_SENSPWR_IDX;
+            if (tc_cjc_mode != TC_CJC_INTERNAL && tc_cjc_mode != TC_CJC_EXTERNAL) {
+                tc_cjc_mode = TC_CJC_INTERNAL;
+            }
             gain_nom = gain_values[iGainIdx];
             vexc_nom = vexc_values[iSensPwr];
 
@@ -590,6 +861,10 @@ static int run_ipc(void) {
                             gain_nom, vexc_nom, (int)npoints, raw, ref, slope, intercept, r2)) {
                 ipc_send_error("write_failed");
                 continue;
+            }
+
+            if (is_thermocouple_sensor(tSensor)) {
+                (void)write_tcmeta_json(out_path, ch, tSensor, tc_cjc_mode);
             }
 
             printf("{\"op\":\"done\",\"slope\":%.10g,\"intercept\":%.10g,\"r2\":%.6f,\"out_path\":\"%s\"}\n",
@@ -702,6 +977,14 @@ static int write_json(const char *path, int ch, int tSensor, int iLPF,
     return 1;
 }
 
+/*
+Funcao: run_interactive
+Objetivo: Controla uma etapa operacional do ensaio.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int run_interactive(void) {
     if (!ensure_console()) {
         MessageBoxA(NULL,
@@ -721,12 +1004,21 @@ static int run_interactive(void) {
     int iLPF = DEFAULT_ILPF;
     int iGainIdx = DEFAULT_IGAIN_IDX;
     int iSensPwr = DEFAULT_SENSPWR_IDX;
+    int tc_cjc_mode = TC_CJC_INTERNAL;
     double gain_nom = gain_values[DEFAULT_IGAIN_IDX];
     double vexc_nom = vexc_values[DEFAULT_SENSPWR_IDX];
 
     if (!ask_int("Qual canal deseja calibrar (1-8): ", 1, 8, &ch)) return exit_with_pause(1);
     print_sensor_menu();
     if (!ask_int("Selecione o tipo de sensor (0-9): ", 0, 9, &tSensor)) return exit_with_pause(1);
+    if (is_thermocouple_sensor(tSensor)) {
+        int opt_cjc = 1;
+        printf("Junta fria (termopar):\n");
+        printf(" 1 - interna\n");
+        printf(" 2 - externa (TEDs)\n");
+        if (!ask_int("Escolha a junta fria (1-2): ", 1, 2, &opt_cjc)) return exit_with_pause(1);
+        tc_cjc_mode = (opt_cjc == 2) ? TC_CJC_EXTERNAL : TC_CJC_INTERNAL;
+    }
     print_gain_menu();
     int opt_gain = 0;
     if (!ask_int("Escolha o ganho (1-8): ", 1, 8, &opt_gain)) return exit_with_pause(1);
@@ -837,6 +1129,9 @@ static int run_interactive(void) {
         free(ref);
         return exit_with_pause(1);
     }
+    if (is_thermocouple_sensor(tSensor)) {
+        (void)write_tcmeta_json(out_path, ch, tSensor, tc_cjc_mode);
+    }
 
     printf("Saida: %s\n", out_path);
     free(raw);
@@ -845,6 +1140,14 @@ static int run_interactive(void) {
     return 0;
 }
 
+/*
+Funcao: main
+Objetivo: Executa o fluxo principal do programa.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 int main(int argc, char **argv) {
     int ipc = 0;
     for (int i = 1; i < argc; ++i) {

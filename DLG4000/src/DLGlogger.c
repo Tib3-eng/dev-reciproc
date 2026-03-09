@@ -150,6 +150,14 @@ static int open_udp(SOCKET* ps, struct sockaddr_in* addr)
     return 0;
 }
 
+/*
+Funcao: stop_acq
+Objetivo: Envia comando para controle do fluxo de aquisicao/drive.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void stop_acq(SOCKET s, const struct sockaddr_in* addr) {
     PktHdr stop = { OP_ACQSTOP, 0 };
     send_cmd(s, &stop, sizeof(stop), addr);
@@ -167,6 +175,14 @@ static void configure_channel(SOCKET s, const struct sockaddr_in* addr,
     send_cmd(s, &cfg, sizeof(cfg), addr);
 }
 
+/*
+Funcao: acq_setup_ch1
+Objetivo: Envia comando para controle do fluxo de aquisicao/drive.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void acq_setup_ch1(SOCKET s, const struct sockaddr_in* addr, float freq_idx) {
     PktAcqSetup st; memset(&st, 0, sizeof(st));
     st.code   = OP_ACQSETUP;
@@ -177,11 +193,27 @@ static void acq_setup_ch1(SOCKET s, const struct sockaddr_in* addr, float freq_i
     send_cmd(s, &st, sizeof(st), addr);
 }
 
+/*
+Funcao: acq_start
+Objetivo: Envia comando para controle do fluxo de aquisicao/drive.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void acq_start(SOCKET s, const struct sockaddr_in* addr) {
     PktHdr start = { OP_ACQSTART, 0 };
     send_cmd(s, &start, sizeof(start), addr);
 }
 
+/*
+Funcao: read_text_file
+Objetivo: Realiza leitura de dados de hardware/arquivo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna ponteiro ou status conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static char* read_text_file(const char* path, size_t* out_sz) {
     FILE* f = fopen(path, "rb");
     if (!f) return NULL;
@@ -199,6 +231,14 @@ static char* read_text_file(const char* path, size_t* out_sz) {
     return buf;
 }
 
+/*
+Funcao: channel_in_header
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int channel_in_header(const char* buf, int ch) {
     const char* p = strstr(buf, "\"channels\"");
     if (!p) return 0;
@@ -220,12 +260,28 @@ static int channel_in_header(const char* buf, int ch) {
     return 0;
 }
 
+/*
+Funcao: channel_matches
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int channel_matches(const char* buf, int ch) {
     char needle[32];
     _snprintf(needle, sizeof(needle), "\"channel\": \"CH%d\"", ch);
     return strstr(buf, needle) != NULL;
 }
 
+/*
+Funcao: parse_fit_value
+Objetivo: Faz parse/validacao de entrada de dados.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int parse_fit_value(const char* buf, const char* key, double* out) {
     const char* p = strstr(buf, key);
     if (!p) return 0;
@@ -240,6 +296,14 @@ static int parse_fit_value(const char* buf, const char* key, double* out) {
     return 1;
 }
 
+/*
+Funcao: parse_int_value
+Objetivo: Faz parse/validacao de entrada de dados.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int parse_int_value(const char* buf, const char* key, int* out) {
     const char* p = strstr(buf, key);
     if (!p) return 0;
@@ -254,6 +318,14 @@ static int parse_int_value(const char* buf, const char* key, int* out) {
     return 1;
 }
 
+/*
+Funcao: gain_index_from_value
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int gain_index_from_value(int value) {
     for (int i = 0; i < (int)(sizeof(gain_values) / sizeof(gain_values[0])); ++i) {
         if (gain_values[i] == value) return i;
@@ -356,6 +428,14 @@ static void do_test_comm(void) {
     printf("Concluido.\n\n");
 }
 
+/*
+Funcao: do_monitor_1hz
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void do_monitor_1hz(void) {
     printf("=== Monitor 1 Hz (CH1) - pressione Q para parar ===\n");
     WSADATA w; if (WSAStartup(MAKEWORD(2,2), &w)) { printf("Falha no WSAStartup\n"); return; }

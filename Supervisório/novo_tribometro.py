@@ -19,7 +19,10 @@ Modos presentes no arquivo:
 
 Saidas de ensaio:
 - Desktop\\Repositorio\\<data - estudo - nome>\\REP N\\
-  info_ensaio.csv, schedule.csv, dlg.csv, drive.csv, resultado_ensaio.csv.
+  info_ensaio.csv, dlg.csv, drive.csv, atrito_por_volta.csv, resultado_ensaio.csv.
+- Desktop\\Repositorio\\<data - estudo - nome>\\REP N\\DadosDev\\
+  resultado_ensaio.csv.merge_source, schedule.csv, graph_events.log,
+  dlg_logger_events.log, a5_speed_events.log.
 
 Pontos de atencao para manutencao:
 - Evitar alterar protocolo IPC textual sem ajustar executaveis C.
@@ -30,7 +33,7 @@ Resumo de funcoes chave:
 - _load_app_settings/_save_app_settings: persistencia de configuracoes locais.
 - check_status: check rapido de comunicacao com DLG e Drive.
 - start_acquisition/pause_acquisition/stop_acquisition: controle de ensaio na UI.
-- _wait_dlg_ok_and_start_timer/_tail_dlg_csv_for_graphs: sincronismo de inicio e grafico.
+- _wait_dlg_ok_and_start_timer/_tail_dlg_csv_for_graphs/_tail_turn_csv_for_graph3: sincronismo de inicio e graficos.
 - update1/update2/update3: atualizacao periodica das curvas no matplotlib.
 """
 # Bibliotecas padrao (Python):
@@ -47,6 +50,7 @@ import os
 import json
 import time
 import sys
+import math
 from datetime import datetime
 import threading
 import subprocess
@@ -108,6 +112,8 @@ USE_EXTERNAL_RUNNER = True
 # external_run_state guarda o RunState retornado pelo orchestrator:
 # handles de processo, caminhos de CSV e parametros da execucao em curso.
 external_run_state = None
+# Token monotonic para invalidar threads antigas entre ensaios.
+external_run_token = 0
 
 # Persistencia simples de configuracoes do supervisório.
 # Caminho padrao de saida caso o usuario ainda nao tenha configurado.
@@ -159,8 +165,9 @@ def _save_app_settings(data):
         os.makedirs(APP_SETTINGS_DIR, exist_ok=True)
         with open(APP_SETTINGS_PATH, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
+        return True
     except Exception:
-        pass
+        return False
 
 
 # APP_SETTINGS guarda o conteudo bruto carregado do JSON do usuario.
@@ -173,8 +180,10 @@ REPO_BASE = APP_SETTINGS.get("repo_base", DEFAULT_REPO_BASE)
 if not isinstance(REPO_BASE, str) or not REPO_BASE.strip():
     REPO_BASE = DEFAULT_REPO_BASE
 
-# RELACAO_MECANICA e usada na conversao mm/s -> rpm:
-# rpm = (i * v * 60) / (2 * pi * raio), onde i = RELACAO_MECANICA.
+# RELACAO_MECANICA (i) e definida como D2 / D1.
+# D1 = diametro da polia do motor; D2 = diametro da polia do disco.
+# Conversao mm/s -> rpm_motor:
+# rpm = (i * v * 60) / (2 * pi * raio_pino).
 try:
     RELACAO_MECANICA = float(APP_SETTINGS.get("relacao", DEFAULT_RELACAO))
 except Exception:
@@ -241,10 +250,15 @@ def _set_repo_base(path):
         return
     REPO_BASE = path
     APP_SETTINGS["repo_base"] = REPO_BASE
-    _save_app_settings(APP_SETTINGS)
+    saved_ok = _save_app_settings(APP_SETTINGS)
     if "repo_base_var" in globals():
         repo_base_var.set(REPO_BASE)
     log_msg(f"Diretorio base definido para: {REPO_BASE}")
+    if not saved_ok:
+        messagebox.showwarning(
+            "Diretorio base",
+            "Diretorio aplicado em memoria, mas houve falha ao salvar configuracao local."
+        )
 
 
 def _set_relacao_mecanica(valor):
@@ -257,10 +271,11 @@ def _set_relacao_mecanica(valor):
     global RELACAO_MECANICA, APP_SETTINGS
     RELACAO_MECANICA = valor
     APP_SETTINGS["relacao"] = RELACAO_MECANICA
-    _save_app_settings(APP_SETTINGS)
+    saved_ok = _save_app_settings(APP_SETTINGS)
     if "relacao_var" in globals():
         relacao_var.set(f"{RELACAO_MECANICA:.6g}")
     log_msg(f"Relacao mecanica definida para: {RELACAO_MECANICA:.6g}")
+    return saved_ok
 
 
 def salvar_relacao_mecanica():
@@ -285,7 +300,19 @@ def salvar_relacao_mecanica():
     if valor <= 0:
         messagebox.showwarning("Relacao", "Relacao deve ser maior que zero.")
         return
-    _set_relacao_mecanica(valor)
+    saved_ok = _set_relacao_mecanica(valor)
+    # Atualiza imediatamente os campos derivados na tabela.
+    try:
+        calcular_voltas_cursos_duracao()
+    except Exception:
+        pass
+    if saved_ok:
+        messagebox.showinfo("Relacao", f"Relacao mecanica salva: {valor:.6g}")
+    else:
+        messagebox.showwarning(
+            "Relacao",
+            "Relacao aplicada em memoria, mas houve falha ao salvar configuracao local."
+        )
 
 
 def selecionar_repo_base():
@@ -395,6 +422,79 @@ def log_msg(msg):
     except Exception:
         # Se root nao existir por algum motivo, ignore.
         pass
+
+
+def graph_log(msg):
+    """
+    Log dedicado de confiabilidade dos graficos.
+
+    - Replica no log principal (console/UI quando existir).
+    - Grava em graph_events.log dentro da pasta do ensaio atual.
+    """
+    line = f"[GRAPH] {msg}"
+    log_msg(line)
+    if not graph_events_log_path:
+        return
+    try:
+        ts = time.strftime('%H:%M:%S')
+        with graph_events_lock:
+            with open(graph_events_log_path, "a", encoding="utf-8") as f:
+                f.write(f"[{ts}] {msg}\n")
+    except Exception:
+        pass
+
+
+def _turn_rt_reset_state(initial_mode="fallback"):
+    """
+    Reseta o arbitro de fontes do grafico 3 para um novo ensaio.
+    """
+    global turn_rt_mode, turn_rt_stream_has_data, turn_rt_stream_last_ts, turn_rt_stream_closed
+    mode = "fallback" if str(initial_mode).lower() == "fallback" else "stream"
+    with turn_rt_lock:
+        turn_rt_mode = mode
+        turn_rt_stream_has_data = False
+        turn_rt_stream_last_ts = time.time()
+        # Se comecar em fallback, considera stream fechado para nao ficar
+        # aguardando sinais de um processo inexistente.
+        turn_rt_stream_closed = (mode == "fallback")
+
+
+def _turn_rt_mark_stream_data():
+    """
+    Marca que o stream TURN recebeu dado neste instante.
+    """
+    global turn_rt_stream_has_data, turn_rt_stream_last_ts
+    with turn_rt_lock:
+        turn_rt_stream_has_data = True
+        turn_rt_stream_last_ts = time.time()
+
+
+def _turn_rt_mark_stream_closed():
+    """
+    Marca encerramento do stream TURN.
+    """
+    global turn_rt_stream_closed
+    with turn_rt_lock:
+        turn_rt_stream_closed = True
+
+
+def _turn_rt_get_mode():
+    with turn_rt_lock:
+        return turn_rt_mode
+
+
+def _turn_rt_switch_to_fallback(reason):
+    """
+    Faz failover de fonte do grafico 3 para agregacao local.
+    """
+    global turn_rt_mode
+    do_log = False
+    with turn_rt_lock:
+        if turn_rt_mode != "fallback":
+            turn_rt_mode = "fallback"
+            do_log = True
+    if do_log:
+        graph_log(f"TURN RT fallback ativo: {reason}")
 
 
 # Aviso unico se o modulo LDTP nao estiver disponivel.
@@ -704,8 +804,21 @@ caminho_arquivo_2 = ""
 # Caminhos usados pelo pipeline externo (DLG/Drive/Merge)
 caminho_dlg_csv = ""
 caminho_drive_csv = ""
+caminho_turn_csv = ""
 caminho_merge_csv = ""
 caminho_schedule_csv = ""
+graph_events_log_path = ""
+graph_events_lock = threading.Lock()
+# Arbitro de fonte do grafico 3 em tempo real:
+# - prioridade: stream TURN do agregador C
+# - fallback: agregacao local (dlg.csv + drive.csv) apenas em stall/falha do stream
+turn_rt_lock = threading.Lock()
+turn_rt_mode = "stream"
+turn_rt_stream_has_data = False
+turn_rt_stream_last_ts = 0.0
+turn_rt_stream_closed = False
+TURN_RT_STREAM_STALL_S = 3.0
+TURN_RT_STARTUP_GRACE_S = 4.0
 
 # Inicializa listas de amostras
 
@@ -713,6 +826,7 @@ caminho_schedule_csv = ""
 lista_entries_velocidade = []
 lista_entries_distancia = []
 lista_labels_voltas_cursos = []
+lista_labels_voltas_pin = []
 lista_labels_duracao = []
 # allSamps: buffer da versao anterior para escrita local.
 allSamps = [[] for _ in range(numChannels)] 
@@ -732,10 +846,13 @@ timer_started = False
 # Mantemos valores padrao para evitar NameError.
 y1_auto = True
 y2_auto = True
+y3_auto = True
 y1_min = 0.0
 y1_max = 1.0
 y2_min = 0.0
 y2_max = 1.0
+y3_min = 0.0
+y3_max = 1.0
 
 # Dados do grafico 3 (atrito). Inicializa para evitar NameError.
 p_strokes = []
@@ -743,6 +860,7 @@ p_atrito_ef = []
 p_atrito_max = []
 p_atrito_min = []
 p_coluna_velocidade = []
+p_turns_target = 0.0
 
 # Configuracao do tamanho do bloco para salvar no disco (ex: a cada 1000 linhas)
 tamanho_bloco = 1000 
@@ -1009,7 +1127,8 @@ def fechar_janela():
 def salvar_arquivo():
     
     global caminho_arquivo_1, caminho_arquivo_2, caminho_pasta
-    global caminho_dlg_csv, caminho_drive_csv, caminho_merge_csv, caminho_schedule_csv
+    global caminho_dlg_csv, caminho_drive_csv, caminho_turn_csv, caminho_merge_csv, caminho_schedule_csv
+    global graph_events_log_path
 
     # ---------------------------------------------------------------------------------
     # Estrutura padrao:
@@ -1045,6 +1164,7 @@ def salvar_arquivo():
         )
         caminho_arquivo_1 = ""
         caminho_arquivo_2 = ""
+        graph_events_log_path = ""
         return
 
     os.makedirs(caminho_pasta_raiz, exist_ok=True)
@@ -1055,11 +1175,13 @@ def salvar_arquivo():
     caminho_arquivo_2 = os.path.join(caminho_pasta, "dlg.csv")    # mantido para compatibilidade
     caminho_dlg_csv = os.path.join(caminho_pasta, "dlg.csv")
     caminho_drive_csv = os.path.join(caminho_pasta, "drive.csv")
+    caminho_turn_csv = os.path.join(caminho_pasta, "atrito_por_volta.csv")
     caminho_merge_csv = os.path.join(caminho_pasta, "resultado_ensaio.csv")
     caminho_schedule_csv = os.path.join(caminho_pasta, "schedule.csv")
+    graph_events_log_path = os.path.join(caminho_pasta, "graph_events.log")
 
     # Cria arquivos vazios (evita erros de permissao na hora do append)
-    for p in [caminho_arquivo_1, caminho_arquivo_2]:
+    for p in [caminho_arquivo_1, caminho_arquivo_2, graph_events_log_path]:
         with open(p, "w", encoding="utf-8") as f:
             f.write("")
    
@@ -1251,6 +1373,46 @@ def _start_timer_now():
 def _is_running():
     return (running == "true") or (running is True)
 
+
+def _run_token_alive(run_token):
+    """
+    Valida se a thread pertence ao ensaio externo atual.
+
+    Isso evita que tail threads antigas sigam alimentando graficos quando
+    um novo ensaio e iniciado.
+    """
+    if run_token is None:
+        return True
+    return run_token == external_run_token
+
+
+def _read_complete_tail_line(f):
+    """
+    Le uma linha completa de um arquivo em crescimento.
+
+    Retorno:
+      (line, True)  -> linha completa (terminada em '\\n')
+      ("", False)   -> sem dado novo ou linha parcial (writer ainda escrevendo)
+    """
+    try:
+        pos = f.tell()
+        line = f.readline()
+    except Exception:
+        return "", False
+
+    if not line:
+        return "", False
+
+    # Em tail no Windows, pode surgir linha parcial no EOF enquanto writer escreve.
+    if not line.endswith("\n"):
+        try:
+            f.seek(pos)
+        except Exception:
+            pass
+        return "", False
+
+    return line, True
+
 # _set_target_labels(vel_txt, rpm_txt):
 # - Atualiza os textos de "Velocidade alvo atual" e "RPM Alvo atual".
 # - Faz update thread-safe via root.after quando possivel.
@@ -1276,6 +1438,53 @@ def _set_target_labels(vel_txt=None, rpm_txt=None):
 # - Conveniencia para retornar labels de alvo ao estado parado.
 def _set_targets_stopped():
     _set_target_labels("0 mm/s", "0 rpm")
+
+
+def _abort_external_run_due_dlg_timeout(reason_msg):
+    """
+    Aborta o ensaio externo quando o DLG nao entrega amostras validas no inicio.
+
+    Motivo:
+    - Evita executar todo o ensaio com dlg.csv quase todo em erro/NULL.
+    - Mantem comportamento previsivel: sem DLG valido, ensaio nao prossegue.
+    """
+    global running, is_paused, tempo_pause_inicio, timer_started, external_run_state
+    if not _is_running() or timer_started:
+        return
+
+    log_msg(reason_msg)
+    running = False
+    is_paused = False
+    tempo_pause_inicio = 0
+    timer_started = False
+
+    state_snapshot = external_run_state
+    external_run_state = None
+    if state_snapshot is not None:
+        def _stop_external():
+            try:
+                orch.stop_run(state_snapshot)
+            except Exception as e:
+                log_msg(f"Falha ao encerrar subprocessos apos timeout do DLG: {e}")
+        threading.Thread(target=_stop_external, daemon=True).start()
+
+    try:
+        label_ensaio_estado.config(text="Falha DLG", fg="red")
+        _set_targets_stopped()
+        lbl_tempo_decorrido2.config(text="0:00:00")
+        if 'button_frame5_pausar' in globals():
+            button_frame5_pausar.config(text="Pausar", bg="SystemButtonFace")
+    except Exception:
+        pass
+
+    try:
+        messagebox.showerror(
+            "Falha de aquisicao DLG",
+            "O DLG nao entregou amostras validas para iniciar o ensaio.\n"
+            "Verifique comunicacao/rede e execute novamente."
+        )
+    except Exception:
+        pass
 
 # _update_vel_label_from_schedule(...):
 # - Thread de UI que acompanha o tempo decorrido e seleciona etapa ativa.
@@ -1341,7 +1550,7 @@ def _update_vel_label_from_schedule(vel_mm_s_list, dur_s_list, rpm_list=None):
 #   dlg_csv_path: arquivo monitorado.
 #   min_ok: numero minimo de amostras validas.
 #   timeout_s: limite maximo de espera.
-def _wait_dlg_ok_and_start_timer(dlg_csv_path, min_ok=3, timeout_s=15):
+def _wait_dlg_ok_and_start_timer(dlg_csv_path, min_ok=3, timeout_s=15, run_token=None):
     """
     Aguarda N amostras validas do DLG (err=0) e so entao inicia o cronometro.
     Isso alinha o tempo do GUI com o inicio real do DLG.
@@ -1349,11 +1558,16 @@ def _wait_dlg_ok_and_start_timer(dlg_csv_path, min_ok=3, timeout_s=15):
     log_msg(f"Aguardando {min_ok} amostras validas do DLG para iniciar tempo...")
     t0 = time.time()
     ok_count = 0
+    seen_rows = 0
 
     # Espera o arquivo existir
-    while _is_running() and not os.path.exists(dlg_csv_path):
+    while _is_running() and _run_token_alive(run_token) and not os.path.exists(dlg_csv_path):
         if time.time() - t0 > timeout_s:
-            log_msg("DLG: timeout aguardando arquivo CSV.")
+            try:
+                root.after(0, _abort_external_run_due_dlg_timeout,
+                           "DLG: timeout aguardando arquivo CSV de aquisicao.")
+            except Exception:
+                _abort_external_run_due_dlg_timeout("DLG: timeout aguardando arquivo CSV de aquisicao.")
             return
         time.sleep(0.05)
 
@@ -1365,24 +1579,36 @@ def _wait_dlg_ok_and_start_timer(dlg_csv_path, min_ok=3, timeout_s=15):
                 # Linha nao era cabecalho; processa como dado
                 f.seek(0)
 
-            while _is_running():
-                line = f.readline()
-                if not line:
+            while _is_running() and _run_token_alive(run_token):
+                line, complete = _read_complete_tail_line(f)
+                if not complete:
                     if time.time() - t0 > timeout_s:
-                        log_msg("DLG: timeout aguardando amostras validas.")
+                        try:
+                            root.after(0, _abort_external_run_due_dlg_timeout,
+                                       "DLG: timeout aguardando amostras validas (err=0).")
+                        except Exception:
+                            _abort_external_run_due_dlg_timeout("DLG: timeout aguardando amostras validas (err=0).")
                         return
+                    # Keep tailing while producer appends (Windows EOF refresh).
+                    try:
+                        f.seek(f.tell())
+                    except Exception:
+                        pass
                     time.sleep(0.05)
                     continue
 
                 parts = line.strip().split(",")
                 if not parts:
                     continue
+                seen_rows += 1
 
                 # DLG CSV: ... , err (ultima coluna)
                 if parts[-1].strip() == "0":
                     ok_count += 1
+                    if ok_count == 1:
+                        graph_log(f"TIMER gate first valid row idx={parts[0]} total_seen={seen_rows}")
                     if ok_count >= min_ok:
-                        while _is_running() and is_paused:
+                        while _is_running() and _run_token_alive(run_token) and is_paused:
                             time.sleep(0.05)
                         if not _is_running() or timer_started:
                             return
@@ -1393,41 +1619,58 @@ def _wait_dlg_ok_and_start_timer(dlg_csv_path, min_ok=3, timeout_s=15):
                         log_msg("DLG: amostras validas confirmadas; tempo iniciado.")
                         return
     except Exception as e:
-        log_msg(f"DLG: erro aguardando amostras ({e}).")
+        try:
+            root.after(0, _abort_external_run_due_dlg_timeout,
+                       f"DLG: erro aguardando amostras validas ({e}).")
+        except Exception:
+            _abort_external_run_due_dlg_timeout(f"DLG: erro aguardando amostras validas ({e}).")
 
 # _tail_dlg_csv_for_graphs(...):
 # - Faz tail do dlg.csv em tempo real durante ensaio externo.
 # - Converte linhas para buffers de plot (graSamps/sampsTimestamp).
 # - Em err=1 ou NULL, grava NaN para manter alinhamento temporal.
-def _tail_dlg_csv_for_graphs(dlg_csv_path):
+def _tail_dlg_csv_for_graphs(dlg_csv_path, run_token=None):
     """
     Alimenta os graficos com dados do DLG (modo externo).
     Lê dlg.csv em tempo real e atualiza graSamps + sampsTimestamp.
     """
     # Espera o arquivo existir
     t0 = time.time()
-    while _is_running() and not os.path.exists(dlg_csv_path):
+    while _is_running() and _run_token_alive(run_token) and not os.path.exists(dlg_csv_path):
         if time.time() - t0 > 15:
             log_msg("DLG: timeout aguardando dlg.csv para graficos.")
             return
         time.sleep(0.05)
 
     try:
+        log_msg(f"DLG tail: start token={run_token}.")
+        n_rows = 0
+        n_short = 0
+        n_err = 0
+        n_extreme_ch1 = 0
+        n_extreme_ch2 = 0
+        first_valid_logged = False
         with open(dlg_csv_path, "r", encoding="utf-8") as f:
             # Pula cabecalho
             header = f.readline()
             if header and "idx" not in header:
                 f.seek(0)
 
-            while _is_running():
-                line = f.readline()
-                if not line:
+            while _is_running() and _run_token_alive(run_token):
+                line, complete = _read_complete_tail_line(f)
+                if not complete:
+                    # Keep tailing while producer appends (Windows EOF refresh).
+                    try:
+                        f.seek(f.tell())
+                    except Exception:
+                        pass
                     time.sleep(0.02)
                     continue
 
                 parts = line.strip().split(",")
-                # Esperado: idx,t_qpc,t_s,ch1..ch8,err
+                # Esperado: idx,t_qpc,t_s,ch1..ch8,atrito,err (atrito opcional em versoes antigas)
                 if len(parts) < 12:
+                    n_short += 1
                     continue
 
                 try:
@@ -1436,6 +1679,8 @@ def _tail_dlg_csv_for_graphs(dlg_csv_path):
                     continue
 
                 err = parts[-1].strip()
+                if err != "0":
+                    n_err += 1
                 # Para err=1 ou NULL, coloca NaN nos canais (mantem tempo).
                 vals = []
                 for i in range(8):
@@ -1451,14 +1696,537 @@ def _tail_dlg_csv_for_graphs(dlg_csv_path):
                 sampsTimestamp.append(t_s)
                 for i in range(8):
                     graSamps[i].append(vals[i])
+                n_rows += 1
+                if err == "0" and not first_valid_logged:
+                    graph_log(f"DLG first valid row: idx={parts[0]} t_s={t_s:.6f} ch1={vals[0]} ch2={vals[1]}")
+                    first_valid_logged = True
+                try:
+                    if err == "0" and not math.isnan(vals[0]) and abs(vals[0]) > 2000.0:
+                        n_extreme_ch1 += 1
+                        if n_extreme_ch1 <= 10:
+                            graph_log(f"DLG extreme CH1 idx={parts[0]} t_s={t_s:.6f} v={vals[0]:.6f}")
+                    if err == "0" and not math.isnan(vals[1]) and abs(vals[1]) > 2000.0:
+                        n_extreme_ch2 += 1
+                        if n_extreme_ch2 <= 10:
+                            graph_log(f"DLG extreme CH2 idx={parts[0]} t_s={t_s:.6f} v={vals[1]:.6f}")
+                except Exception:
+                    pass
+                if n_rows % 1000 == 0:
+                    log_msg(f"DLG tail: token={run_token} rows={n_rows}.")
+                if n_rows % 500 == 0:
+                    graph_log(
+                        "DLG tail stats rows={0} err={1} short={2} ext_ch1={3} ext_ch2={4}".format(
+                            n_rows, n_err, n_short, n_extreme_ch1, n_extreme_ch2
+                        )
+                    )
 
                 # Janela deslizante para evitar crescer indefinidamente
                 if len(sampsTimestamp) > aux:
                     del sampsTimestamp[:-aux]
                     for i in range(8):
                         del graSamps[i][:-aux]
+        log_msg(f"DLG tail: stop token={run_token} rows={n_rows}.")
+        graph_log(
+            "DLG tail stop rows={0} err={1} short={2} ext_ch1={3} ext_ch2={4}".format(
+                n_rows, n_err, n_short, n_extreme_ch1, n_extreme_ch2
+            )
+        )
     except Exception as e:
         log_msg(f"DLG: erro lendo dlg.csv para graficos ({e}).")
+
+
+def _calc_expected_turns_from_table(raio_mm, relacao=1.0):
+    """
+    Estima o total de voltas fisicas a partir da tabela (distancia/raio).
+
+    Regras:
+    - Soma apenas linhas com velocidade e distancia validas.
+    - Retorna voltas do pino (fisicas): distancia / (2*pi*raio).
+    """
+    if raio_mm <= 0:
+        return 0.0
+    if relacao <= 0:
+        relacao = 1.0
+    total_pin = 0.0
+    for i in range(11):
+        vel_txt = lista_entries_velocidade[i].get().strip().replace(",", ".")
+        dist_txt = lista_entries_distancia[i].get().strip().replace(",", ".")
+        if not vel_txt or not dist_txt:
+            continue
+        try:
+            vel = float(vel_txt)
+            dist = float(dist_txt)
+        except Exception:
+            continue
+        if vel <= 0 or dist <= 0:
+            continue
+        total_pin += dist / (2.0 * 3.141592653589793 * raio_mm)
+    return total_pin
+
+
+def _num_or_nan(txt):
+    txt = txt.strip()
+    if not txt or txt.upper() == "NULL":
+        return float("nan")
+    try:
+        return float(txt)
+    except Exception:
+        return float("nan")
+
+
+def _append_turn_point(volta_n, atr_med, atr_min, atr_max, rpm_med):
+    """
+    Adiciona ponto do grafico 3 com deduplicacao por volta crescente.
+    """
+    if p_strokes:
+        try:
+            if float(volta_n) <= float(p_strokes[-1]):
+                graph_log(f"TURN drop non-monotonic: incoming={volta_n} last={p_strokes[-1]}")
+                return False
+            gap = float(volta_n) - float(p_strokes[-1])
+            if gap > 1.2:
+                graph_log(f"TURN gap detected: last={p_strokes[-1]} incoming={volta_n} gap={gap:.3f}")
+        except Exception:
+            return False
+    if not math.isnan(atr_max) and abs(atr_max) > 2000.0:
+        graph_log(f"TURN extreme atr_max={atr_max:.6f} volta={volta_n}")
+    p_strokes.append(volta_n)
+    p_atrito_ef.append(atr_med)
+    p_atrito_min.append(atr_min)
+    p_atrito_max.append(atr_max)
+    p_coluna_velocidade.append(rpm_med)
+    return True
+
+
+def _tail_turn_stdout_for_graph3(turn_proc, run_token=None):
+    """
+    Consome eventos TURN emitidos por turn_stats_ipc (IPC) e atualiza o grafico 3.
+    Formato esperado no stdout:
+      TURN,volta_n,atrito_med,atrito_min,atrito_max,rpm_medio_volta,n_total,n_falhas,n_validas,pct_perda
+    """
+    if turn_proc is None or turn_proc.stdout is None:
+        return
+
+    first_logged = False
+    try:
+        log_msg(f"Turn stream: start token={run_token}.")
+        n_turn = 0
+        n_turn_ok = 0
+        n_turn_drop = 0
+        n_turn_extreme = 0
+        n_turn_ignored = 0
+        while _is_running() and _run_token_alive(run_token):
+            line = turn_proc.stdout.readline()
+            if not line:
+                if turn_proc.poll() is not None:
+                    break
+                time.sleep(0.05)
+                continue
+            line = line.strip()
+            if not line:
+                continue
+            if not line.startswith("TURN,"):
+                if line != "READY":
+                    log_msg(f"Turnos: {line}")
+                continue
+
+            parts = line.split(",")
+            if len(parts) < 10:
+                continue
+            try:
+                volta_n = float(parts[1])
+            except Exception:
+                continue
+
+            _turn_rt_mark_stream_data()
+
+            atr_med = _num_or_nan(parts[2])
+            atr_min = _num_or_nan(parts[3])
+            atr_max = _num_or_nan(parts[4])
+            rpm_med = _num_or_nan(parts[5])
+
+            if _turn_rt_get_mode() != "stream":
+                n_turn_ignored += 1
+            else:
+                if _append_turn_point(volta_n, atr_med, atr_min, atr_max, rpm_med):
+                    n_turn_ok += 1
+                    if not first_logged:
+                        log_msg("Turnos: primeira volta recebida para o grafico 3.")
+                        first_logged = True
+                    if not math.isnan(atr_max) and abs(atr_max) > 2000.0:
+                        n_turn_extreme += 1
+                else:
+                    n_turn_drop += 1
+            n_turn += 1
+            if n_turn % 20 == 0:
+                graph_log(
+                    "TURN stream stats read={0} ok={1} drop={2} ignored={3} extreme={4} last_volta={5}".format(
+                        n_turn, n_turn_ok, n_turn_drop, n_turn_ignored, n_turn_extreme, volta_n
+                    )
+                )
+        log_msg(f"Turn stream: stop token={run_token} turns={n_turn}.")
+        _turn_rt_mark_stream_closed()
+        graph_log(
+            "TURN stream stop read={0} ok={1} drop={2} ignored={3} extreme={4}".format(
+                n_turn, n_turn_ok, n_turn_drop, n_turn_ignored, n_turn_extreme
+            )
+        )
+    except Exception as e:
+        log_msg(f"Turnos: erro lendo stream do agregador ({e}).")
+        _turn_rt_mark_stream_closed()
+
+
+def _tail_turn_csv_for_graph3(turn_csv_path, turn_proc=None):
+    """
+    Faz tail de atrito_por_volta.csv e alimenta o grafico 3 em tempo real.
+
+    Formato esperado:
+      volta_n,atrito_med,atrito_min,atrito_max,rpm_medio_volta,
+      n_total_pontos,n_falhas,n_validas,pct_perda
+    """
+    waited_s = 0.0
+    while _is_running() and not os.path.exists(turn_csv_path):
+        time.sleep(0.05)
+        waited_s += 0.05
+        if waited_s >= 15.0:
+            log_msg("Turnos: aguardando atrito_por_volta.csv...")
+            waited_s = 0.0
+
+    try:
+        with open(turn_csv_path, "r", encoding="utf-8") as f:
+            header = f.readline()
+            header_l = header.lower() if header else ""
+            # Aceita cabecalhos antigos/novos sem depender de caixa.
+            if header and ("volta_n" not in header_l and "volta" not in header_l):
+                f.seek(0)
+
+            first_logged = False
+            n_rows = 0
+            n_ok = 0
+            n_drop = 0
+
+            while _is_running():
+                line, complete = _read_complete_tail_line(f)
+                if not complete:
+                    if turn_proc is not None and turn_proc.poll() is not None:
+                        # Process ended: try one last refresh to drain trailing lines.
+                        try:
+                            f.seek(f.tell())
+                            line = f.readline()
+                        except Exception:
+                            line = ""
+                        if not line:
+                            break
+                    # On Windows, tailing a file that is still being appended may
+                    # require a no-op seek after EOF so new data becomes visible.
+                    try:
+                        f.seek(f.tell())
+                    except Exception:
+                        pass
+                    time.sleep(0.05)
+                    continue
+                parts = line.strip().split(",")
+                if len(parts) < 9:
+                    continue
+                try:
+                    volta_n = float(parts[0])
+                except Exception:
+                    continue
+
+                atr_med = _num_or_nan(parts[1])
+                atr_min = _num_or_nan(parts[2])
+                atr_max = _num_or_nan(parts[3])
+                rpm_med = _num_or_nan(parts[4])
+
+                n_rows += 1
+                if _append_turn_point(volta_n, atr_med, atr_min, atr_max, rpm_med):
+                    n_ok += 1
+                    if not first_logged:
+                        log_msg("Turnos: primeira volta recebida para o grafico 3.")
+                        first_logged = True
+                else:
+                    n_drop += 1
+                if n_rows % 20 == 0:
+                    graph_log(f"TURN csv stats rows={n_rows} ok={n_ok} drop={n_drop} last={volta_n}")
+    except Exception as e:
+        log_msg(f"Turnos: erro lendo atrito_por_volta.csv ({e}).")
+
+
+def _tail_realtime_turns_from_logs(dlg_csv_path, drive_csv_path, relacao_mecanica, cycles_per_motor_rev=1.0, run_token=None):
+    """
+    Calcula atrito por volta em tempo real diretamente de dlg.csv + drive.csv.
+
+    Motivo:
+    - Garante atualizacao do grafico 3 mesmo quando o stream IPC do agregador C
+      atrasar ou ficar indisponivel.
+
+    Definicao fisica usada:
+    - i = D2 / D1 (D1=motor, D2=disco)
+    - voltas_pino = voltas_motor / i
+    """
+    if relacao_mecanica <= 0:
+        relacao_mecanica = 1.0
+    if cycles_per_motor_rev <= 0:
+        cycles_per_motor_rev = 1.0
+    rpm_dir_deadband = 5.0
+
+    def _acc_reset():
+        return {
+            "n_total": 0,
+            "n_valid": 0,
+            "n_fail": 0,
+            "rpm_cnt": 0,
+            "atr_sum": 0.0,
+            "atr_min": None,
+            "atr_max": None,
+            "rpm_sum": 0.0,
+        }
+
+    # Aguarda ambos arquivos existirem.
+    t0 = time.time()
+    while _is_running() and _run_token_alive(run_token) and (not os.path.exists(dlg_csv_path) or not os.path.exists(drive_csv_path)):
+        if time.time() - t0 > 15:
+            log_msg("Turnos RT: timeout aguardando dlg.csv/drive.csv.")
+            return
+        time.sleep(0.05)
+
+    # Arbitro de fonte:
+    # - prioriza stream TURN do agregador C
+    # - ativa fallback apenas se stream nao aparecer (startup) ou travar.
+    t_gate = time.time()
+    while _is_running() and _run_token_alive(run_token):
+        with turn_rt_lock:
+            mode = turn_rt_mode
+            has_data = turn_rt_stream_has_data
+            last_ts = turn_rt_stream_last_ts
+            closed = turn_rt_stream_closed
+        if mode == "fallback":
+            break
+        now = time.time()
+        if has_data:
+            if (now - last_ts) > TURN_RT_STREAM_STALL_S:
+                _turn_rt_switch_to_fallback(
+                    f"stream stall > {TURN_RT_STREAM_STALL_S:.1f}s"
+                )
+                break
+        else:
+            if closed:
+                _turn_rt_switch_to_fallback("stream encerrou sem dados")
+                break
+            if (now - t_gate) > TURN_RT_STARTUP_GRACE_S:
+                _turn_rt_switch_to_fallback(
+                    f"sem TURN inicial em {TURN_RT_STARTUP_GRACE_S:.1f}s"
+                )
+                break
+        time.sleep(0.05)
+
+    if _turn_rt_get_mode() != "fallback":
+        # Stream segue saudavel; fallback nao entra.
+        return
+
+    first_logged = False
+    acc = _acc_reset()
+    turn_n = 1
+    turn_progress = 0.0
+    prev_pos = 0.0
+    prev_pos_valid = False
+    prev_t_s = 0.0
+    prev_t_valid = False
+    dir_sign = 1
+
+    have_d = False
+    have_r = False
+    dcols = None
+    rcols = None
+
+    try:
+        with open(dlg_csv_path, "r", encoding="utf-8") as fdlg, \
+             open(drive_csv_path, "r", encoding="utf-8") as fdrv:
+
+            # Headers
+            hd = fdlg.readline()
+            hr = fdrv.readline()
+            if hd and "idx" not in hd.lower():
+                fdlg.seek(0)
+            if hr and "idx" not in hr.lower():
+                fdrv.seek(0)
+
+            while _is_running() and _run_token_alive(run_token):
+                if not have_d:
+                    ld, complete_d = _read_complete_tail_line(fdlg)
+                    if complete_d:
+                        dcols = ld.strip().split(",")
+                        have_d = True
+                    else:
+                        try:
+                            fdlg.seek(fdlg.tell())
+                        except Exception:
+                            pass
+                if not have_r:
+                    lr, complete_r = _read_complete_tail_line(fdrv)
+                    if complete_r:
+                        rcols = lr.strip().split(",")
+                        have_r = True
+                    else:
+                        try:
+                            fdrv.seek(fdrv.tell())
+                        except Exception:
+                            pass
+
+                if not have_d or not have_r:
+                    time.sleep(0.01)
+                    continue
+
+                try:
+                    idx_d = int(dcols[0])
+                    idx_r = int(rcols[0])
+                except Exception:
+                    have_d = False
+                    have_r = False
+                    continue
+
+                if idx_d < idx_r:
+                    have_d = False
+                    continue
+                if idx_r < idx_d:
+                    have_r = False
+                    continue
+
+                # idx alinhado
+                have_d = False
+                have_r = False
+
+                # DLG parse
+                dlg_err = 1
+                try:
+                    dlg_err = int(dcols[-1].strip())
+                except Exception:
+                    dlg_err = 1
+
+                atr_ok = False
+                atr = float("nan")
+                if dlg_err == 0 and len(dcols) >= 12:
+                    try:
+                        atr = float(dcols[11])
+                        atr_ok = True
+                    except Exception:
+                        atr_ok = False
+
+                # Drive parse
+                pos_ok = False
+                rpm_ok = False
+                pos = 0.0
+                rpm = 0.0
+                t_s_drv = float("nan")
+                pos_mod = 65536.0
+                try:
+                    if len(rcols) > 2:
+                        t_s_drv = float(rcols[2])
+                except Exception:
+                    t_s_drv = float("nan")
+                try:
+                    if len(rcols) > 5 and int(rcols[5]) == 0:
+                        pos = float(rcols[3])
+                        pos_ok = True
+                except Exception:
+                    pos_ok = False
+                try:
+                    if len(rcols) > 6 and int(rcols[6]) == 0:
+                        rpm = float(rcols[4])
+                        rpm_ok = True
+                except Exception:
+                    rpm_ok = False
+                try:
+                    if len(rcols) > 7:
+                        parsed_mod = float(rcols[7])
+                        if parsed_mod > 1.0:
+                            pos_mod = parsed_mod
+                except Exception:
+                    pass
+
+                # Acumulo da volta atual
+                acc["n_total"] += 1
+                if atr_ok and pos_ok:
+                    acc["n_valid"] += 1
+                    acc["atr_sum"] += atr
+                    if acc["atr_min"] is None or atr < acc["atr_min"]:
+                        acc["atr_min"] = atr
+                    if acc["atr_max"] is None or atr > acc["atr_max"]:
+                        acc["atr_max"] = atr
+                    if rpm_ok:
+                        acc["rpm_sum"] += rpm
+                        acc["rpm_cnt"] += 1
+                else:
+                    acc["n_fail"] += 1
+
+                # Progresso por volta (wrap bidirecional)
+                if pos_ok:
+                    if prev_pos_valid and pos_mod > 1.0:
+                        raw_diff = pos - prev_pos
+                        d_eff = 0.0
+                        if rpm_ok and abs(rpm) >= rpm_dir_deadband:
+                            dir_sign = 1 if rpm >= 0.0 else -1
+
+                        if dir_sign >= 0:
+                            d_eff = raw_diff
+                            if d_eff < (-0.5 * pos_mod):
+                                d_eff += pos_mod
+                            elif d_eff < 0.0:
+                                d_eff = 0.0
+                        else:
+                            d_eff = raw_diff
+                            if d_eff > (0.5 * pos_mod):
+                                d_eff -= pos_mod
+                            elif d_eff > 0.0:
+                                d_eff = 0.0
+
+                        if d_eff != 0.0:
+                            dt_s = 0.0
+                            if prev_t_valid and not np.isnan(t_s_drv):
+                                dt_s = t_s_drv - prev_t_s
+                                if dt_s <= 0.0 or dt_s > 1.0:
+                                    dt_s = 0.0
+                            if rpm_ok and dt_s > 0.0:
+                                max_step = pos_mod * (abs(rpm) / 60.0) * dt_s * 3.0 + 5.0
+                            elif rpm_ok:
+                                max_step = pos_mod * (abs(rpm) / 60.0) * 0.05 * 3.0 + 5.0
+                            else:
+                                max_step = pos_mod * 0.05
+                            if abs(d_eff) > max_step:
+                                d_eff = 0.0
+
+                        motor_turn_inc = abs(d_eff) / (pos_mod * cycles_per_motor_rev)
+                        pin_turn_inc = motor_turn_inc / relacao_mecanica
+                        turn_progress += pin_turn_inc
+
+                        while turn_progress >= 1.0:
+                            atr_med = float("nan")
+                            atr_min = float("nan")
+                            atr_max = float("nan")
+                            rpm_med = float("nan")
+                            if acc["n_valid"] > 0:
+                                atr_med = acc["atr_sum"] / float(acc["n_valid"])
+                                atr_min = acc["atr_min"] if acc["atr_min"] is not None else float("nan")
+                                atr_max = acc["atr_max"] if acc["atr_max"] is not None else float("nan")
+                            if acc["rpm_cnt"] > 0:
+                                rpm_med = acc["rpm_sum"] / float(acc["rpm_cnt"])
+
+                            if _turn_rt_get_mode() == "fallback":
+                                if _append_turn_point(float(turn_n), atr_med, atr_min, atr_max, rpm_med) and not first_logged:
+                                    log_msg("Turnos RT: primeira volta recebida para o grafico 3.")
+                                    first_logged = True
+
+                            turn_n += 1
+                            turn_progress -= 1.0
+                            acc = _acc_reset()
+
+                    prev_pos = pos
+                    prev_pos_valid = True
+                    if not np.isnan(t_s_drv):
+                        prev_t_s = t_s_drv
+                        prev_t_valid = True
+    except Exception as e:
+        log_msg(f"Turnos RT: erro no agregador em tempo real ({e}).")
 # start_acquisition():
 # - Funcao central de inicio de ensaio.
 # - Etapas principais:
@@ -1474,7 +2242,8 @@ def start_acquisition():
     global running
     # NOTE: declare globals before any assignment inside this function to avoid
     # Python "assigned before global declaration" errors (PyInstaller parse).
-    global start_time, is_paused, tempo_pause_inicio
+    global start_time, is_paused, tempo_pause_inicio, p_turns_target
+    global p_strokes, p_atrito_ef, p_atrito_max, p_atrito_min, p_coluna_velocidade, contador_amostras_total
 
     # Impede o funcionamento do botão iniciar duas vezes seguidas:
     if running == "true":
@@ -1814,6 +2583,11 @@ def start_acquisition():
         except Exception:
             messagebox.showwarning("Valor Inválido", "Raio inválido para converter velocidade.")
             return
+        try:
+            forca_normal_n = float(ent_forca.get().strip().replace(',', '.'))
+        except Exception:
+            messagebox.showwarning("Valor Inválido", "Força normal inválida para calcular atrito.")
+            return
 
         # Monta schedule (rpm, duracao_s)
         schedule = []
@@ -1828,6 +2602,18 @@ def start_acquisition():
             messagebox.showwarning("Tabela vazia", "Nenhuma etapa válida para iniciar o ensaio.")
             return
 
+        # Reseta buffers dos graficos para o novo ensaio.
+        sampsTimestamp.clear()
+        for i in range(numChannels):
+            graSamps[i].clear()
+        p_strokes.clear()
+        p_atrito_ef.clear()
+        p_atrito_max.clear()
+        p_atrito_min.clear()
+        p_coluna_velocidade.clear()
+        # Define alvo de voltas para eixo X do grafico 3.
+        p_turns_target = _calc_expected_turns_from_table(raio_mm, RELACAO_MECANICA)
+
         dur_total = sum(d for _, d in schedule)
         rate_hz = float(getattr(orch, "DEFAULT_RATE_HZ", 50.0))
 
@@ -1835,6 +2621,7 @@ def start_acquisition():
         out_paths = {
             "dlg_csv": caminho_dlg_csv,
             "drive_csv": caminho_drive_csv,
+            "turn_csv": caminho_turn_csv,
             "merge_csv": caminho_merge_csv,
             "schedule_csv": caminho_schedule_csv,
         }
@@ -1859,12 +2646,18 @@ def start_acquisition():
                 schedule=schedule,
                 duration_s=dur_total,
                 rate_hz=rate_hz,
-                bind_port=0,
+                # Usa a porta padrao do pipeline (41402).
+                # bind_port=0 (efemera) pode gerar execucao sem ACQDATA em
+                # setups onde o DLG responde de forma mais estavel na porta fixa.
+                bind_port=getattr(orch, "DEFAULT_BIND_PORT", 41402),
                 com_port="COM4",
                 slave_id=1,
                 baud=115200,
                 parity="E",
-                show_console=False
+                show_console=False,
+                force_normal_n=forca_normal_n,
+                # i = D2 / D1 (D1=motor, D2=disco), mesma definicao do supervisório.
+                relacao=RELACAO_MECANICA
             )
         except Exception as e:
             # Limpa a pasta criada se o ensaio nao iniciar
@@ -1881,9 +2674,19 @@ def start_acquisition():
             return
 
         # Atualiza estado do GUI
+        global external_run_token
+        external_run_token += 1
+        run_token = external_run_token
+        # Modo atual: grafico 3 em tempo real 100% no Python.
+        _turn_rt_reset_state("fallback")
         running = "true"
         is_paused = False
         tempo_pause_inicio = 0
+        graph_log(
+            "RUN start token={0} rate_hz={1} dur_total_s={2:.3f} relacao={3:.6f} turns_target={4:.6f}".format(
+                run_token, rate_hz, dur_total, RELACAO_MECANICA, p_turns_target
+            )
+        )
         try:
             label_ensaio_estado.config(text="Em andamento", fg="#0078D4")
             _set_targets_stopped()
@@ -1912,12 +2715,22 @@ def start_acquisition():
                 log_msg(f"Erro no merge final: {e}")
             finally:
                 # Atualiza estado visual ao final
-                global running, is_paused, external_run_state, tempo_pause_inicio, timer_started
+                global running, is_paused, external_run_state, tempo_pause_inicio, timer_started, graph_events_log_path
+                # Apos o merge, os artefatos tecnicos vao para REP\\DadosDev.
+                # Atualiza o destino do graph_log para evitar recriar graph_events.log na raiz de REP.
+                try:
+                    rep_dir = os.path.dirname(caminho_merge_csv)
+                    dev_graph = os.path.join(rep_dir, "DadosDev", "graph_events.log")
+                    if os.path.isdir(os.path.join(rep_dir, "DadosDev")):
+                        graph_events_log_path = dev_graph
+                except Exception:
+                    pass
                 running = False
                 is_paused = False
                 tempo_pause_inicio = 0
                 timer_started = False
                 external_run_state = None
+                graph_log("RUN end token={0}".format(run_token))
                 try:
                     label_ensaio_estado.config(text="Finalizado", fg="green")
                     _set_targets_stopped()
@@ -1938,6 +2751,7 @@ def start_acquisition():
                         p_atrito_max.clear()
                         p_atrito_min.clear()
                         p_coluna_velocidade.clear()
+                        globals()["p_turns_target"] = 0.0
                         ax1.clear()
                         ax2.clear()
                         ax3.clear()
@@ -1954,7 +2768,14 @@ def start_acquisition():
         # Thread para alimentar graficos em tempo real a partir do dlg.csv
         threading.Thread(
             target=_tail_dlg_csv_for_graphs,
-            args=(caminho_dlg_csv,),
+            args=(caminho_dlg_csv, run_token),
+            daemon=True
+        ).start()
+        # Grafico 3 em tempo real:
+        # agrega por idx diretamente de dlg.csv+drive.csv no Python.
+        threading.Thread(
+            target=_tail_realtime_turns_from_logs,
+            args=(caminho_dlg_csv, caminho_drive_csv, RELACAO_MECANICA, 1.0, run_token),
             daemon=True
         ).start()
 
@@ -1966,14 +2787,13 @@ def start_acquisition():
         ).start()
         threading.Thread(
             target=_wait_dlg_ok_and_start_timer,
-            args=(caminho_dlg_csv, 3, 15),
+            args=(caminho_dlg_csv, 3, 15, run_token),
             daemon=True
         ).start()
         return
 
     ########## PARTE DOS GRÁFICOS
     global tensao_vel, duracao, soma_tempos_vel, tempo_total_aqc
-    global p_strokes, p_atrito_ef, p_atrito_max, p_atrito_min, contador_amostras_total
 
     contador_amostras_total = 0
 
@@ -2101,7 +2921,7 @@ def pause_acquisition():
 # - Modo externo: envia STOP e aguarda fechamento/merge final.
 # - Modo da versao anterior: zera tensao e limpa buffers/plots.
 def stop_acquisition():
-    global running, is_paused, ip, timer_started, tempo_pause_inicio
+    global running, is_paused, ip, timer_started, tempo_pause_inicio, p_turns_target
     global graSamps, sampsTimestamp, p_strokes, p_atrito_ef, p_atrito_max, p_atrito_min, p_coluna_velocidade
 
     if running:
@@ -2170,6 +2990,7 @@ def stop_acquisition():
             p_atrito_max.clear()
             p_atrito_min.clear()
             p_coluna_velocidade.clear()
+            p_turns_target = 0.0
 
             # Limpa os eixos imediatamente
             ax1.clear()
@@ -2185,71 +3006,71 @@ def update1(frame):
     # Acessa a lista de tempos reais
     global sampsTimestamp 
 
-    if not _is_running() or not graSamps: 
-        return
+    try:
+        # Apaga tudo o que foi desenhado no quadro anterior para desenhar o novo.
+        ax1.clear()
 
-    # Apaga tudo o que foi desenhado no quadro anterior para desenhar o novo.
-    ax1.clear()
+        # Regras fixas (validacao):
+        # - Grafico 1 (temperatura) usa CH2 do DLG.
+        # Mantemos os checkboxes, mas este grafico respeita apenas o canal 2.
+        c2 = canalativo2.get()
 
-    # Regras fixas (validacao):
-    # - Grafico 1 (temperatura) usa CH2 do DLG.
-    # Mantemos os checkboxes, mas este grafico respeita apenas o canal 2.
-    c2 = canalativo2.get()
+        # calcula quantos minutos cabem na escala que o usuário digitou no eixo x:
+        # (Total de Amostras 'aux' / Frequência '200') / 60 segundos
+        limite_tela_min = aux / freq / 60
+        passo = 5 # Desenha só 1 ponto a cada 5. Deixa o programa mais leve
 
-    # calcula quantos minutos cabem na escala que o usuário digitou no eixo x:
-    # (Total de Amostras 'aux' / Frequência '200') / 60 segundos
-    limite_tela_min = aux / freq / 60
-    passo = 5 # Desenha só 1 ponto a cada 5. Deixa o programa mais leve
-
-    # Função auxiliar para não repetir código e transformar o tempo absoluto em relativo (Sweep).
-    def plotar_canal(idx, cor, label):
-        if len(graSamps) > idx:
-            raw_dados = graSamps[idx]
-            # Garante que nao vai acessar indices inexistentes
-            tam = min(len(sampsTimestamp), len(raw_dados))
-            
-            if tam > 0:
-                # Pega os dados sincronizados, cortando as listas para ficarem do mesmo tamanho
-                t_data = np.array(sampsTimestamp[:tam])
-                y_data = np.array(raw_dados[:tam])
+        # Função auxiliar para não repetir código e transformar o tempo absoluto em relativo (Sweep).
+        def plotar_canal(idx, cor, label):
+            if len(graSamps) > idx:
+                raw_dados = graSamps[idx]
+                # Garante que nao vai acessar indices inexistentes
+                tam = min(len(sampsTimestamp), len(raw_dados))
                 
-                # --- TRANSFORMA TEMPO ABSOLUTO EM RELATIVO ---
-                # O 'sampsTimestamp' guarda o tempo real.
-                # Mas quando a tela limpa, o gráfico deve começar do 0 visualmente.
-                # Por isso é feito: TempoAtual - TempoDoPrimeiroPonto
-                if len(t_data) > 0:
-                    t_zero = t_data[0] # Pega o tempo do primeiro ponto atual
-
-                    # Calcula o eixo X
-                    tempo = ((t_data - t_zero) / 60.0)[::passo]
-                    dados = y_data[::passo]
+                if tam > 0:
+                    # Pega os dados sincronizados, cortando as listas para ficarem do mesmo tamanho
+                    t_data = np.array(sampsTimestamp[:tam])
+                    y_data = np.array(raw_dados[:tam])
                     
-                    # Manda desenhar a linha
-                    if cor:
-                        ax1.plot(tempo, dados, label=label, color=cor)
-                    else:
-                        ax1.plot(tempo, dados, label=label)
+                    # --- TRANSFORMA TEMPO ABSOLUTO EM RELATIVO ---
+                    # O 'sampsTimestamp' guarda o tempo real.
+                    # Mas quando a tela limpa, o gráfico deve começar do 0 visualmente.
+                    # Por isso é feito: TempoAtual - TempoDoPrimeiroPonto
+                    if len(t_data) > 0:
+                        t_zero = t_data[0] # Pega o tempo do primeiro ponto atual
 
-    # CH2 (temperatura) = index 1 na lista graSamps.
-    if c2:
-        plotar_canal(1, None, 'Channel 2')
+                        # Calcula o eixo X
+                        tempo = ((t_data - t_zero) / 60.0)[::passo]
+                        dados = y_data[::passo]
+                        
+                        # Manda desenhar a linha
+                        if cor:
+                            ax1.plot(tempo, dados, label=label, color=cor)
+                        else:
+                            ax1.plot(tempo, dados, label=label)
 
-    # Configuração Visual
-    handles, labels = ax1.get_legend_handles_labels()
-    # Se tiver alguma linha desenhada, mostra a legenda no canto superior direito
-    if handles: 
-        ax1.legend(loc='upper right', fontsize='small')
+        if _is_running() and graSamps and c2:
+            # CH2 (temperatura) = index 1 na lista graSamps.
+            plotar_canal(1, None, 'Channel 2')
 
-    ax1.set_xlim(0, limite_tela_min)
-    ax1.grid(alpha=0.5, lw=0.5)
-    ax1.set_facecolor('black')
-    ax1.tick_params(axis='both', labelsize=8)
-    ax1.set_xlabel('Tempo [min]', fontsize=9)
-    ax1.set_ylabel('Temperatura [°C]', fontsize=9)
+        # Configuração Visual
+        handles, labels = ax1.get_legend_handles_labels()
+        # Se tiver alguma linha desenhada, mostra a legenda no canto superior direito
+        if handles: 
+            ax1.legend(loc='upper right', fontsize='small')
 
-    # Controle do eixo y
-    if not y1_auto:
-        ax1.set_ylim(y1_min, y1_max)
+        ax1.set_xlim(0, limite_tela_min)
+        ax1.grid(alpha=0.5, lw=0.5)
+        ax1.set_facecolor('black')
+        ax1.tick_params(axis='both', labelsize=8)
+        ax1.set_xlabel('Tempo [min]', fontsize=9)
+        ax1.set_ylabel('Temperatura [°C]', fontsize=9)
+
+        # Controle do eixo y
+        if not y1_auto:
+            ax1.set_ylim(y1_min, y1_max)
+    except Exception as e:
+        log_msg(f"Grafico 1: erro de atualizacao ({e}).")
 
 # update2(frame):
 # - Renderiza grafico 2 (forca/atrito) usando CH1 do DLG.
@@ -2257,122 +3078,91 @@ def update1(frame):
 # - Respeita configuracao de eixo Y automatico/manual.
 def update2(frame):
     global sampsTimestamp
+    try:
+        ax2.clear()
+        # Regras fixas (validacao):
+        # - Grafico 2 (forca) usa CH1 do DLG.
+        c1 = canalativo1.get()
+        limite_tela_min = aux / freq / 60
+        passo = 5
 
-    if not _is_running() or not graSamps: 
-        return
+        # Canal 1 (Forca)
+        if _is_running() and graSamps and c1 == 1 and len(graSamps) > 0:
+            # Pega a lista bruta de dados de força
+            raw_dados = graSamps[0]
+            tam = min(len(sampsTimestamp), len(raw_dados))
+            
+            if tam > 0:
+                t_data = np.array(sampsTimestamp[:tam])
+                y_data = np.array(raw_dados[:tam])
 
-    ax2.clear()
-    # Regras fixas (validacao):
-    # - Grafico 2 (forca) usa CH1 do DLG.
-    c1 = canalativo1.get()
-    limite_tela_min = aux / freq / 60
-    passo = 5
+                if len(t_data) > 0:
+                    # Mesmo ajuste de tempo aqui
+                    # Pega o instante do primeiro ponto que está na tela
+                    t_zero = t_data[0]
+                    # Subtrai o t_zero de todos os pontos.
+                    # Isso faz o gráfico sempre começar visualmente no 0
+                    tempo = ((t_data - t_zero) / 60.0)[::passo]
+                    dados = y_data[::passo]
+                    
+                    ax2.plot(tempo, dados, label='Channel 1', color='#1f77b4') # Desenha a linha azul
 
-    # Canal 1 (Forca)
-    if c1 == 1 and len(graSamps) > 0:
-        # Pega a lista bruta de dados de força
-        raw_dados = graSamps[0]
-        tam = min(len(sampsTimestamp), len(raw_dados))
+        # Configuração Visual Ax2
+        handles, labels = ax2.get_legend_handles_labels()
+        if handles: 
+            ax2.legend(loc='upper right', fontsize='small')
         
-        if tam > 0:
-            t_data = np.array(sampsTimestamp[:tam])
-            y_data = np.array(raw_dados[:tam])
-
-            if len(t_data) > 0:
-                # Mesmo ajuste de tempo aqui
-                # Pega o instante do primeiro ponto que está na tela
-                t_zero = t_data[0]
-                # Subtrai o t_zero de todos os pontos. 
-                # Isso faz o gráfico sempre começar visualmente no 0
-                tempo = ((t_data - t_zero) / 60.0)[::passo]
-                dados = y_data[::passo]
-                
-                ax2.plot(tempo, dados, label='Channel 1', color='#1f77b4') # Desenha a linha azul
-
-    # Configuração Visual Ax2
-    handles, labels = ax2.get_legend_handles_labels()
-    if handles: 
-        ax2.legend(loc='upper right', fontsize='small')
-    
-    ax2.set_xlim(0, limite_tela_min)
-    ax2.grid(alpha=0.5, lw=0.5)
-    ax2.set_facecolor('black')
-    ax2.tick_params(axis='both', labelsize=8)
-    ax2.set_xlabel('Tempo [min]', fontsize=9)
-    ax2.set_ylabel('Força de atrito [N]', fontsize=9)
-    
-    if not y2_auto:
-        ax2.set_ylim(y2_min, y2_max)
+        ax2.set_xlim(0, limite_tela_min)
+        ax2.grid(alpha=0.5, lw=0.5)
+        ax2.set_facecolor('black')
+        ax2.tick_params(axis='both', labelsize=8)
+        ax2.set_xlabel('Tempo [min]', fontsize=9)
+        ax2.set_ylabel('Força de atrito [N]', fontsize=9)
+        
+        if not y2_auto:
+            ax2.set_ylim(y2_min, y2_max)
+    except Exception as e:
+        log_msg(f"Grafico 2: erro de atualizacao ({e}).")
 
 
 # Nicolas
-# Limpa o ax3, gerencia o segundo eixo y (ax3_twin) e plota as curvas de atrito e velocidade
+# Limpa o ax3 e plota atrito medio/min/max por volta.
 # update3(frame):
-# - Renderiza grafico 3 por stroke (coef. atrito efetivo/max/min).
-# - Mantem eixo secundario para velocidade por coluna no mesmo subplot.
-# - Opera sobre listas p_strokes/p_atrito_* alimentadas por go_p().
+# - Renderiza grafico 3 por volta (atrito medio/max/min).
+# - Eixo X segue voltas registradas, com limite previsto do ensaio.
+# - Opera sobre listas p_strokes/p_atrito_* alimentadas por _tail_turn_csv_for_graph3().
 def update3(frame):
-    global ax3_twin
-    if not _is_running(): 
-        return
+    """
+    Atualiza o grafico 3 (atrito por volta).
+    Mantem labels corretos mesmo fora de ensaio para evitar voltar ao layout antigo.
+    """
+    try:
+        ax3.clear()
 
-    ax3.clear() # Limpa apenas o gráfico 3
-    
-    # Limpa ou cria o eixo y da direita
-    if ax3_twin is None:
-        ax3_twin = ax3.twinx() # Cria um eixo y à direita
-    ax3_twin.clear()
+        if len(p_strokes) > 0:
+            ax3.plot(p_strokes, p_atrito_max, color='red', label='Atrito max', linewidth=1)
+            ax3.plot(p_strokes, p_atrito_ef, color='black', label='Atrito medio', linewidth=1)
+            ax3.plot(p_strokes, p_atrito_min, color='cyan', label='Atrito min', linewidth=1)
 
-    # Desenha 1 a cada 5 pontos.
-    passo = 5
-
-    if len(p_strokes) > 0:
-        # Plota três linhas de atrito (Eixo Esquerdo)
-        ax3.plot(p_strokes[::passo], p_atrito_max[::passo], color='red', label='µmax', linewidth=1)
-        ax3.plot(p_strokes[::passo], p_atrito_ef[::passo], color='black', label='µef', linewidth=1)
-        ax3.plot(p_strokes[::passo], p_atrito_min[::passo], color='cyan', label='µmin', linewidth=1)
-
-        # Plota velocidade (Eixo Direito - Coluna 10 do arquivo P)
-        if len(p_coluna_velocidade) > 0:
-            # Garante que X (Strokes) e Y (Velocidade) tenham o mesmo tamanho
-            tam = min(len(p_strokes), len(p_coluna_velocidade))
-            # Plota o eixo da Velocidade
-            ax3_twin.plot(p_strokes[:tam][::passo], p_coluna_velocidade[:tam][::passo], color='orange', label='Vel', linewidth=2)
-            
-            # Ajusta escala Y da direita se a velocidade aumenta bastante
-            max_v = max(p_coluna_velocidade) if p_coluna_velocidade else 10
-           
-            if max_v <= 0: max_v = 10
-            ax3_twin.set_ylim(0, max_v * 1.1) # Define o limite y da velocidade com uma folga de 10% no topo
-
-        # Ajusta Eixo X para seguir os Strokes
-        # Faz o gráfico acompanhar o crescimento dos strokes.
-        # Define o minimo como 0 e o maximo como o ultimo stroke registrado.
+        x_target = max(1.0, float(p_turns_target) if p_turns_target > 0 else 1.0)
         if p_strokes:
-            ax3.set_xlim(0, max(p_strokes[-1], 100))
+            x_target = max(x_target, float(p_strokes[-1]))
+        ax3.set_xlim(0, x_target)
 
-    # --- CONFIGURACAO VISUAL AX3 ---
-    # Eixo y esquerdo
-    ax3.set_xlabel('Strokes', fontsize=9)
-    ax3.set_ylabel('Coef. Atrito [-]', fontsize=9)
-    ax3.grid(True, alpha=0.5)
-    ax3.tick_params(axis='both', labelsize=8)
-    ax3.set_facecolor('white')
+        ax3.set_xlabel('Voltas (pino)', fontsize=9)
+        ax3.set_ylabel('Atrito [-]', fontsize=9)
+        ax3.grid(True, alpha=0.5)
+        ax3.tick_params(axis='both', labelsize=8)
+        ax3.set_facecolor('white')
+        if not y3_auto:
+            ax3.set_ylim(y3_min, y3_max)
 
-    # Eixo y direito
-    ax3_twin.set_ylabel('Vel', fontsize=9, color='black')
-    ax3_twin.set_facecolor('white')
-    ax3_twin.yaxis.tick_right()
-    ax3_twin.tick_params(axis='y', labelcolor='black', labelsize=8)
-
-    # Junta as legendas do ax3 (atrito) e do ax3_twin (velocidade)
-    h1, l1 = ax3.get_legend_handles_labels()
-    h2, l2 = ax3_twin.get_legend_handles_labels()
-    
-    if h1 or h2:
-        # Soma as listas (h1+h2) e cria uma legenda única.
-        ax3.legend(h1+h2, l1+l2, loc='upper center', bbox_to_anchor=(0.5, -0.25), 
-                   fontsize='small', ncol=4)
+        h1, l1 = ax3.get_legend_handles_labels()
+        if h1:
+            ax3.legend(h1, l1, loc='upper center', bbox_to_anchor=(0.5, -0.20),
+                       fontsize='small', ncol=3)
+    except Exception as e:
+        log_msg(f"Grafico 3: erro de atualizacao ({e}).")
 
 
 
@@ -2439,12 +3229,12 @@ def alterar_escala_tempo():
         messagebox.showwarning("Valor Invalido", "Escala do eixo X deve ser um numero positivo (minutos).")
 
 # abrir_config_y():
-# - Abre popup compacto para configurar eixo Y dos graficos 1 e 2.
+# - Abre popup compacto para configurar eixo Y dos graficos 1, 2 e 3.
 # - Cada grafico pode ficar em automatico ou manual (min/max).
 # - Aplica validacao numerica e redesenha canvas ao confirmar.
 def abrir_config_y():
-    """Abre popup compacto para configurar eixo Y dos graficos 1 (temperatura) e 2 (forca)."""
-    global y1_auto, y1_min, y1_max, y2_auto, y2_min, y2_max
+    """Abre popup compacto para configurar eixo Y dos graficos 1, 2 e 3."""
+    global y1_auto, y1_min, y1_max, y2_auto, y2_min, y2_max, y3_auto, y3_min, y3_max
 
     win = tkinter.Toplevel(root)
     win.title("Configurar Eixos Y")
@@ -2468,6 +3258,10 @@ def abrir_config_y():
     y_forca_min_var = tkinter.StringVar(value=f"{y2_min:.6g}")
     y_forca_max_var = tkinter.StringVar(value=f"{y2_max:.6g}")
 
+    y_atrito_auto_var = tkinter.BooleanVar(value=y3_auto)
+    y_atrito_min_var = tkinter.StringVar(value=f"{y3_min:.6g}")
+    y_atrito_max_var = tkinter.StringVar(value=f"{y3_max:.6g}")
+
     tkinter.Label(frame, text="Temperatura (Grafico 1)").grid(row=1, column=0, padx=(0, 8), pady=2, sticky="w")
     chk_temp = tkinter.Checkbutton(frame, variable=y_temp_auto_var)
     chk_temp.grid(row=1, column=1, padx=4, pady=2)
@@ -2484,6 +3278,14 @@ def abrir_config_y():
     ent_forca_max = tkinter.Entry(frame, width=9, textvariable=y_forca_max_var)
     ent_forca_max.grid(row=2, column=3, padx=4, pady=2)
 
+    tkinter.Label(frame, text="Atrito por volta (Grafico 3)").grid(row=3, column=0, padx=(0, 8), pady=2, sticky="w")
+    chk_atrito = tkinter.Checkbutton(frame, variable=y_atrito_auto_var)
+    chk_atrito.grid(row=3, column=1, padx=4, pady=2)
+    ent_atrito_min = tkinter.Entry(frame, width=9, textvariable=y_atrito_min_var)
+    ent_atrito_min.grid(row=3, column=2, padx=4, pady=2)
+    ent_atrito_max = tkinter.Entry(frame, width=9, textvariable=y_atrito_max_var)
+    ent_atrito_max.grid(row=3, column=3, padx=4, pady=2)
+
     def _set_manual_state(var, ent_min, ent_max):
         state = "disabled" if var.get() else "normal"
         ent_min.config(state=state)
@@ -2492,13 +3294,15 @@ def abrir_config_y():
     def _refresh_states(*_args):
         _set_manual_state(y_temp_auto_var, ent_temp_min, ent_temp_max)
         _set_manual_state(y_forca_auto_var, ent_forca_min, ent_forca_max)
+        _set_manual_state(y_atrito_auto_var, ent_atrito_min, ent_atrito_max)
 
     y_temp_auto_var.trace_add("write", _refresh_states)
     y_forca_auto_var.trace_add("write", _refresh_states)
+    y_atrito_auto_var.trace_add("write", _refresh_states)
     _refresh_states()
 
     btns = tkinter.Frame(frame)
-    btns.grid(row=3, column=0, columnspan=4, sticky="e", pady=(8, 0))
+    btns.grid(row=4, column=0, columnspan=4, sticky="e", pady=(8, 0))
 
     def _parse_range(nome, is_auto, txt_min, txt_max):
         if is_auto:
@@ -2515,25 +3319,32 @@ def abrir_config_y():
         return (vmin, vmax)
 
     def _aplicar():
-        global y1_auto, y1_min, y1_max, y2_auto, y2_min, y2_max
+        global y1_auto, y1_min, y1_max, y2_auto, y2_min, y2_max, y3_auto, y3_min, y3_max
         r_temp = _parse_range("Temperatura", y_temp_auto_var.get(), y_temp_min_var.get(), y_temp_max_var.get())
         if r_temp == "ERR":
             return
         r_forca = _parse_range("Atrito/forca", y_forca_auto_var.get(), y_forca_min_var.get(), y_forca_max_var.get())
         if r_forca == "ERR":
             return
+        r_atrito = _parse_range("Atrito por volta", y_atrito_auto_var.get(), y_atrito_min_var.get(), y_atrito_max_var.get())
+        if r_atrito == "ERR":
+            return
 
         y1_auto = y_temp_auto_var.get()
         y2_auto = y_forca_auto_var.get()
+        y3_auto = y_atrito_auto_var.get()
 
         if r_temp is not None:
             y1_min, y1_max = r_temp
         if r_forca is not None:
             y2_min, y2_max = r_forca
+        if r_atrito is not None:
+            y3_min, y3_max = r_atrito
 
         try:
             canvas1.draw_idle()
             canvas2.draw_idle()
+            canvas3.draw_idle()
         except Exception:
             pass
         win.destroy()
@@ -2725,7 +3536,7 @@ tkinter.Label(
 
 tkinter.Label(
     cfg_frame,
-    text="Relacao mecanica (i)",
+    text="Relacao mecanica (i = D2/D1)",
     font=("Arial", 10, "bold")
 ).grid(row=3, column=0, sticky="w", padx=6, pady=(8, 4), columnspan=3)
 
@@ -2738,7 +3549,7 @@ btn_salvar_rel.grid(row=4, column=1, sticky="w", padx=6, pady=(2, 4))
 
 tkinter.Label(
     cfg_frame,
-    text="Formula RPM: (i * v * 60) / (2 * pi * raio), onde i = relacao.",
+    text="Formula RPM: (i * v * 60) / (2 * pi * raio), com i = D2/D1.",
     anchor="w",
     justify="left"
 ).grid(row=5, column=0, columnspan=3, sticky="w", padx=6, pady=(2, 10))
@@ -2948,13 +3759,17 @@ def muda_estado_reciprocante():
         entry_curso.config(state='normal')
 
         if 'lbl_header_voltas_cursos' in globals():
-            lbl_header_voltas_cursos.config(text="Cursos")
+            lbl_header_voltas_cursos.config(text="Cursos_mot")
+        if 'lbl_header_voltas_pin' in globals():
+            lbl_header_voltas_pin.config(text="Cursos_pin")
     else:
         chk_reciprocante.config(selectcolor="white")
         entry_curso.config(state='disabled')
         
         if 'lbl_header_voltas_cursos' in globals():
-            lbl_header_voltas_cursos.config(text='Voltas')
+            lbl_header_voltas_cursos.config(text='Voltas_mot')
+        if 'lbl_header_voltas_pin' in globals():
+            lbl_header_voltas_pin.config(text='Voltas_pin')
 
     if 'calcular_voltas_cursos_duracao' in globals():
         calcular_voltas_cursos_duracao()
@@ -2967,7 +3782,7 @@ def muda_estado_reciprocante():
 # - Atualiza labels linha a linha na tabela inferior.
 def calcular_voltas_cursos_duracao(event=None):
     """
-    Atualiza as colunas Voltas/Cursos e Duracao com base em:
+    Atualiza as colunas Voltas motor/Voltas pino (ou Cursos) e Duracao com base em:
     - Velocidade [mm/s]
     - Distancias [mm]
     - Raio [mm] (modo rotativo)
@@ -2992,6 +3807,7 @@ def calcular_voltas_cursos_duracao(event=None):
         # Se ambos vazios, limpa indicadores
         if not vel_txt and not dist_txt:
             lista_labels_voltas_cursos[i].config(text="xxxx")
+            lista_labels_voltas_pin[i].config(text="xxxx")
             lista_labels_duracao[i].config(text="xxxx")
             continue
 
@@ -3000,6 +3816,7 @@ def calcular_voltas_cursos_duracao(event=None):
             dist = float(dist_txt) if dist_txt else None
         except Exception:
             lista_labels_voltas_cursos[i].config(text="Erro")
+            lista_labels_voltas_pin[i].config(text="Erro")
             lista_labels_duracao[i].config(text="Erro")
             continue
 
@@ -3014,15 +3831,27 @@ def calcular_voltas_cursos_duracao(event=None):
         if reciprocante_var.get():
             if curso is None or curso <= 0 or dist is None:
                 lista_labels_voltas_cursos[i].config(text="Erro")
+                lista_labels_voltas_pin[i].config(text="Erro")
             else:
                 cursos = dist / curso
                 lista_labels_voltas_cursos[i].config(text=f"{cursos:.2f}")
+                # Em modo reciprocante mantemos o mesmo valor nas duas colunas.
+                lista_labels_voltas_pin[i].config(text=f"{cursos:.2f}")
         else:
             if raio is None or raio <= 0 or dist is None:
                 lista_labels_voltas_cursos[i].config(text="Erro")
+                lista_labels_voltas_pin[i].config(text="Erro")
             else:
-                voltas = dist / (2.0 * 3.141592653589793 * raio)
-                lista_labels_voltas_cursos[i].config(text=f"{voltas:.2f}")
+                # Voltas fisicas no pino dependem apenas de distancia e raio.
+                voltas_pin = dist / (2.0 * 3.141592653589793 * raio)
+                # i = D2 / D1 -> voltas_motor = i * voltas_pino
+                if RELACAO_MECANICA > 0:
+                    voltas_mot = voltas_pin * RELACAO_MECANICA
+                    lista_labels_voltas_cursos[i].config(text=f"{voltas_mot:.2f}")
+                    lista_labels_voltas_pin[i].config(text=f"{voltas_pin:.2f}")
+                else:
+                    lista_labels_voltas_cursos[i].config(text="Erro")
+                    lista_labels_voltas_pin[i].config(text="Erro")
 chk_reciprocante.config(command=muda_estado_reciprocante)
 
 
@@ -3069,11 +3898,15 @@ tkinter.Label(labelframe2_baixo, text="Distâncias [mm]", font=("Arial", 9, "bol
     .grid(row=0, column=1, padx=5, pady=5)
 
 global lbl_header_voltas_cursos
-lbl_header_voltas_cursos = tkinter.Label(labelframe2_baixo, text="Voltas", font=("Arial", 9, "bold"))
+lbl_header_voltas_cursos = tkinter.Label(labelframe2_baixo, text="Voltas_mot", font=("Arial", 9, "bold"))
 lbl_header_voltas_cursos.grid(row=0, column=2, padx=5, pady=5)
-    
+
+global lbl_header_voltas_pin
+lbl_header_voltas_pin = tkinter.Label(labelframe2_baixo, text="Voltas_pin", font=("Arial", 9, "bold"))
+lbl_header_voltas_pin.grid(row=0, column=3, padx=5, pady=5)
+
 tkinter.Label(labelframe2_baixo, text="Duração [min]", font=("Arial", 9, "bold")) \
-    .grid(row=0, column=3, padx=5, pady=5)
+    .grid(row=0, column=4, padx=5, pady=5)
 tkinter.Label(labelframe3_baixo, text="Estado", font=("Arial", 10, "bold")).grid(row=0, column=0, padx=5, pady=5)
 label_ensaio_estado = tkinter.Label(labelframe3_baixo, text="Aguardando novo ensaio", font=("Arial", 10, "bold"), fg="black")
 label_ensaio_estado.grid(row=0, column=1, padx=5, pady=5)
@@ -3100,8 +3933,13 @@ for i in range(11):
     voltas_cursos_lbl.grid(row=1 + i, column=2, sticky="news", padx=5)
     lista_labels_voltas_cursos.append(voltas_cursos_lbl
                                       )
+
+    voltas_pin_lbl = tkinter.Label(labelframe2_baixo, text="xxxx")
+    voltas_pin_lbl.grid(row=1 + i, column=3, sticky="news", padx=5)
+    lista_labels_voltas_pin.append(voltas_pin_lbl)
+
     duracao_lbl = tkinter.Label(labelframe2_baixo, text="xxxx")
-    duracao_lbl.grid(row=1 + i, column=3, sticky="news", padx=5)
+    duracao_lbl.grid(row=1 + i, column=4, sticky="news", padx=5)
     lista_labels_duracao.append(duracao_lbl)
 
 
@@ -3343,6 +4181,10 @@ fig3 = Figure(figsize=(6.5, 2.9), dpi=100)
 ax3 = fig3.add_subplot(111)
 fig3.subplots_adjust(top=0.90, bottom=0.35)
 ax3_twin = None
+ax3.set_xlabel('Voltas', fontsize=9)
+ax3.set_ylabel('Atrito [-]', fontsize=9)
+ax3.grid(True, alpha=0.5)
+ax3.set_facecolor('white')
 
 canvas3 = FigureCanvasTkAgg(fig3, master=frame_graficos)
 # side="top" ou "bottom" para empilhar os gráficos um embaixo do outro

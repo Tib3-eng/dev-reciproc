@@ -50,6 +50,8 @@ namespace CalibraDLG_UI
         private readonly ComboBox _gain;
         private readonly ComboBox _lpf;
         private readonly ComboBox _sensPwr;
+        private readonly Label _tcCjcLabel;
+        private readonly ComboBox _tcCjcMode;
         private readonly NumericUpDown _points;
         private readonly TextBox _refValue;
         private readonly Button _start;
@@ -80,6 +82,12 @@ namespace CalibraDLG_UI
         private bool _cancelRequested;
         private string _calibraExePath = string.Empty;
         private string _calibOutDir = string.Empty;
+        private bool _updatingSensorUi;
+
+        private const int SensorIndexTermoparK = 8;
+        private const int GainIndex1000 = 6;
+        private const int LpfUiIndexStrong = 2; // iLPF=1 (UI index -> runtime index mapping)
+        private const int SensPwrUiIndex1V = 0;
 
         public MainForm()
         {
@@ -90,7 +98,7 @@ namespace CalibraDLG_UI
             var top = new TableLayoutPanel
             {
                 Dock = DockStyle.Top,
-                Height = 120,
+                Height = 122,
                 ColumnCount = 6,
                 RowCount = 3,
                 Padding = new Padding(10),
@@ -100,7 +108,7 @@ namespace CalibraDLG_UI
             top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 45));
             top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));
             top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 35));
-            top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));
+            top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 210));
             top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20));
             top.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
             top.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
@@ -152,6 +160,20 @@ namespace CalibraDLG_UI
             });
             _sensPwr.SelectedIndex = 2;
 
+            _tcCjcLabel = new Label
+            {
+                Text = "Junta fria",
+                AutoSize = true,
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+            _tcCjcMode = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 120 };
+            _tcCjcMode.Items.AddRange(new object[]
+            {
+                "Interna",
+                "Externa (TEDs)"
+            });
+            _tcCjcMode.SelectedIndex = 0;
+
             _points = new NumericUpDown
             {
                 Dock = DockStyle.Fill,
@@ -175,16 +197,37 @@ namespace CalibraDLG_UI
             _cancel.Click += (_, __) => CancelCalib();
             _legend.Click += (_, __) => ShowLegend();
             _checkDlg.Click += async (_, __) => await CheckDlgAsync();
+            _sensor.SelectedIndexChanged += (_, __) => OnSensorSelectionChanged();
 
             var rightButtons = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                AutoSize = false,
+                FlowDirection = FlowDirection.RightToLeft,
+                WrapContents = false
+            };
+            rightButtons.Controls.Add(_legend);
+            rightButtons.Controls.Add(_cancel);
+
+            var startFinishButtons = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                AutoSize = false,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false
+            };
+            startFinishButtons.Controls.Add(_start);
+            startFinishButtons.Controls.Add(_finish);
+
+            var tcPanel = new FlowLayoutPanel
             {
                 Dock = DockStyle.Fill,
                 AutoSize = true,
                 FlowDirection = FlowDirection.LeftToRight,
                 WrapContents = false
             };
-            rightButtons.Controls.Add(_cancel);
-            rightButtons.Controls.Add(_legend);
+            tcPanel.Controls.Add(_tcCjcLabel);
+            tcPanel.Controls.Add(_tcCjcMode);
 
             top.Controls.Add(new Label { Text = "Canal", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
             top.Controls.Add(_channel, 1, 0);
@@ -203,8 +246,8 @@ namespace CalibraDLG_UI
             top.Controls.Add(new Label { Text = "Valor de referencia", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 2);
             top.Controls.Add(_refValue, 1, 2);
             top.Controls.Add(_capture, 2, 2);
-            top.Controls.Add(_start, 3, 2);
-            top.Controls.Add(_finish, 4, 2);
+            top.Controls.Add(startFinishButtons, 3, 2);
+            top.Controls.Add(tcPanel, 4, 2);
             top.Controls.Add(rightButtons, 5, 2);
 
             _grid = new DataGridView
@@ -277,10 +320,11 @@ namespace CalibraDLG_UI
 
             _tips.SetToolTip(_legend, "Legenda interativa com explicacoes detalhadas.");
             _tips.SetToolTip(_channel, "Canal do DLG (CH1..CH8). Deve corresponder ao canal fisico ligado ao sensor.");
-            _tips.SetToolTip(_sensor, "Tipo de sensor (indice tSensor do manual). Mantem compatibilidade com o hardware.");
+            _tips.SetToolTip(_sensor, "Tipo de sensor (indice tSensor do manual). Termopar K aplica preset automatico recomendado.");
             _tips.SetToolTip(_gain, "Ganho analogico (indice iGain). Valores maiores amplificam mais o sinal.");
             _tips.SetToolTip(_lpf, "Filtro passa-baixas (LPF). Usa indices definidos no manual; 0=padrao.");
             _tips.SetToolTip(_sensPwr, "Tensao de excitacao do sensor (iSensPwr).");
+            _tips.SetToolTip(_tcCjcMode, "Termopar: seleciona junta fria interna ou externa (TEDs). Campo habilitado apenas para termopar.");
             _tips.SetToolTip(_points, "Numero de pontos de calibracao (min 2).");
             _tips.SetToolTip(_refValue, "Valor de referencia do ponto atual (ex: carga aplicada).");
             _tips.SetToolTip(_start, "Inicia a sessao de calibracao e envia a configuracao.");
@@ -291,6 +335,64 @@ namespace CalibraDLG_UI
             _tips.SetToolTip(_grid, "Tabela com os pontos capturados e suas leituras.");
             _tips.SetToolTip(_error, "Erro estimado (RMSE) do ajuste linear; percentual sobre o intervalo de referencia.");
             _tips.SetToolTip(_logBox, "Log curto de runtime para diagnostico rapido.");
+
+            UpdateThermocoupleUiState();
+        }
+
+        private static bool IsThermocoupleSensor(int tSensor)
+        {
+            return tSensor >= 6 && tSensor <= 13;
+        }
+
+        private void OnSensorSelectionChanged()
+        {
+            if (_updatingSensorUi) return;
+            UpdateThermocoupleUiState();
+            ApplySensorPresetIfNeeded();
+        }
+
+        private void UpdateThermocoupleUiState()
+        {
+            var isTc = IsThermocoupleSensor(_sensor.SelectedIndex);
+            _tcCjcLabel.Enabled = isTc;
+            _tcCjcMode.Enabled = isTc;
+            _tcCjcLabel.Visible = true;
+            _tcCjcMode.Visible = true;
+        }
+
+        private void ApplySensorPresetIfNeeded()
+        {
+            if (_sensor.SelectedIndex != SensorIndexTermoparK) return;
+            _updatingSensorUi = true;
+            try
+            {
+                if (GainIndex1000 >= 0 && GainIndex1000 < _gain.Items.Count) _gain.SelectedIndex = GainIndex1000;
+                if (LpfUiIndexStrong >= 0 && LpfUiIndexStrong < _lpf.Items.Count) _lpf.SelectedIndex = LpfUiIndexStrong;
+                if (SensPwrUiIndex1V >= 0 && SensPwrUiIndex1V < _sensPwr.Items.Count) _sensPwr.SelectedIndex = SensPwrUiIndex1V;
+                _tcCjcMode.SelectedIndex = 0;
+            }
+            finally
+            {
+                _updatingSensorUi = false;
+            }
+            AppendLog("Preset termopar K aplicado: ganho=1000, LPF=1, excitacao=1.0V, junta fria interna.");
+        }
+
+        private string BuildConfigJson(int ch, int tSensor, int iGain, int iLpf, int iSensPwr, string outPath)
+        {
+            if (IsThermocoupleSensor(tSensor))
+            {
+                var tcCjcMode = _tcCjcMode.SelectedIndex == 1 ? 1 : 0;
+                return string.Format(
+                    CultureInfo.InvariantCulture,
+                    "{{\"op\":\"config\",\"ch\":{0},\"tSensor\":{1},\"iGain\":{2},\"iLPF\":{3},\"iSensPwr\":{4},\"tc_cjc_mode\":{5},\"out_path\":\"{6}\"}}",
+                    ch, tSensor, iGain, iLpf, iSensPwr, tcCjcMode, outPath);
+            }
+
+            return string.Format(
+                CultureInfo.InvariantCulture,
+                "{{\"op\":\"config\",\"ch\":{0},\"tSensor\":{1},\"iGain\":{2},\"iLPF\":{3},\"iSensPwr\":{4},\"out_path\":\"{5}\"}}",
+                ch, tSensor, iGain, iLpf, iSensPwr, outPath);
         }
 
         private static string FindRepoRoot(params string[] seedDirs)
@@ -467,9 +569,7 @@ namespace CalibraDLG_UI
             Directory.CreateDirectory(outDir);
             var outPath = Path.Combine(outDir, $"calib_CH{ch}.json").Replace('\\', '/');
 
-            var line = string.Format(CultureInfo.InvariantCulture,
-                "{{\"op\":\"config\",\"ch\":{0},\"tSensor\":{1},\"iGain\":{2},\"iLPF\":{3},\"iSensPwr\":{4},\"out_path\":\"{5}\"}}",
-                ch, tSensor, iGain, iLpf, iSensPwr, outPath);
+            var line = BuildConfigJson(ch, tSensor, iGain, iLpf, iSensPwr, outPath);
             SendLine(line);
 
             SetStatus("Configuracao enviada. Aguardando DLG...");
@@ -528,9 +628,7 @@ namespace CalibraDLG_UI
 
                 checkProc.Start();
 
-                var cfg = string.Format(CultureInfo.InvariantCulture,
-                    "{{\"op\":\"config\",\"ch\":{0},\"tSensor\":{1},\"iGain\":{2},\"iLPF\":{3},\"iSensPwr\":{4},\"out_path\":\"{5}\"}}",
-                    ch, tSensor, iGain, iLpf, iSensPwr, outPath);
+                var cfg = BuildConfigJson(ch, tSensor, iGain, iLpf, iSensPwr, outPath);
                 checkProc.StandardInput.WriteLine(cfg);
                 checkProc.StandardInput.Flush();
 
@@ -963,7 +1061,9 @@ namespace CalibraDLG_UI
                 {
                     ("Runtime", "O UI resolve automaticamente CalibraDLG.exe e o destino da calibracao. Nao e necessario selecionar executavel manualmente."),
                     ("Canal", "Seleciona o canal fisico do DLG (CH1..CH8). Use o canal onde o sensor esta ligado."),
-                    ("Sensor", "Tipo de sensor (tSensor). O indice deve seguir o manual. Ex: ponte completa, meia ponte, ponte 1/4."),
+                    ("Sensor", "Tipo de sensor (tSensor). O indice deve seguir o manual. Ex: ponte completa, meia ponte, ponte 1/4. Ao selecionar termopar K, a tela preenche um preset recomendado."),
+                    ("Preset termopar K", "Preset aplicado ao selecionar termopar K: ganho=1000 (iGain=6), LPF=1 (mais forte suportado no fluxo atual), excitacao=1.0V e junta fria interna."),
+                    ("Junta fria (termopar)", "Disponivel apenas para termopar. Define referencia de compensacao da junta fria: interna ou externa (TEDs)."),
                     ("Ganho", "Ganho analogico (iGain). Aumenta a amplitude do sinal antes da conversao. Valores altos saturam mais facil."),
                     ("Filtro LPF", "Filtro passa-baixas (LPF) no hardware. Indices definidos pelo manual; 0=padrao."),
                     ("Excitacao", "Tensao de excitacao do sensor (iSensPwr). Escolha a que o sensor suporta."),

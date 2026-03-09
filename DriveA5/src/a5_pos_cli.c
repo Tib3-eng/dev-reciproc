@@ -154,6 +154,14 @@ typedef struct {
     int verify_timeout_ms;
 } args_t;
 
+/*
+Funcao: trim
+Objetivo: Normaliza texto/entrada para evitar inconsistencias.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void trim(char *s){
     size_t n = strlen(s);
     while(n && (s[n-1]=='\n'||s[n-1]=='\r'||s[n-1]==' '||s[n-1]=='\t')) s[--n]=0;
@@ -161,6 +169,14 @@ static void trim(char *s){
     if(p!=s) memmove(s,p,strlen(p)+1);
 }
 
+/*
+Funcao: ask_line
+Objetivo: Faz parse/validacao de entrada de dados.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int ask_line(const char *prompt, char *out, size_t outsz){
     printf("%s", prompt);
     if(!fgets(out, (int)outsz, stdin)) return 0;
@@ -168,6 +184,14 @@ static int ask_line(const char *prompt, char *out, size_t outsz){
     return 1;
 }
 
+/*
+Funcao: ask_int_default
+Objetivo: Faz parse/validacao de entrada de dados.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int ask_int_default(const char *prompt, int *out, bool *is_set){
     char buf[64];
     if(!ask_line(prompt, buf, sizeof(buf))) return 0;
@@ -183,6 +207,14 @@ static int ask_int_default(const char *prompt, int *out, bool *is_set){
     return 1;
 }
 
+/*
+Funcao: log_open
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void log_open(void){
     if(g_log) return;
     _mkdir("out");
@@ -195,6 +227,14 @@ static void log_open(void){
     g_log_t0 = GetTickCount64();
 }
 
+/*
+Funcao: log_close
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void log_close(void){
     if(!g_log) return;
     fclose(g_log);
@@ -216,6 +256,14 @@ static void log_sample(const char *tag, int32_t req_pos, int32_t send_pos,
 // ----------------- COM list (QueryDosDevice)
 typedef struct { char **items; int count; } com_list_t;
 
+/*
+Funcao: com_list_free
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void com_list_free(com_list_t *L){
     if(!L) return;
     for(int i=0;i<L->count;++i) free(L->items[i]);
@@ -224,6 +272,14 @@ static void com_list_free(com_list_t *L){
     L->count = 0;
 }
 
+/*
+Funcao: com_list_detect
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static com_list_t com_list_detect(void){
     com_list_t L = {0};
     DWORD cap = 64*1024;
@@ -244,12 +300,28 @@ static com_list_t com_list_detect(void){
     return L;
 }
 
+/*
+Funcao: com_list_print
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void com_list_print(const com_list_t *L){
     if(!L || !L->count){ puts("No COM ports found."); return; }
     puts("Detected COM ports:");
     for(int i=0;i<L->count;++i) printf("  [%d] %s\n", i+1, L->items[i]);
 }
 
+/*
+Funcao: print_usage
+Objetivo: Exibe informacoes para operador/diagnostico.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void print_usage(void){
     puts("Uso:");
     puts("  a5_pos_cli COMx <pos> [--abs|--rel] [--speed <rpm>] [--accel <ms>] [--wait <ms>]");
@@ -266,11 +338,27 @@ static void print_usage(void){
     puts("  - --diag faz testes de leitura (P0C e P0B-09) para validar comunicacao.");
 }
 
+/*
+Funcao: set_timeouts_us
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void set_timeouts_us(modbus_t *ctx, int resp_us, int byte_us){
     modbus_set_response_timeout(ctx, 0, resp_us);
     modbus_set_byte_timeout(ctx, 0, byte_us);
 }
 
+/*
+Funcao: make_port_path
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void make_port_path(const char *shortName, char *out, size_t outsz){
     int num = 0;
     if(_strnicmp(shortName,"COM",3)==0) num = atoi(shortName+3);
@@ -278,6 +366,14 @@ static void make_port_path(const char *shortName, char *out, size_t outsz){
     else          _snprintf(out, outsz, "%s", shortName);
 }
 
+/*
+Funcao: get_word_order
+Objetivo: Resolve configuracao/caminho/estado auxiliar do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int get_word_order(modbus_t *ctx, uint16_t *out){
     uint16_t v = 1;
     if(read_u16(ctx, REG_P0C_26, &v) == 0){
@@ -296,6 +392,14 @@ static int get_word_order(modbus_t *ctx, uint16_t *out){
     return -1;
 }
 
+/*
+Funcao: get_units_per_rev
+Objetivo: Resolve configuracao/caminho/estado auxiliar do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int get_units_per_rev(modbus_t *ctx, uint16_t order, int32_t *out){
     int32_t p05 = 0;
     if(read_s32_seq(ctx, REG_P05_02, (order != 0), &p05, 3, 80) == 0 && p05 > 0){
@@ -321,6 +425,14 @@ static int get_units_per_rev(modbus_t *ctx, uint16_t order, int32_t *out){
     return -1;
 }
 
+/*
+Funcao: compute_auto_timeout_ms
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int compute_auto_timeout_ms(int32_t start_pos, int32_t req_pos, int speed_rpm, int32_t units_per_rev){
     if(speed_rpm <= 0 || units_per_rev <= 0) return 0;
     double diff = (double)llabs((long long)req_pos - (long long)start_pos);
@@ -332,6 +444,14 @@ static int compute_auto_timeout_ms(int32_t start_pos, int32_t req_pos, int speed
     return (int)(ms + 0.5);
 }
 
+/*
+Funcao: write_u16
+Objetivo: Realiza escrita de dados de hardware/arquivo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int write_u16(modbus_t *ctx, int reg, uint16_t v){
     if(modbus_write_register(ctx, reg, v) == -1){
         int err = errno;
@@ -342,6 +462,14 @@ static int write_u16(modbus_t *ctx, int reg, uint16_t v){
     return 0;
 }
 
+/*
+Funcao: write_u16_logged
+Objetivo: Realiza escrita de dados de hardware/arquivo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int write_u16_logged(modbus_t *ctx, int reg, uint16_t v, const char *label, bool verify){
     int rc = modbus_write_register(ctx, reg, v);
     if(rc == -1){
@@ -392,6 +520,14 @@ static int write_u16_seq(modbus_t *ctx, int reg, uint16_t v, const char *label,
     return -1;
 }
 
+/*
+Funcao: read_u16
+Objetivo: Realiza leitura de dados de hardware/arquivo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int read_u16(modbus_t *ctx, int reg, uint16_t *out){
     uint16_t v = 0;
     if(modbus_read_registers(ctx, reg, 1, &v) != 1){
@@ -402,6 +538,14 @@ static int read_u16(modbus_t *ctx, int reg, uint16_t *out){
     return 0;
 }
 
+/*
+Funcao: read_u16_seq
+Objetivo: Realiza leitura de dados de hardware/arquivo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int read_u16_seq(modbus_t *ctx, int reg, uint16_t *out, int retries, int retry_ms){
     for(int i = 0; i < retries; ++i){
         uint16_t v = 0;
@@ -417,6 +561,14 @@ static int read_u16_seq(modbus_t *ctx, int reg, uint16_t *out, int retries, int 
     return -1;
 }
 
+/*
+Funcao: read_p0b09
+Objetivo: Realiza leitura de dados de hardware/arquivo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int read_p0b09(modbus_t *ctx, uint16_t *out){
     uint16_t v = 0;
     if(modbus_read_registers(ctx, REG_P0B_09, 1, &v) == 1){
@@ -430,6 +582,14 @@ static int read_p0b09(modbus_t *ctx, uint16_t *out){
     return -1;
 }
 
+/*
+Funcao: read_s32
+Objetivo: Realiza leitura de dados de hardware/arquivo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int read_s32(modbus_t *ctx, int reg, int low_first, int32_t *out){
     uint16_t regs[2] = {0, 0};
     if(modbus_read_registers(ctx, reg, 2, regs) != 2){
@@ -446,10 +606,26 @@ static int read_s32(modbus_t *ctx, int reg, int low_first, int32_t *out){
     return 0;
 }
 
+/*
+Funcao: read_p0b07
+Objetivo: Realiza leitura de dados de hardware/arquivo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int read_p0b07(modbus_t *ctx, int low_first, int32_t *out){
     return read_s32(ctx, 0x0B07, low_first, out);
 }
 
+/*
+Funcao: read_s32_seq
+Objetivo: Realiza leitura de dados de hardware/arquivo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int read_s32_seq(modbus_t *ctx, int reg, int low_first, int32_t *out, int retries, int retry_ms){
     for(int i = 0; i < retries; ++i){
         uint16_t regs[2] = {0, 0};
@@ -471,6 +647,14 @@ static int read_s32_seq(modbus_t *ctx, int reg, int low_first, int32_t *out, int
     return -1;
 }
 
+/*
+Funcao: write_s32
+Objetivo: Realiza escrita de dados de hardware/arquivo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int write_s32(modbus_t *ctx, int reg, int32_t v, int low_first){
     uint16_t regs[2];
     uint32_t u = (uint32_t)v;
@@ -490,6 +674,14 @@ static int write_s32(modbus_t *ctx, int reg, int32_t v, int low_first){
     return 0;
 }
 
+/*
+Funcao: write_s32_logged
+Objetivo: Realiza escrita de dados de hardware/arquivo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int write_s32_logged(modbus_t *ctx, int reg, int32_t v, int low_first, const char *label, bool verify){
     int rc = write_s32(ctx, reg, v, low_first);
     if(rc != 0){
@@ -538,6 +730,14 @@ static int write_s32_seq(modbus_t *ctx, int reg, int32_t v, int low_first, const
     return -1;
 }
 
+/*
+Funcao: probe_connection
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int probe_connection(const args_t *args){
     char port_path[64];
     make_port_path(args->port, port_path, sizeof(port_path));
@@ -573,6 +773,14 @@ static int probe_connection(const args_t *args){
     return 0;
 }
 
+/*
+Funcao: wait_pos_settle
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int wait_pos_settle(modbus_t *ctx, int low_first, int thresh, int timeout_ms){
     const int step_ms = 100;
     const int stable_need = 5;
@@ -595,6 +803,14 @@ static int wait_pos_settle(modbus_t *ctx, int low_first, int thresh, int timeout
     return -1;
 }
 
+/*
+Funcao: configure_vdi
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int configure_vdi(modbus_t *ctx){
     // VDI1=S-ON (level), VDI2=PosInSen (level per doc)
     if(write_u16_seq(ctx, REG_P17_00, FUNIN_SON, "P17-00 (VDI1 func)", true, 3, 50) != 0) return -1;
@@ -608,6 +824,14 @@ static int configure_vdi(modbus_t *ctx){
     return 0;
 }
 
+/*
+Funcao: vdi_mapping_ok
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int vdi_mapping_ok(modbus_t *ctx){
     uint16_t v = 0;
     if(read_u16(ctx, REG_P17_00, &v) != 0 || v != FUNIN_SON) return 0;
@@ -618,6 +842,14 @@ static int vdi_mapping_ok(modbus_t *ctx){
     return 1;
 }
 
+/*
+Funcao: logical_pos_from_raw
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int32_t logical_pos_from_raw(int32_t raw){
     if(!g_zero_valid) return raw;
     return (int32_t)((int64_t)raw - (int64_t)g_zero_offset);
@@ -681,6 +913,14 @@ static int watch_and_verify(modbus_t *ctx, int low_first, int32_t req_pos, int32
     return -1;
 }
 
+/*
+Funcao: diag_dump_config
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void diag_dump_config(modbus_t *ctx){
     uint16_t v = 0;
     uint16_t order = 1;
@@ -710,6 +950,14 @@ static void diag_dump_config(modbus_t *ctx){
     if(read_u16(ctx, REG_P17_03, &v) == 0) printf("  P17-03 (VDI2 logic) = %u\n", v);
 }
 
+/*
+Funcao: diag_dump_runtime
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void diag_dump_runtime(modbus_t *ctx){
     uint16_t order = 1;
     uint16_t di = 0;
@@ -738,6 +986,14 @@ static void diag_dump_runtime(modbus_t *ctx){
     }
 }
 
+/*
+Funcao: diag_warn_mismatch
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void diag_warn_mismatch(modbus_t *ctx){
     uint16_t v = 0;
     bool ok = true;
@@ -772,6 +1028,14 @@ static void diag_warn_mismatch(modbus_t *ctx){
     }
 }
 
+/*
+Funcao: parse_args
+Objetivo: Faz parse/validacao de entrada de dados.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int parse_args(int argc, char **argv, args_t *out){
     memset(out, 0, sizeof(*out));
     out->slave = DEFAULT_SLAVE;
@@ -865,6 +1129,14 @@ static int parse_args(int argc, char **argv, args_t *out){
     return (positional >= 2) ? 0 : -1;
 }
 
+/*
+Funcao: run_diag
+Objetivo: Controla uma etapa operacional do ensaio.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int run_diag(const args_t *args){
     char port_path[64];
     make_port_path(args->port, port_path, sizeof(port_path));
@@ -915,6 +1187,14 @@ static int run_diag(const args_t *args){
     return 0;
 }
 
+/*
+Funcao: run_stop
+Objetivo: Controla uma etapa operacional do ensaio.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int run_stop(const args_t *args){
     char port_path[64];
     make_port_path(args->port, port_path, sizeof(port_path));
@@ -962,6 +1242,14 @@ done:
     return 0;
 }
 
+/*
+Funcao: run_command
+Objetivo: Controla uma etapa operacional do ensaio.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int run_command(const args_t *args){
     char port_path[64];
     make_port_path(args->port, port_path, sizeof(port_path));
@@ -1131,6 +1419,14 @@ done:
     return 0;
 }
 
+/*
+Funcao: run_oscillate
+Objetivo: Controla uma etapa operacional do ensaio.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int run_oscillate(const args_t *args){
     if(args->osc_cycles < 1){
         puts("Oscilacao: ciclos deve ser >= 1.");
@@ -1161,6 +1457,14 @@ static int run_oscillate(const args_t *args){
     return 0;
 }
 
+/*
+Funcao: run_position_update
+Objetivo: Controla uma etapa operacional do ensaio.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int run_position_update(const args_t *args){
     char port_path[64];
     make_port_path(args->port, port_path, sizeof(port_path));
@@ -1281,6 +1585,14 @@ static int run_position_update(const args_t *args){
     return 0;
 }
 
+/*
+Funcao: run_zero_now
+Objetivo: Fornece base de tempo para sincronizacao do loop.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int run_zero_now(const args_t *args){
     char port_path[64];
     make_port_path(args->port, port_path, sizeof(port_path));
@@ -1345,6 +1657,14 @@ static int run_zero_now(const args_t *args){
     return 0;
 }
 
+/*
+Funcao: print_header
+Objetivo: Exibe informacoes para operador/diagnostico.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void print_header(void){
     puts("==============================================");
     puts("  Lichuan A5 - Position CLI (Modbus RTU)      ");
@@ -1352,6 +1672,14 @@ static void print_header(void){
     puts("==============================================");
 }
 
+/*
+Funcao: ask_int_range
+Objetivo: Faz parse/validacao de entrada de dados.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int ask_int_range(const char *prompt, int min_v, int max_v, int *out){
     char buf[64];
     for(;;){
@@ -1369,6 +1697,14 @@ static int ask_int_range(const char *prompt, int min_v, int max_v, int *out){
     }
 }
 
+/*
+Funcao: interactive_mode
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int interactive_mode(void){
     args_t args;
     memset(&args, 0, sizeof(args));
@@ -1506,6 +1842,14 @@ static int interactive_mode(void){
     return 0;
 }
 
+/*
+Funcao: main
+Objetivo: Executa o fluxo principal do programa.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 int main(int argc, char **argv){
     args_t args;
     if(parse_args(argc, argv, &args) != 0){

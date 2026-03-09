@@ -13,6 +13,7 @@ Objetivos praticos:
   como START, PAUSE, RESUME e STOP.
 - Gerar estrutura de saida previsivel (pasta + CSVs) para facilitar auditoria.
 - Rodar merge final dos logs e entregar um CSV consolidado ao supervisorio.
+- Separar artefatos tecnicos em subpasta DadosDev para nao poluir a pasta REP.
 
 Escopo:
 - Resolver caminhos de executaveis.
@@ -53,18 +54,23 @@ class RunState:
     # Handles dos subprocessos em execucao.
     dlg_proc: subprocess.Popen
     drive_proc: subprocess.Popen
+    turn_proc: Optional[subprocess.Popen]
     # Caminhos de arquivos de saida do ensaio.
     dlg_csv: str
     drive_csv: str
+    turn_csv: str
     merge_csv: str
     schedule_csv: str
     # Caminhos dos executaveis usados (util para diagnostico em log).
     dlg_exe: str
     drive_exe: str
+    turn_exe: str
     merge_exe: str
     # Parametros de execucao aplicados neste ensaio.
     duration_s: float
     rate_hz: float
+    force_normal_n: float
+    relacao: float
     # Estado logico de pausa observado pelo orquestrador.
     paused: bool = False
 
@@ -104,7 +110,7 @@ def build_output_paths(base_dir: str, nome_ensaio: str, estudo: str) -> dict:
         estudo: identificador de estudo/repeticao.
 
     Retorna:
-        dict com caminhos: folder, info_csv, dlg_csv, drive_csv, merge_csv, schedule_csv.
+        dict com caminhos: folder, info_csv, dlg_csv, drive_csv, turn_csv, merge_csv, schedule_csv.
 
     Excecoes:
         FileExistsError: quando a pasta ja existe (evita sobrescrever ensaio).
@@ -120,6 +126,7 @@ def build_output_paths(base_dir: str, nome_ensaio: str, estudo: str) -> dict:
         "info_csv": os.path.join(folder_path, "info_ensaio.csv"),
         "dlg_csv": os.path.join(folder_path, "dlg.csv"),
         "drive_csv": os.path.join(folder_path, "drive.csv"),
+        "turn_csv": os.path.join(folder_path, "atrito_por_volta.csv"),
         "merge_csv": os.path.join(folder_path, "resultado_ensaio.csv"),
         "schedule_csv": os.path.join(folder_path, "schedule.csv"),
     }
@@ -148,8 +155,10 @@ def rpm_from_mm_s(vel_mm_s: float, raio_mm: float, relacao: float = 1.0) -> int:
     """
     Converte velocidade linear (mm/s) para RPM.
 
-    Formula:
-        rpm = (i * v * 60) / (2*pi*raio)
+    Formula (i = D2 / D1):
+        D1 = diametro da polia do motor
+        D2 = diametro da polia do disco
+        rpm_motor = i * (v_pino * 60) / (2*pi*raio_pino)
     onde:
         i = relacao mecanica
         v = velocidade linear em mm/s
@@ -158,7 +167,7 @@ def rpm_from_mm_s(vel_mm_s: float, raio_mm: float, relacao: float = 1.0) -> int:
     Parametros:
         vel_mm_s: velocidade linear.
         raio_mm: raio do movimento.
-        relacao: relacao mecanica (i).
+        relacao: relacao mecanica i = D2 / D1.
 
     Retorna:
         RPM inteiro arredondado para uso no Drive.
@@ -167,7 +176,7 @@ def rpm_from_mm_s(vel_mm_s: float, raio_mm: float, relacao: float = 1.0) -> int:
         return 0
     # No fluxo atual, enviamos somente magnitude de velocidade.
     # Inversao de sentido e tratada pela sequencia mecanica, nao por RPM negativo.
-    rpm = abs((relacao * vel_mm_s * 60.0) / (2.0 * 3.141592653589793 * raio_mm))
+    rpm = abs((vel_mm_s * 60.0 * relacao) / (2.0 * 3.141592653589793 * raio_mm))
     # Arredonda para inteiro mais proximo (Drive recebe setpoint inteiro).
     return int(rpm + 0.5 if rpm >= 0 else rpm - 0.5)
 
@@ -266,10 +275,10 @@ def check_executables(repo_root: str) -> dict:
         missing.append("a5_speed_logger.exe (DriveA5/build/Release)")
     if not merge_exe:
         missing.append("merge_logs.exe (DriveA5/build/Release)")
-
     return {
         "dlg_exe": dlg_exe,
         "drive_exe": drive_exe,
+        "turn_exe": "",
         "merge_exe": merge_exe,
         "missing": missing,
     }
@@ -310,6 +319,8 @@ def start_external_run(
     baud: int = 115200,
     parity: str = "E",
     show_console: bool = False,
+    force_normal_n: float = 0.0,
+    relacao: float = 1.0,
 ) -> RunState:
     """
     Inicia o ensaio em modo externo (executaveis C sem interface).
@@ -327,7 +338,7 @@ def start_external_run(
     Ocasiando menos percas de dados por aquisicoes com problemas.
     Parametros:
         repo_root: raiz do repositorio para localizar .exe.
-        out_paths: caminhos de saida (dlg_csv, drive_csv, merge_csv, schedule_csv).
+        out_paths: caminhos de saida (dlg_csv, drive_csv, turn_csv, merge_csv, schedule_csv).
         schedule: lista de etapas (rpm, duracao_s).
         duration_s: duracao total do ensaio.
         rate_hz: taxa alvo de aquisicao.
@@ -342,6 +353,10 @@ def start_external_run(
     Excecoes:
         FileNotFoundError: quando algum executavel obrigatorio nao e encontrado.
     """
+    if "turn_csv" not in out_paths or not out_paths.get("turn_csv"):
+        base_folder = os.path.dirname(out_paths.get("merge_csv", "")) or os.getcwd()
+        out_paths["turn_csv"] = os.path.join(base_folder, "atrito_por_volta.csv")
+
     write_schedule_csv(out_paths["schedule_csv"], schedule)
 
     # Encontra executaveis a partir da raiz do repositorio.
@@ -366,6 +381,7 @@ def start_external_run(
         "--out", out_paths["dlg_csv"],
         "--duration", f"{duration_s:.6f}",
         "--rate", f"{rate_hz:.6f}",
+        "--force-normal", f"{force_normal_n:.6f}",
         "--ip", dlg_ip,
         "--port", str(dlg_port),
         "--bind-ip", bind_ip,
@@ -404,29 +420,56 @@ def start_external_run(
         creationflags=creationflags,
     )
 
-    # READY e melhor esforco: evita deadlock se o logger nao emitir a linha.
-    _wait_ready(dlg_proc, "DLG")
-    _wait_ready(drive_proc, "Drive")
+    try:
+        # READY obrigatorio: se algum logger nao iniciar corretamente, aborta o ensaio.
+        if not _wait_ready(dlg_proc, "DLG"):
+            raise RuntimeError("DLG logger nao respondeu READY.")
+        if not _wait_ready(drive_proc, "Drive"):
+            raise RuntimeError("Drive logger nao respondeu READY.")
 
-    # Sequencia de start:
-    # 1) DLG inicia e confirma primeira amostra.
-    # 2) Drive inicia depois (sincronismo mais confiavel).
-    _send_start(dlg_proc)
-    _wait_data_ready(dlg_proc, timeout_s=6.0)
-    _send_start(drive_proc)
+        # Sequencia de start:
+        # 1) DLG inicia e confirma primeira amostra.
+        # 2) Drive inicia depois (sincronismo mais confiavel).
+        _send_start(dlg_proc)
+        # Nao aborta aqui em DATA_TIMEOUT: o supervisório ja valida amostras
+        # reais antes de iniciar cronometro e pode abortar de forma controlada
+        # se o DLG nao estabilizar.
+        _wait_data_ready(dlg_proc, timeout_s=6.0)
+        _send_start(drive_proc)
+    except Exception:
+        # Evita processos zumbis se startup falhar em qualquer etapa.
+        for p in (dlg_proc, drive_proc):
+            try:
+                if p and p.poll() is None:
+                    _send_ipc(p, "STOP")
+            except Exception:
+                pass
+        time.sleep(0.2)
+        for p in (dlg_proc, drive_proc):
+            try:
+                if p and p.poll() is None:
+                    p.terminate()
+            except Exception:
+                pass
+        raise
 
     return RunState(
         dlg_proc=dlg_proc,
         drive_proc=drive_proc,
+        turn_proc=None,
         dlg_csv=out_paths["dlg_csv"],
         drive_csv=out_paths["drive_csv"],
+        turn_csv=out_paths["turn_csv"],
         merge_csv=out_paths["merge_csv"],
         schedule_csv=out_paths["schedule_csv"],
         dlg_exe=dlg_exe,
         drive_exe=drive_exe,
+        turn_exe="",
         merge_exe=merge_exe,
         duration_s=duration_s,
         rate_hz=rate_hz,
+        force_normal_n=force_normal_n,
+        relacao=relacao,
     )
 
 
@@ -450,6 +493,10 @@ def wait_and_merge(state: RunState) -> int:
     state.dlg_proc.wait()
     state.drive_proc.wait()
 
+    # Reprocessa sempre no final para garantir consistencia do arquivo final
+    # com os CSVs completos (independente de glitch no tempo real).
+    _rebuild_turn_csv_from_logs(state)
+
     merge_rc = -1
     merge_cmd = [
         state.merge_exe,
@@ -465,9 +512,272 @@ def wait_and_merge(state: RunState) -> int:
     # Rede de seguranca: se merge em C falhar, gera resultado em Python.
     if merge_rc != 0 or not os.path.exists(state.merge_csv):
         _merge_csv_fallback(state.dlg_csv, state.drive_csv, state.merge_csv)
+        _move_dev_artifacts(state)
         return 0
 
+    _move_dev_artifacts(state)
     return merge_rc
+
+
+def _move_dev_artifacts(state: RunState) -> None:
+    """
+    Move artefatos tecnicos do ensaio para a pasta DadosDev.
+
+    Motivacao:
+    - Manter a pasta REP focada nos arquivos finais para usuario.
+    - Preservar logs tecnicos para diagnostico sem mistura visual.
+    """
+    if not state:
+        return
+    rep_dir = os.path.dirname(state.merge_csv) if state.merge_csv else ""
+    if not rep_dir:
+        return
+
+    dev_dir = os.path.join(rep_dir, "DadosDev")
+    os.makedirs(dev_dir, exist_ok=True)
+
+    pairs = []
+    # Signature do merge em C: suporte a nome legado (.txt) e novo.
+    merge_sig_new = f"{state.merge_csv}.merge_source"
+    merge_sig_old = f"{state.merge_csv}.merge_source.txt"
+    if os.path.exists(merge_sig_new):
+        pairs.append((merge_sig_new, os.path.join(dev_dir, "resultado_ensaio.csv.merge_source")))
+    elif os.path.exists(merge_sig_old):
+        pairs.append((merge_sig_old, os.path.join(dev_dir, "resultado_ensaio.csv.merge_source")))
+
+    pairs.extend([
+        (state.schedule_csv, os.path.join(dev_dir, "schedule.csv")),
+        (os.path.join(rep_dir, "graph_events.log"), os.path.join(dev_dir, "graph_events.log")),
+        (os.path.join(rep_dir, "dlg_logger_events.log"), os.path.join(dev_dir, "dlg_logger_events.log")),
+        (os.path.join(rep_dir, "a5_speed_events.log"), os.path.join(dev_dir, "a5_speed_events.log")),
+    ])
+
+    for src, dst in pairs:
+        try:
+            if not src or not os.path.exists(src):
+                continue
+            if os.path.abspath(src) == os.path.abspath(dst):
+                continue
+            if os.path.exists(dst):
+                os.remove(dst)
+            shutil.move(src, dst)
+        except Exception:
+            # Melhor esforco: nao falha ensaio por erro de organizacao de arquivos.
+            pass
+
+
+def _rebuild_turn_csv_from_logs(state: RunState) -> None:
+    """
+    Regera atrito_por_volta.csv em modo offline (sem IPC) usando logs finais.
+
+    Esse passo roda ao final do ensaio para garantir consistencia dos dados
+    por volta, mesmo se o processo em tempo real tiver encerrado cedo.
+    """
+    if not state:
+        return
+    if not os.path.exists(state.dlg_csv) or not os.path.exists(state.drive_csv):
+        return
+    # Reprocessa no final em Python para manter consistencia com o grafico 3
+    # em tempo real e evitar divergencia de parametros legados do agregador C.
+    try:
+        relacao = float(state.relacao) if state.relacao > 0 else 1.0
+    except Exception:
+        relacao = 1.0
+    cycles_per_motor_rev = 1.0
+    rpm_dir_deadband = 5.0
+
+    def _to_int(txt, default=None):
+        try:
+            if txt is None:
+                return default
+            t = str(txt).strip()
+            if not t or t.upper() == "NULL":
+                return default
+            return int(t)
+        except Exception:
+            return default
+
+    def _to_float(txt, default=None):
+        try:
+            if txt is None:
+                return default
+            t = str(txt).strip()
+            if not t or t.upper() == "NULL":
+                return default
+            return float(t)
+        except Exception:
+            return default
+
+    with open(state.turn_csv, "w", newline="", encoding="utf-8") as fout:
+        w = csv.writer(fout)
+        w.writerow([
+            "volta_n", "atrito_med", "atrito_min", "atrito_max", "rpm_medio_volta",
+            "n_total_pontos", "n_falhas", "n_validas", "pct_perda"
+        ])
+
+        with open(state.dlg_csv, "r", newline="", encoding="utf-8") as fdlg, \
+             open(state.drive_csv, "r", newline="", encoding="utf-8") as fdrv:
+            rd_d = csv.reader(fdlg)
+            rd_r = csv.reader(fdrv)
+            next(rd_d, None)
+            next(rd_r, None)
+
+            drow = None
+            rrow = None
+            have_d = False
+            have_r = False
+
+            prev_pos = 0.0
+            prev_pos_valid = False
+            prev_t_s = 0.0
+            prev_t_valid = False
+            dir_sign = 1
+            turn_progress = 0.0
+            turn_n = 1
+
+            n_total = 0
+            n_fail = 0
+            n_valid = 0
+            atr_sum = 0.0
+            atr_min = None
+            atr_max = None
+            rpm_sum = 0.0
+            rpm_cnt = 0
+
+            while True:
+                if not have_d:
+                    try:
+                        drow = next(rd_d)
+                        have_d = True
+                    except StopIteration:
+                        break
+                if not have_r:
+                    try:
+                        rrow = next(rd_r)
+                        have_r = True
+                    except StopIteration:
+                        break
+
+                idx_d = _to_int(drow[0] if drow and len(drow) > 0 else None, None)
+                idx_r = _to_int(rrow[0] if rrow and len(rrow) > 0 else None, None)
+                if idx_d is None:
+                    have_d = False
+                    continue
+                if idx_r is None:
+                    have_r = False
+                    continue
+
+                if idx_d < idx_r:
+                    have_d = False
+                    continue
+                if idx_r < idx_d:
+                    have_r = False
+                    continue
+
+                # idx alinhado
+                have_d = False
+                have_r = False
+
+                dlg_err = _to_int(drow[-1] if drow else None, 1)
+                ch1 = _to_float(drow[3] if drow and len(drow) > 3 else None, None)
+                atr = _to_float(drow[11] if drow and len(drow) > 11 else None, None)
+                if state.force_normal_n and state.force_normal_n > 0 and ch1 is not None:
+                    atr = ch1 / state.force_normal_n
+                atr_ok = (dlg_err == 0 and atr is not None)
+
+                t_s_drv = _to_float(rrow[2] if rrow and len(rrow) > 2 else None, None)
+                pos_err = _to_int(rrow[5] if rrow and len(rrow) > 5 else None, 1)
+                rpm_err = _to_int(rrow[6] if rrow and len(rrow) > 6 else None, 1)
+                pos = _to_float(rrow[3] if rrow and len(rrow) > 3 else None, None)
+                rpm = _to_float(rrow[4] if rrow and len(rrow) > 4 else None, None)
+                pos_mod = _to_float(rrow[7] if rrow and len(rrow) > 7 else None, 65536.0)
+                if pos_mod is None or pos_mod <= 1.0:
+                    pos_mod = 65536.0
+
+                pos_ok = (pos_err == 0 and pos is not None)
+                rpm_ok = (rpm_err == 0 and rpm is not None)
+
+                n_total += 1
+                if atr_ok and pos_ok:
+                    n_valid += 1
+                    atr_sum += atr
+                    atr_min = atr if atr_min is None else min(atr_min, atr)
+                    atr_max = atr if atr_max is None else max(atr_max, atr)
+                    if rpm_ok:
+                        rpm_sum += rpm
+                        rpm_cnt += 1
+                else:
+                    n_fail += 1
+
+                if pos_ok:
+                    if prev_pos_valid:
+                        raw_diff = pos - prev_pos
+                        d_eff = 0.0
+                        if rpm_ok and abs(rpm) >= rpm_dir_deadband:
+                            dir_sign = 1 if rpm >= 0.0 else -1
+
+                        if dir_sign >= 0:
+                            d_eff = raw_diff
+                            if d_eff < (-0.5 * pos_mod):
+                                d_eff += pos_mod
+                            elif d_eff < 0.0:
+                                d_eff = 0.0
+                        else:
+                            d_eff = raw_diff
+                            if d_eff > (0.5 * pos_mod):
+                                d_eff -= pos_mod
+                            elif d_eff > 0.0:
+                                d_eff = 0.0
+
+                        # Guard rail: rejeita saltos impossiveis para evitar
+                        # sobrecontagem de voltas por glitches de leitura.
+                        if d_eff != 0.0:
+                            dt_s = 0.0
+                            if prev_t_valid and t_s_drv is not None:
+                                dt_s = t_s_drv - prev_t_s
+                                if dt_s <= 0.0 or dt_s > 1.0:
+                                    dt_s = 0.0
+                            if rpm_ok and dt_s > 0.0:
+                                max_step = pos_mod * (abs(rpm) / 60.0) * dt_s * 3.0 + 5.0
+                            elif rpm_ok:
+                                max_step = pos_mod * (abs(rpm) / 60.0) * 0.05 * 3.0 + 5.0
+                            else:
+                                max_step = pos_mod * 0.05
+                            if abs(d_eff) > max_step:
+                                d_eff = 0.0
+
+                        motor_turn_inc = abs(d_eff) / (pos_mod * cycles_per_motor_rev)
+                        # i = D2/D1 -> voltas_pino = voltas_motor / i
+                        pin_turn_inc = motor_turn_inc / relacao
+                        turn_progress += pin_turn_inc
+
+                        while turn_progress >= 1.0:
+                            pct_loss = (100.0 * n_fail / n_total) if n_total > 0 else 0.0
+                            atr_med = (atr_sum / n_valid) if n_valid > 0 else None
+                            rpm_med = (rpm_sum / rpm_cnt) if rpm_cnt > 0 else None
+                            w.writerow([
+                                turn_n,
+                                f"{atr_med:.6f}" if atr_med is not None else "NULL",
+                                f"{atr_min:.6f}" if atr_min is not None else "NULL",
+                                f"{atr_max:.6f}" if atr_max is not None else "NULL",
+                                f"{rpm_med:.6f}" if rpm_med is not None else "NULL",
+                                n_total, n_fail, n_valid, f"{pct_loss:.3f}"
+                            ])
+                            turn_n += 1
+                            turn_progress -= 1.0
+                            n_total = 0
+                            n_fail = 0
+                            n_valid = 0
+                            atr_sum = 0.0
+                            atr_min = None
+                            atr_max = None
+                            rpm_sum = 0.0
+                            rpm_cnt = 0
+
+                    prev_pos = pos
+                    prev_pos_valid = True
+                    prev_t_s = t_s_drv if t_s_drv is not None else prev_t_s
+                    prev_t_valid = (t_s_drv is not None)
 
 
 def _merge_csv_fallback(dlg_csv: str, drive_csv: str, out_csv: str) -> None:
@@ -479,7 +789,7 @@ def _merge_csv_fallback(dlg_csv: str, drive_csv: str, out_csv: str) -> None:
     - Preservar a estrutura de colunas esperada no resultado final.
 
     Estrutura de saida:
-      idx,t_s,ch1..ch8,pos,rpm,dlg_err,drive_pos_err,drive_rpm_err
+      idx,t_s,ch1..ch8,atrito,pos,rpm,dlg_err,drive_pos_err,drive_rpm_err
 
     Regras:
     - Faz merge por indice de linha (zip_longest).
@@ -497,7 +807,7 @@ def _merge_csv_fallback(dlg_csv: str, drive_csv: str, out_csv: str) -> None:
         next(rd_dlg, None)
         next(rd_drv, None)
 
-        w.writerow(["idx", "t_s", "ch1", "ch2", "ch3", "ch4", "ch5", "ch6", "ch7", "ch8", "pos", "rpm", "dlg_err", "drive_pos_err", "drive_rpm_err"])
+        w.writerow(["idx", "t_s", "ch1", "ch2", "ch3", "ch4", "ch5", "ch6", "ch7", "ch8", "atrito", "pos", "rpm", "dlg_err", "drive_pos_err", "drive_rpm_err"])
 
         idx_fallback = 0
         for drow, rrow in zip_longest(rd_dlg, rd_drv, fillvalue=None):
@@ -513,13 +823,19 @@ def _merge_csv_fallback(dlg_csv: str, drive_csv: str, out_csv: str) -> None:
                 col = 3 + i
                 ch.append(dlg[col] if len(dlg) > col and dlg[col] else "NULL")
 
+            atrito = "NULL"
+            if len(dlg) > 12:
+                atrito = dlg[11] if dlg[11] else "NULL"
+                dlg_err = dlg[12] if dlg[12] else "1"
+            else:
+                dlg_err = dlg[11] if len(dlg) > 11 and dlg[11] else "1"
+
             pos = drv[3] if len(drv) > 3 and drv[3] else "NULL"
             rpm = drv[4] if len(drv) > 4 and drv[4] else "NULL"
-            dlg_err = dlg[11] if len(dlg) > 11 and dlg[11] else "1"
             drv_pos_err = drv[5] if len(drv) > 5 and drv[5] else "1"
             drv_rpm_err = drv[6] if len(drv) > 6 and drv[6] else "1"
 
-            w.writerow([idx, t_s, *ch, pos, rpm, dlg_err, drv_pos_err, drv_rpm_err])
+            w.writerow([idx, t_s, *ch, atrito, pos, rpm, dlg_err, drv_pos_err, drv_rpm_err])
             idx_fallback += 1
 
 
@@ -563,29 +879,35 @@ def stop_run(state: Optional[RunState]) -> None:
                     pass
 
 
-def _wait_ready(proc: subprocess.Popen, tag: str, timeout_s: float = 5.0) -> None:
+def _wait_ready(proc: subprocess.Popen, tag: str, timeout_s: float = 5.0) -> bool:
     """
     Aguarda linha "READY" emitida pelo logger (melhor esforco).
 
     Importante:
-    - Se READY nao chegar no timeout, a funcao nao levanta excecao.
-    - O objetivo e evitar deadlock em casos de loggers silenciosos.
+    - Retorna True quando READY foi visto no stdout.
+    - Retorna False em timeout/falha/saida precoce.
 
     Parametros:
         proc: processo alvo.
         tag: identificador textual (mantido para logs futuros).
         timeout_s: tempo maximo de espera.
+
+    Retorna:
+        True quando READY foi recebido; False caso contrario.
     """
     if not proc or not proc.stdout:
-        return
+        return False
     t0 = time.time()
     while time.time() - t0 < timeout_s:
+        if proc.poll() is not None:
+            return False
         line = proc.stdout.readline()
         if not line:
             time.sleep(0.05)
             continue
         if "READY" in line:
-            return
+            return True
+    return False
 
 
 def _send_start(proc: subprocess.Popen) -> None:

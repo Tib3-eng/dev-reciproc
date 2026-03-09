@@ -44,6 +44,8 @@ Resumo de funcoes:
 #include <string.h>
 #include <ctype.h>
 #include <errno.h>
+#include <share.h>
+#include <stdarg.h>
 
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
@@ -91,11 +93,92 @@ typedef struct {
     int64_t t_end;
 } rpm_ramp_t;
 
+static FILE *g_ev = NULL;
+
+/*
+Funcao: ev_close
+Objetivo: Gerencia trilha de log de eventos do processo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
+static void ev_close(void){
+    if(g_ev){
+        fclose(g_ev);
+        g_ev = NULL;
+    }
+}
+
+/*
+Funcao: ev_open_for_out
+Objetivo: Gerencia trilha de log de eventos do processo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
+static void ev_open_for_out(const char *out_path){
+    char ev_path[1024];
+    const char *s1 = strrchr(out_path, '\\');
+    const char *s2 = strrchr(out_path, '/');
+    const char *s = (s1 && s2) ? ((s1 > s2) ? s1 : s2) : (s1 ? s1 : s2);
+    if(s){
+        size_t dlen = (size_t)(s - out_path);
+        if(dlen > sizeof(ev_path) - 64) dlen = sizeof(ev_path) - 64;
+        memcpy(ev_path, out_path, dlen);
+        ev_path[dlen] = 0;
+        strcat(ev_path, "\\a5_speed_events.log");
+    }else{
+        _snprintf(ev_path, sizeof(ev_path), "a5_speed_events.log");
+    }
+    g_ev = _fsopen(ev_path, "w", _SH_DENYNO);
+}
+
+/*
+Funcao: ev_logf
+Objetivo: Gerencia trilha de log de eventos do processo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
+static void ev_logf(const char *fmt, ...){
+    if(!g_ev) return;
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    fprintf(g_ev, "[%02u:%02u:%02u.%03u] ",
+            (unsigned)st.wHour, (unsigned)st.wMinute,
+            (unsigned)st.wSecond, (unsigned)st.wMilliseconds);
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(g_ev, fmt, ap);
+    va_end(ap);
+    fputc('\n', g_ev);
+    fflush(g_ev);
+}
+
+/*
+Funcao: set_timeouts_us
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void set_timeouts_us(modbus_t *ctx, int resp_us, int byte_us){
     modbus_set_response_timeout(ctx, 0, resp_us);
     modbus_set_byte_timeout(ctx, 0, byte_us);
 }
 
+/*
+Funcao: trim
+Objetivo: Normaliza texto/entrada para evitar inconsistencias.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void trim(char *s){
     size_t n = strlen(s);
     while(n && (s[n-1]=='\n'||s[n-1]=='\r'||s[n-1]==' '||s[n-1]=='\t')) s[--n]=0;
@@ -103,6 +186,14 @@ static void trim(char *s){
     if(p != s) memmove(s, p, strlen(p)+1);
 }
 
+/*
+Funcao: make_port_path
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void make_port_path(const char *shortName, char *out, size_t outsz){
     int num = 0;
     if(_strnicmp(shortName, "COM", 3) == 0) num = atoi(shortName + 3);
@@ -110,6 +201,14 @@ static void make_port_path(const char *shortName, char *out, size_t outsz){
     else _snprintf(out, outsz, "%s", shortName);
 }
 
+/*
+Funcao: read_u16
+Objetivo: Realiza leitura de dados de hardware/arquivo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int read_u16(modbus_t *ctx, int reg, uint16_t *out){
     uint16_t v = 0;
     if(modbus_read_registers(ctx, reg, 1, &v) != 1){
@@ -119,6 +218,14 @@ static int read_u16(modbus_t *ctx, int reg, uint16_t *out){
     return 0;
 }
 
+/*
+Funcao: read_u16_in
+Objetivo: Realiza leitura de dados de hardware/arquivo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int read_u16_in(modbus_t *ctx, int reg, uint16_t *out){
     uint16_t v = 0;
     if(modbus_read_input_registers(ctx, reg, 1, &v) != 1){
@@ -128,12 +235,28 @@ static int read_u16_in(modbus_t *ctx, int reg, uint16_t *out){
     return 0;
 }
 
+/*
+Funcao: read_p0b09
+Objetivo: Realiza leitura de dados de hardware/arquivo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int read_p0b09(modbus_t *ctx, uint16_t *out){
     if(read_u16(ctx, REG_P0B_09, out) == 0) return 0;
     if(read_u16_in(ctx, REG_P0B_09, out) == 0) return 0;
     return -1;
 }
 
+/*
+Funcao: read_u16_cached
+Objetivo: Realiza leitura de dados de hardware/arquivo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int read_u16_cached(modbus_t *ctx, int reg, uint16_t *out, int *mode){
     /* mode: 0=unknown, 3=FC03 holding, 4=FC04 input */
     if(mode && *mode == 3){
@@ -158,10 +281,35 @@ static int read_u16_cached(modbus_t *ctx, int reg, uint16_t *out, int *mode){
     return -1;
 }
 
+static int read_u16_cached_retry(modbus_t *ctx, int reg, uint16_t *out,
+                                 int *mode, int retries, int retry_ms){
+    for(int i = 0; i < retries; ++i){
+        if(read_u16_cached(ctx, reg, out, mode) == 0) return 0;
+        if(i + 1 < retries) Sleep(retry_ms);
+    }
+    return -1;
+}
+
+/*
+Funcao: read_p0b09_cached
+Objetivo: Realiza leitura de dados de hardware/arquivo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int read_p0b09_cached(modbus_t *ctx, uint16_t *out, int *mode){
     return read_u16_cached(ctx, REG_P0B_09, out, mode);
 }
 
+/*
+Funcao: read_rpm_cached
+Objetivo: Realiza leitura de dados de hardware/arquivo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int read_rpm_cached(modbus_t *ctx, int16_t *out, int *mode){
     uint16_t u = 0;
     if(read_u16_cached(ctx, REG_P0B_00, &u, mode) != 0) return -1;
@@ -182,6 +330,14 @@ static int write_u16_seq(modbus_t *ctx, int reg, uint16_t v, const char *label,
     return -1;
 }
 
+/*
+Funcao: read_s32
+Objetivo: Realiza leitura de dados de hardware/arquivo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int read_s32(modbus_t *ctx, int reg, int low_first, int32_t *out){
     uint16_t regs[2] = {0, 0};
     if(modbus_read_registers(ctx, reg, 2, regs) != 2) return -1;
@@ -195,6 +351,14 @@ static int read_s32(modbus_t *ctx, int reg, int low_first, int32_t *out){
     return 0;
 }
 
+/*
+Funcao: setup_speed_mode
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void setup_speed_mode(modbus_t *ctx){
     // NOTE: Ajusta parametros para aceitar RPM via Modbus.
     // P02-00 = 0 (modo velocidade)
@@ -213,12 +377,28 @@ static void setup_speed_mode(modbus_t *ctx){
     (void)write_u16_seq(ctx, REG_P06_02, 0, "P06-02 (sel=A)", 2, 30);
 }
 
+/*
+Funcao: cmd_run
+Objetivo: Envia comando para controle do fluxo de aquisicao/drive.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int cmd_run(modbus_t *ctx){
     set_timeouts_us(ctx, CMD_RESP_US, CMD_BYTE_US);
     if(modbus_write_register(ctx, REG_CTRL, WORD_RUN) == -1) return -1;
     return 0;
 }
 
+/*
+Funcao: cmd_stop
+Objetivo: Envia comando para controle do fluxo de aquisicao/drive.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int cmd_stop(modbus_t *ctx){
     set_timeouts_us(ctx, CMD_RESP_US, CMD_BYTE_US);
     for(int k=0;k<3;++k){
@@ -228,11 +408,27 @@ static int cmd_stop(modbus_t *ctx){
     return -1;
 }
 
+/*
+Funcao: cmd_vdi_stop
+Objetivo: Envia comando para controle do fluxo de aquisicao/drive.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int cmd_vdi_stop(modbus_t *ctx){
     set_timeouts_us(ctx, CMD_RESP_US, CMD_BYTE_US);
     return write_u16_seq(ctx, REG_P31_00, 0, NULL, 3, 30);
 }
 
+/*
+Funcao: cmd_rpm
+Objetivo: Envia comando para controle do fluxo de aquisicao/drive.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int cmd_rpm(modbus_t *ctx, int rpm){
     if(rpm < -32768 || rpm > 32767) return -1;
     set_timeouts_us(ctx, CMD_RESP_US, CMD_BYTE_US);
@@ -246,12 +442,28 @@ static int cmd_rpm(modbus_t *ctx, int rpm){
 
 static int round_to_int(double v);
 
+/*
+Funcao: qpc_now_ticks
+Objetivo: Fornece base de tempo para sincronizacao do loop.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int64_t qpc_now_ticks(void){
     LARGE_INTEGER c;
     QueryPerformanceCounter(&c);
     return (int64_t)c.QuadPart;
 }
 
+/*
+Funcao: stop_drive_now
+Objetivo: Envia comando para controle do fluxo de aquisicao/drive.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void stop_drive_now(modbus_t *ctx, int *current_cmd_rpm, int64_t ramp_ticks){
     /* Soft stop vector: ramp to zero setpoint, then force RDY/VDI stop. */
     int start_rpm = (current_cmd_rpm != NULL) ? *current_cmd_rpm : 0;
@@ -291,6 +503,14 @@ typedef enum {
     IPC_CMD_RESUME = 3
 } ipc_cmd_t;
 
+/*
+Funcao: ipc_poll_command
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static ipc_cmd_t ipc_poll_command(int use_ipc){
     static char pending[256];
     static size_t pending_len = 0;
@@ -347,16 +567,40 @@ static ipc_cmd_t ipc_poll_command(int use_ipc){
 
     return IPC_CMD_NONE;
 }
+/*
+Funcao: qpc_freq_ticks
+Objetivo: Fornece base de tempo para sincronizacao do loop.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int64_t qpc_freq_ticks(void){
     LARGE_INTEGER f;
     QueryPerformanceFrequency(&f);
     return (int64_t)f.QuadPart;
 }
 
+/*
+Funcao: round_to_int
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int round_to_int(double v){
     return (v >= 0.0) ? (int)(v + 0.5) : (int)(v - 0.5);
 }
 
+/*
+Funcao: ramp_begin
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void ramp_begin(rpm_ramp_t *r, int start_rpm, int target_rpm, int64_t now_ticks, int64_t ramp_ticks){
     if(!r) return;
     r->start_rpm = start_rpm;
@@ -371,6 +615,14 @@ static void ramp_begin(rpm_ramp_t *r, int start_rpm, int target_rpm, int64_t now
     }
 }
 
+/*
+Funcao: ramp_eval
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int ramp_eval(const rpm_ramp_t *r, int64_t now_ticks){
     if(!r) return 0;
     if(!r->active) return r->target_rpm;
@@ -384,6 +636,14 @@ static int ramp_eval(const rpm_ramp_t *r, int64_t now_ticks){
     return round_to_int(v);
 }
 
+/*
+Funcao: parse_two_numbers
+Objetivo: Faz parse/validacao de entrada de dados.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int parse_two_numbers(const char *line, double *a, double *b){
     char *end = NULL;
     double v1 = strtod(line, &end);
@@ -398,6 +658,14 @@ static int parse_two_numbers(const char *line, double *a, double *b){
     return 1;
 }
 
+/*
+Funcao: load_schedule
+Objetivo: Executa responsabilidade especifica dentro do modulo.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static int load_schedule(const char *path, seg_t **out, int *count, double *total_s){
     FILE *f = fopen(path, "r");
     if(!f) return 0;
@@ -431,6 +699,14 @@ static int load_schedule(const char *path, seg_t **out, int *count, double *tota
     return 1;
 }
 
+/*
+Funcao: print_usage
+Objetivo: Exibe informacoes para operador/diagnostico.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Nao retorna valor.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 static void print_usage(void){
     puts("Uso:");
     puts("  a5_speed_logger --port COM4 --out <csv> --schedule <csv>");
@@ -438,6 +714,14 @@ static void print_usage(void){
     puts("                 [--baud <n>] [--parity N|E|O] [--ipc] [--setup]");
 }
 
+/*
+Funcao: main
+Objetivo: Executa o fluxo principal do programa.
+Quando usar: Chamada pelo fluxo interno deste arquivo.
+Entradas: Parametros declarados na assinatura.
+Retorno: Retorna status/valor conforme contrato da funcao.
+Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
+*/
 int main(int argc, char **argv){
     const char *port = "COM4";
     const char *out_path = NULL;
@@ -470,27 +754,38 @@ int main(int argc, char **argv){
         print_usage();
         return 1;
     }
+    ev_open_for_out(out_path);
+    ev_logf("START port=%s out=%s schedule=%s rate=%.3f duration=%.3f slave=%d baud=%d parity=%c ipc=%d setup=%d",
+            port, out_path, sched_path, rate_hz, duration_s, slave, baud, parity, use_ipc, do_setup);
 
     seg_t *segs = NULL;
     int seg_count = 0;
     double sched_total = 0.0;
     if(!load_schedule(sched_path, &segs, &seg_count, &sched_total)){
         fprintf(stderr, "Falha lendo schedule: %s\n", sched_path);
+        ev_logf("ERROR load schedule failed: %s", sched_path);
+        ev_close();
         return 1;
     }
     if(duration_s <= 0.0) duration_s = sched_total;
     if(duration_s <= 0.0 || rate_hz <= 0.0){
         free(segs);
+        ev_logf("ERROR invalid duration/rate after schedule parse.");
+        ev_close();
         return 1;
     }
 
-    FILE *f = fopen(out_path, "w");
+    FILE *f = _fsopen(out_path, "w", _SH_DENYNO);
     if(!f){
         fprintf(stderr, "Falha abrindo CSV: %s\n", out_path);
         free(segs);
+        ev_logf("ERROR open csv failed.");
+        ev_close();
         return 1;
     }
-    fprintf(f, "idx,t_qpc,t_s,pos,rpm,pos_err,rpm_err\n");
+    /* Desabilita buffering para consumo em tempo real por UI/agregador. */
+    setvbuf(f, NULL, _IONBF, 0);
+    fprintf(f, "idx,t_qpc,t_s,pos,rpm,pos_err,rpm_err,pos_mod\n");
     fflush(f);
 
     char port_path[64];
@@ -501,6 +796,8 @@ int main(int argc, char **argv){
         fprintf(stderr, "modbus_new_rtu failed\n");
         fclose(f);
         free(segs);
+        ev_logf("ERROR modbus_new_rtu failed.");
+        ev_close();
         return 1;
     }
     modbus_set_slave(ctx, slave);
@@ -511,33 +808,44 @@ int main(int argc, char **argv){
         modbus_free(ctx);
         fclose(f);
         free(segs);
+        ev_logf("ERROR modbus connect failed: %s", modbus_strerror(errno));
+        ev_close();
         return 1;
     }
+    ev_logf("Modbus connected.");
 
     if(do_setup){
+        ev_logf("Applying setup_speed_mode.");
         setup_speed_mode(ctx);
     }
 
     /* Read word order once (used only if we ever need 32-bit regs) */
     uint16_t order = 1;
-    if(read_u16(ctx, REG_P0C_26, &order) != 0) order = 1;
+    int p0c26_mode = 0;
+    if(read_u16_cached_retry(ctx, REG_P0C_26, &order, &p0c26_mode, 3, 20) != 0){
+        order = 1;
+    }
     int low_first = (order != 0);
 
     /* Read command units per revolution (P05-02) once for scaling. */
     uint16_t cmd_units_per_rev = 0;
-    if(read_u16(ctx, REG_P05_02, &cmd_units_per_rev) != 0){
+    int p0502_mode = 0;
+    if(read_u16_cached_retry(ctx, REG_P05_02, &cmd_units_per_rev, &p0502_mode, 5, 20) != 0){
         cmd_units_per_rev = 0;
     }
 
     if(use_ipc){
         puts("READY");
         fflush(stdout);
+        ev_logf("READY emitted; waiting START.");
         char line[64];
         if(!fgets(line, sizeof(line), stdin)){
             modbus_close(ctx);
             modbus_free(ctx);
             fclose(f);
             free(segs);
+            ev_logf("IPC START read failed.");
+            ev_close();
             return 1;
         }
         trim(line);
@@ -546,8 +854,11 @@ int main(int argc, char **argv){
             modbus_free(ctx);
             fclose(f);
             free(segs);
+            ev_logf("IPC START invalid token: %s", line);
+            ev_close();
             return 1;
         }
+        ev_logf("IPC START received.");
     }
 
     int seg_idx = 0;
@@ -573,12 +884,18 @@ int main(int argc, char **argv){
     (void)cmd_rpm(ctx, 0);
     if(cmd_run(ctx) != 0){
         fprintf(stderr, "Falha RUN.\n");
+        ev_logf("WARN cmd_run failed at start.");
     }
     ramp_begin(&rpm_ramp, current_cmd_rpm, desired_seg_rpm, start_ticks, ramp_ticks);
+    ev_logf("RUN started; first target rpm=%d total_samples=%d", desired_seg_rpm, total_samples);
 
+    DWORD next_progress_log_ms = GetTickCount() + 1000;
+    int n_pos_err = 0;
+    int n_rpm_err = 0;
     for(int idx = 0; idx < total_samples; ){
         ipc_cmd_t ipc_cmd = ipc_poll_command(use_ipc);
         if(ipc_cmd == IPC_CMD_STOP){
+            ev_logf("STOP received at idx=%d/%d", idx, total_samples);
             stop_requested = 1;
             break;
         }
@@ -588,6 +905,7 @@ int main(int argc, char **argv){
             stop_drive_now(ctx, &current_cmd_rpm, ramp_ticks);
             current_cmd_rpm = 0;
             ramp_begin(&rpm_ramp, 0, 0, pause_start_ticks, 0);
+            ev_logf("PAUSE received at idx=%d", idx);
         }else if(ipc_cmd == IPC_CMD_RESUME && paused){
             int64_t now_resume = qpc_now_ticks();
             int64_t paused_ticks = now_resume - pause_start_ticks;
@@ -601,6 +919,7 @@ int main(int argc, char **argv){
                 desired_seg_rpm = segs[seg_idx].rpm;
                 ramp_begin(&rpm_ramp, current_cmd_rpm, desired_seg_rpm, now_resume, ramp_ticks);
             }
+            ev_logf("RESUME received at idx=%d seg=%d target_rpm=%d", idx, seg_idx, desired_seg_rpm);
         }
 
         if(paused){
@@ -614,6 +933,7 @@ int main(int argc, char **argv){
             current_cmd_rpm = 0;
             ramp_begin(&rpm_ramp, 0, 0, now, 0);
             stop_sent = 1;
+            ev_logf("Hard stop deadline reached at idx=%d.", idx);
         }
         if(now < next_ticks){
             Sleep(1);
@@ -651,6 +971,8 @@ int main(int argc, char **argv){
         if(read_rpm_cached(ctx, &sampled_rpm, &rpm_mode) == 0){
             sampled_rpm_ok = 1;
         }
+        if(!sampled_pos_ok) n_pos_err++;
+        if(!sampled_rpm_ok) n_rpm_err++;
 
         /* Lost slots are explicit NULL. We never copy position values. */
         while(idx < total_samples && now >= (next_ticks + dt_ticks)){
@@ -665,7 +987,9 @@ int main(int argc, char **argv){
                 ramp_begin(&rpm_ramp, current_cmd_rpm, desired_seg_rpm, now, ramp_ticks);
             }
 
-            fprintf(f, "%d,%lld,%.6f,NULL,NULL,1,1\n", idx, (long long)t_qpc, t_s);
+            fprintf(f, "%d,%lld,%.6f,NULL,NULL,1,1,%u\n",
+                    idx, (long long)t_qpc, t_s,
+                    (unsigned)(cmd_units_per_rev > 0 ? cmd_units_per_rev : 65536u));
             idx++;
             next_ticks += dt_ticks;
         }
@@ -688,9 +1012,20 @@ int main(int argc, char **argv){
             if(sampled_rpm_ok) fprintf(f, "%d,", (int)sampled_rpm);
             else               fprintf(f, "NULL,");
 
-            fprintf(f, "%d,%d\n", sampled_pos_ok ? 0 : 1, sampled_rpm_ok ? 0 : 1);
+            fprintf(f, "%d,%d,%u\n",
+                    sampled_pos_ok ? 0 : 1,
+                    sampled_rpm_ok ? 0 : 1,
+                    (unsigned)(cmd_units_per_rev > 0 ? cmd_units_per_rev : 65536u));
             idx++;
             next_ticks += dt_ticks;
+        }
+        {
+            DWORD now_ms = GetTickCount();
+            if((LONG)(now_ms - next_progress_log_ms) >= 0){
+                ev_logf("PROGRESS idx=%d/%d seg=%d cmd_rpm=%d stop_sent=%d paused=%d pos_err=%d rpm_err=%d",
+                        idx, total_samples, seg_idx, current_cmd_rpm, stop_sent, paused, n_pos_err, n_rpm_err);
+                next_progress_log_ms = now_ms + 1000;
+            }
         }
     }
 
@@ -701,9 +1036,11 @@ int main(int argc, char **argv){
     if(!stop_sent){
         stop_drive_now(ctx, &current_cmd_rpm, ramp_ticks);
     }
+    ev_logf("END stop_requested=%d stop_sent=%d pos_err=%d rpm_err=%d", stop_requested, stop_sent, n_pos_err, n_rpm_err);
     modbus_close(ctx);
     modbus_free(ctx);
     fclose(f);
     free(segs);
+    ev_close();
     return 0;
 }

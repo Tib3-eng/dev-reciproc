@@ -1,0 +1,60 @@
+Panorama da diferença
+
+O arquivo atual cresceu bastante porque recebeu muita documentação inline e comentários didáticos, além de novas funções de runtime.
+Estruturalmente, o levantamento de funções mostrou:
++23 funções novas
+-1 função removida (confirma_ip)
+19 funções antigas com comportamento alterado
+Principais mudanças (didático, para repassar ao colega)
+
+Arquitetura de execução do ensaio mudou
+Antes: o ensaio era tocado principalmente pelas threads locais go, go_p e velocidades (novo_tribometro_2.py:1011, novo_tribometro_2.py:1012).
+Agora: existe integração explícita com orquestrador (import orchestrator_runtime as orch) (novo_tribometro.py:102), com chave de modo (USE_EXTERNAL_RUNNER) (novo_tribometro.py:107) e início por orch.start_external_run(...) (novo_tribometro.py:1856).
+Impacto: o supervisório virou de fato “controlador de pipeline” (DLG + Drive + merge), e não apenas leitor/simulador local.
+
+Start/Pause/Stop ficaram orientados a IPC com processos externos
+Antes: pausa/retomada eram locais no Python (novo_tribometro_2.py:1018); parada era limpeza local + zeragem analógica (novo_tribometro_2.py:1048).
+Agora: pausa/retomada enviam comando ao runtime externo (orch.pause_run, orch.resume_run) (novo_tribometro.py:2036, novo_tribometro.py:2055); parar usa orch.stop_run com finalização controlada (novo_tribometro.py:2126).
+Impacto: menos risco de “UI parar, processo externo continuar”.
+
+Persistência e estrutura de saída mudaram bastante
+Antes: salvar_arquivo abria dialog “Salvar como” (asksaveasfilename) (novo_tribometro_2.py:384) e criava arquivos _E / _T (novo_tribometro_2.py:408, novo_tribometro_2.py:409).
+Agora: salva automaticamente em estrutura padronizada por ensaio/repetição dentro de REPO_BASE, com arquivos info_ensaio.csv, dlg.csv, drive.csv, resultado_ensaio.csv, schedule.csv (novo_tribometro.py:1009, novo_tribometro.py:1054, novo_tribometro.py:1059).
+Impacto: rastreabilidade melhor e padronização para operação em equipe.
+
+Configuração persistente foi introduzida
+Agora existe APP_SETTINGS_PATH em LOCALAPPDATA (novo_tribometro.py:122), seleção de diretório base via pasta (askdirectory) (novo_tribometro.py:300) e aba “configurações adicionais” (novo_tribometro.py:2700).
+Impacto: menos configuração repetitiva e menos erro operacional.
+
+Entrou check operacional de hardware (DLG + Drive) na UI
+Antes: não existia check_status.
+Agora: função dedicada de check (novo_tribometro.py:540) + botão na interface (novo_tribometro.py:3142) + indicadores DLG/Drive (novo_tribometro.py:3148).
+Impacto: diagnóstico pré-ensaio mais claro, sem depender de “tentar rodar para ver”.
+
+Sincronização de tempo e gráficos ficou mais robusta
+Antes: cronômetro iniciava na largada local (start_time = time.time()) (novo_tribometro_2.py:1010).
+Agora: existe espera de prontidão de dados do DLG para iniciar tempo (_wait_dlg_ok_and_start_timer) (novo_tribometro.py:1344, novo_tribometro.py:1968) e leitura contínua do dlg.csv para alimentar gráficos (_tail_dlg_csv_for_graphs) (novo_tribometro.py:1402, novo_tribometro.py:1955).
+Impacto: o tempo na UI fica mais aderente ao que realmente foi adquirido.
+
+Taxa base mudou de 200 Hz para 50 Hz no supervisório
+Antes: freq = 200.0 (novo_tribometro_2.py:112).
+Agora: freq = 50.0 (novo_tribometro.py:690).
+Impacto: UI/escala temporal e loops auxiliares foram alinhados com a taxa padrão do pipeline externo.
+
+Mudança de UX: aba “supervisorio” antiga foi desativada
+Antes: a aba era adicionada (nb.add(aba4, text="supervisorio")) (novo_tribometro_2.py:2085) e havia trava por canais_configurados_ok (novo_tribometro_2.py:939).
+Agora: a aba está ocultada (novo_tribometro.py:3170) e get_channels() virou stub de compatibilidade (novo_tribometro.py:2574).
+Impacto: simplificação da operação; seleção manual de canais deixou de ser etapa de bloqueio do start.
+
+Compatibilidade de hardware ficou mais explícita
+Antes: havia DummyLynx fixo no próprio arquivo (novo_tribometro_2.py:25).
+Agora: tenta importar LDTP real e cai para stub se não existir (novo_tribometro.py:78, novo_tribometro.py:92).
+Impacto: mesmo código roda em ambiente com/sem módulo de hardware, com fallback controlado.
+
+Dependências antigas foram limpas
+Antes: openpyxl e imports antigos de matplotlib estavam presentes (novo_tribometro_2.py:16, novo_tribometro_2.py:4).
+Agora: foco em Tk + matplotlib embutido + orchestrator; sem openpyxl.
+Impacto: menos acoplamento com fluxo antigo de planilha/processamento externo.
+
+Resumo curto para você enviar ao colega
+O novo_tribometro saiu de um modelo “tudo dentro do Python” para um modelo “Python orquestra executáveis C via IPC”. Com isso, ganhou padronização de pastas/CSVs, check de hardware na interface, pausa/retomada/parada mais seguras, cronômetro mais fiel ao dado real do DLG e configurações persistentes (diretório base + relação mecânica). A aba antiga de supervisório/canais foi desativada e parte do código local antigo (go, go_p, velocidades) ficou como caminho de versão anterior/fallback, não como fluxo principal.
