@@ -142,9 +142,9 @@ DriveA5 (Modbus RTU / libmodbus):
 - a5_speed_logger escreve `a5_speed_events.log` ao lado do `drive.csv` com startup, START, pause/resume, progresso por segundo, erros de leitura e encerramento.
 - merge_logs: junta dlg.csv + drive.csv por indice de linha e gera CSV de resultado com colunas: idx,t_s,ch1..ch8,atrito,pos,rpm,dlg_err,drive_pos_err,drive_rpm_err.
 - Atrito por volta (tempo real e final) e processado em Python no supervisÃ³rio com alinhamento por idx entre `dlg.csv` e `drive.csv`.
-- Regra de voltas em Python usa unwrap orientado por direcao (RPM com deadband) e guarda de plausibilidade de delta para evitar sobre/subcontagem.
+- Regra de voltas em Python usa unwrap orientado por direcao (RPM com deadband) e reconstrucao guiada por RPM/dt para tolerar gaps maiores que uma volta entre amostras validas, mantendo guarda de plausibilidade.
 - `atrito_por_volta.csv` e sempre reconstruido no final por `wait_and_merge` usando os CSVs completos.
-- Turn counting (C + Python) usa unwrap orientado por direcao (sinal de RPM com deadband de 5 rpm) para evitar subcontagem quando houver perda de amostras.
+- Turn counting (C + Python) usa unwrap orientado por direcao (sinal de RPM com deadband de 5 rpm) e permite multi-wrap entre amostras quando o RPM medido indicar que mais de uma volta pode ter ocorrido no gap.
 - No supervisorio (agregacao em Python), `P0B-09` usa 1 ciclo por volta de motor e converte para voltas do pino por `voltas_pino = voltas_motor / i` (i = D2/D1).
 Field notes (DriveA5, based on recent tests):
 - Relative mode (P11-04=0) is more consistent than absolute, but still drifts if completion threshold is loose.
@@ -153,6 +153,19 @@ Field notes (DriveA5, based on recent tests):
 - P05-30=6 (home=current pos) frequently fails to write over Modbus; software zero offset is used when this happens.
 - Modbus intermittency: many read/write failures show errno=17 ("File exists"). Expect retries; cached P0C-26 is required when reads fail.
 - Verification tolerance in CLI is separate from drive completion; CLI tolerance should be <= P05-21.
+
+Investigation notes - DriveA5 communication saga (2026-03-19)
+- Contexto: em ensaios reais no laboratorio, o DLG permaneceu saudavel, mas a telemetria do Drive caiu fortemente. O controle de velocidade continuou funcionando, porem `P0B-09`/`P0B-00` passaram a falhar em alta taxa.
+- Baseline historico bom: nos ensaios de 09-03-2026 o Drive chegou a ~80-88% de linhas com `pos` e `rpm` validos ao mesmo tempo.
+- Cenario degradado observado em 19-03-2026: `drive_pos_err` ~82-87%, `drive_rpm_err` ~77-87% e forte subcontagem de voltas quando a velocidade de ensaio era maior.
+- Ajuste 1 testado: aumentar timeouts rapidos + retry curto no logger do Drive. Resultado: pequena melhora, mas insuficiente; o link continuou muito abaixo do baseline historico.
+- Ajuste 2 testado: leitura em bloco e reconstrucao de voltas com unwrap guiado por RPM/dt no Python. Resultado: melhorou a reconstrucao offline de voltas em gaps grandes, mas nao resolveu a causa-raiz da aquisicao ruim do Drive.
+- Ajuste 3 testado: variar `P0C-25` no Drive (0, 2 e 4). Resultado: sem ganho relevante; `P0C-25=4` ficou ligeiramente pior. Nao tratar `P0C-25` como alavanca principal.
+- Ajuste 4 testado: politica por deadline de slot, priorizando posicao e tentando RPM apenas no tempo restante. Resultado: nao melhorou a posicao de forma relevante e piorou muito a disponibilidade de RPM.
+- Ajuste 5 testado: modo temporario somente posicao a 50 Hz. Resultado: ganho marginal em `pos_err`/`valid_pos`, insuficiente para justificar a perda total de RPM.
+- Diagnostico importante obtido nos logs de slot: a folga do slot ficou baixa/quase nula; portanto o problema nao era "tempo sobrando mal aproveitado". O gargalo aparente esta na propria transacao Modbus/serial de `P0B-09` em ambiente real.
+- Conclusao operacional desta saga: as mudancas exploratorias acima nao devem ser tratadas como novo baseline do projeto sem revalidacao forte. O ponto seguro continua sendo o ultimo commit estavel anterior a essa rodada de experimentos.
+- Proxima frente recomendada fora do software: investigar adaptador RS485/Ethernet, cabo, EMC/roteamento no laboratorio, aterramento/shield e comportamento do conversor serial sob ruido do drive/carga.
 
 Operational constraints
 - Windows only (VS2022 + CMake). Use PowerShell at repo root.
