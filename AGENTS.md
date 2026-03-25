@@ -100,6 +100,7 @@ SupervisÃ³rio (Python/Tk):
 - wait_and_merge reconstrói `atrito_por_volta.csv` em Python ao final de todo ensaio para garantir consistencia do arquivo final com os CSVs completos.
 - Rebuild offline em Python usa a mesma regra de wrap/backstep do C (sem `%` direto no delta) para evitar sobrecontagem de voltas por jitter.
 - Outputs go to Desktop\\Repositorio\\<dd-mm-aaaa - Estudo X - Nome do ensaio>\\<REP N> with info_ensaio.csv, dlg.csv, drive.csv, atrito_por_volta.csv, resultado_ensaio.csv.
+- info_ensaio.csv inclui bloco "Dados de calibracao" com fit do CH1 (slope, intercept, r2) usando a mesma busca do dlg_logger_ipc (calib.json/calib/calib_CH1.json/out + pasta do exe).
 - Artefatos tecnicos finais ficam em Desktop\\Repositorio\\<...>\\<REP N>\\DadosDev\\:
   resultado_ensaio.csv.merge_source, schedule.csv, graph_events.log, dlg_logger_events.log, a5_speed_events.log.
 - Duplicidade de pasta e bloqueio de inicio consideram data + estudo + nome + repeticao (subpasta REP N).

@@ -643,21 +643,100 @@ def _resolve_ch1_calib_path(repo_root, dlg_exe):
     Resolve o caminho do arquivo de calibracao do CH1.
 
     Prioridade:
-    1) pasta do dlg_logger_ipc.exe (fluxo real do ensaio);
-    2) caminhos padrao do repositorio.
+    Segue a mesma estrategia de busca do dlg_logger_ipc (DLG4000):
+    - calib.json / calib / calib_CH1.json / out\\calib_CH1.json
+    - os mesmos nomes na pasta do executavel do logger.
     """
+    path_ch = "calib_CH1.json"
+    path_out_ch = os.path.join("out", "calib_CH1.json")
     candidates = []
+    candidates.append("calib.json")
+    candidates.append("calib")
+    candidates.append(path_ch)
+    candidates.append(path_out_ch)
+
     if dlg_exe:
         exe_dir = os.path.dirname(dlg_exe)
-        candidates.append(os.path.join(exe_dir, "calib_CH1.json"))
-        candidates.append(os.path.join(exe_dir, "out", "calib_CH1.json"))
-    candidates.append(os.path.join(repo_root, "DLG4000", "bin", "Release", "calib_CH1.json"))
-    candidates.append(os.path.join(repo_root, "DLG4000", "bin", "calib_CH1.json"))
+        candidates.append(os.path.join(exe_dir, "calib.json"))
+        candidates.append(os.path.join(exe_dir, "calib"))
+        candidates.append(os.path.join(exe_dir, path_ch))
+        candidates.append(os.path.join(exe_dir, path_out_ch))
+    # Fallback explicito para o mesmo diretorio usado por check_executables().
+    if repo_root:
+        candidates.append(os.path.join(repo_root, "DLG4000", "bin", "Release", "calib.json"))
+        candidates.append(os.path.join(repo_root, "DLG4000", "bin", "Release", "calib"))
+        candidates.append(os.path.join(repo_root, "DLG4000", "bin", "Release", "calib_CH1.json"))
+        candidates.append(os.path.join(repo_root, "DLG4000", "bin", "Release", "out", "calib_CH1.json"))
 
     for path in candidates:
         if path and os.path.exists(path):
             return path
     return None
+
+
+def _load_ch1_fit_data(repo_root, dlg_exe):
+    """
+    Carrega os parametros de ajuste (fit) da calibracao CH1.
+
+    Retorno:
+        dict com keys: path, slope, intercept, r2
+        ou None se nao existir/nao for possivel ler.
+    """
+    calib_path = _resolve_ch1_calib_path(repo_root, dlg_exe)
+    if not calib_path:
+        return None
+
+    try:
+        with open(calib_path, "r", encoding="utf-8") as f:
+            calib = json.load(f)
+        fit = calib.get("fit", {})
+
+        # Valida se o arquivo parece ser do CH1 sem depender de um unico schema.
+        # Formatos aceitos no projeto:
+        # - channel: 1
+        # - channel: "CH1"
+        # - channels: [1]
+        # - nome do arquivo calib_CH1.json
+        is_ch1 = False
+        base_name = os.path.basename(calib_path).lower()
+        if "calib_ch1" in base_name:
+            is_ch1 = True
+
+        ch = calib.get("channel")
+        if not is_ch1 and ch is not None:
+            try:
+                if int(ch) == 1:
+                    is_ch1 = True
+            except Exception:
+                try:
+                    ch_txt = str(ch).strip().upper()
+                    if ch_txt == "CH1":
+                        is_ch1 = True
+                except Exception:
+                    pass
+
+        ch_list = calib.get("channels")
+        if not is_ch1 and isinstance(ch_list, list):
+            for item in ch_list:
+                try:
+                    if int(item) == 1:
+                        is_ch1 = True
+                        break
+                except Exception:
+                    pass
+
+        # Se o arquivo identifica canal explicitamente e nao for CH1, ignora.
+        if not is_ch1 and (ch is not None or isinstance(ch_list, list)):
+            return None
+
+        return {
+            "path": calib_path,
+            "slope": float(fit.get("slope")),
+            "intercept": float(fit.get("intercept")),
+            "r2": float(fit.get("r2")),
+        }
+    except Exception:
+        return None
 
 
 def _capture_ch1_mean_tara_once(dlg_exe, dlg_ip, dlg_port, bind_port, duration_s=30, rate_hz=50.0):
@@ -2707,6 +2786,9 @@ def start_acquisition():
         )
         return
 
+    # Carrega os dados de calibracao CH1 (fit) usando a mesma busca do logger DLG.
+    ch1_fit = _load_ch1_fit_data(repo_root, exe_info.get("dlg_exe"))
+
     salvar_arquivo()
 
     # Se o usuario clicou em "Cancelar" na janela de salvar, a variavel continuara vazia.
@@ -2748,6 +2830,15 @@ def start_acquisition():
             f.write(f"Relacao mecanica (i),{RELACAO_MECANICA},\n")
             coluna_forca = float(ent_forca.get().strip().replace(',','.'))
             f.write(f"Força normal [N],{coluna_forca},\n")
+            f.write("Dados de calibração,Fit CH1,\n")
+            if ch1_fit:
+                f.write(f"Slope (fit),{ch1_fit['slope']:.10g},\n")
+                f.write(f"Intercept (fit),{ch1_fit['intercept']:.10g},\n")
+                f.write(f"R2 (fit),{ch1_fit['r2']:.10g},\n")
+            else:
+                f.write("Slope (fit),NULL,\n")
+                f.write("Intercept (fit),NULL,\n")
+                f.write("R2 (fit),NULL,\n")
 
             # Reciprocating e Curso
             f.write(f"Reciprocating,{'sim' if reciprocante_var.get() else 'não'},\n")
