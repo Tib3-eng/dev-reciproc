@@ -609,7 +609,7 @@ def _rebuild_turn_csv_from_logs(state: RunState) -> None:
             return default
 
     with open(state.turn_csv, "w", newline="", encoding="utf-8") as fout:
-        w = csv.writer(fout)
+        w = csv.writer(fout, delimiter=";", lineterminator="\n")
         w.writerow([
             "volta_n", "atrito_med", "atrito_min", "atrito_max", "rpm_medio_volta",
             "n_total_pontos", "n_falhas", "n_validas", "pct_perda"
@@ -801,7 +801,7 @@ def _merge_csv_fallback(dlg_csv: str, drive_csv: str, out_csv: str) -> None:
          open(out_csv, "w", newline="", encoding="utf-8") as fout:
         rd_dlg = csv.reader(fdlg)
         rd_drv = csv.reader(fdrv)
-        w = csv.writer(fout)
+        w = csv.writer(fout, delimiter=";", lineterminator="\n")
 
         # Ignora cabecalhos dos dois arquivos de entrada.
         next(rd_dlg, None)

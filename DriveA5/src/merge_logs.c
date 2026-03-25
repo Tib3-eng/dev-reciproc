@@ -136,7 +136,7 @@ int main(int argc, char **argv){
     fgets(line_dlg, sizeof(line_dlg), fdlg);
     fgets(line_drv, sizeof(line_drv), fdrv);
 
-    fprintf(fout, "idx,t_s,ch1,ch2,ch3,ch4,ch5,ch6,ch7,ch8,atrito,pos,rpm,dlg_err,drive_pos_err,drive_rpm_err\n");
+    fprintf(fout, "idx;t_s;ch1;ch2;ch3;ch4;ch5;ch6;ch7;ch8;atrito;pos;rpm;dlg_err;drive_pos_err;drive_rpm_err\n");
 
     int idx_fallback = 0;
     for(;;){
@@ -185,7 +185,7 @@ int main(int argc, char **argv){
         const char *drv_pos_err = (drv_n >= 6 && drv_cols[5][0]) ? drv_cols[5] : "1";
         const char *drv_rpm_err = (drv_n >= 7 && drv_cols[6][0]) ? drv_cols[6] : "1";
 
-        fprintf(fout, "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n",
+        fprintf(fout, "%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s\n",
                 idx, t_s,
                 ch[0], ch[1], ch[2], ch[3], ch[4], ch[5], ch[6], ch[7],
                 atrito, pos, rpm, dlg_err, drv_pos_err, drv_rpm_err);

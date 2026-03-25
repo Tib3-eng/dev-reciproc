@@ -177,6 +177,7 @@ Operational constraints
 CSV conventions
 - ASCII logs and CSV only.
 - Fixed headers and units. Use "NULL" rows only for real losses.
+- `resultado_ensaio.csv` and `atrito_por_volta.csv` use `;` as column delimiter.
 - Write outputs into out/ subfolders (gitignored) when creating artifacts.
 - Supervisor (novo_tribometro.py) grava em: Desktop\\Repositorio\\<dd-mm-aaaa - Estudo X - Nome do ensaio>\\<REP N>.
   Arquivos padrao: info_ensaio.csv, dlg.csv, drive.csv, atrito_por_volta.csv, resultado_ensaio.csv.

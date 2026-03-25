@@ -1881,8 +1881,8 @@ def _tail_turn_csv_for_graph3(turn_csv_path, turn_proc=None):
     Faz tail de atrito_por_volta.csv e alimenta o grafico 3 em tempo real.
 
     Formato esperado:
-      volta_n,atrito_med,atrito_min,atrito_max,rpm_medio_volta,
-      n_total_pontos,n_falhas,n_validas,pct_perda
+      volta_n;atrito_med;atrito_min;atrito_max;rpm_medio_volta;
+      n_total_pontos;n_falhas;n_validas;pct_perda
     """
     waited_s = 0.0
     while _is_running() and not os.path.exists(turn_csv_path):
@@ -1925,7 +1925,7 @@ def _tail_turn_csv_for_graph3(turn_csv_path, turn_proc=None):
                         pass
                     time.sleep(0.05)
                     continue
-                parts = line.strip().split(",")
+                parts = line.strip().split(";")
                 if len(parts) < 9:
                     continue
                 try:
