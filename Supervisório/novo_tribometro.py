@@ -1082,6 +1082,8 @@ y2_min = 0.0
 y2_max = 1.0
 y3_min = 0.0
 y3_max = 1.0
+# Forca normal usada para converter CH1 em CoF no grafico 2.
+cof_force_normal_n = 1.0
 
 # Dados do grafico 3 (atrito). Inicializa para evitar NameError.
 p_strokes = []
@@ -2806,6 +2808,12 @@ def start_acquisition():
     # - Dispara DLG logger + Drive logger e depois faz merge
     # - Mantem o restante do GUI o mais intacto possivel
     # ---------------------------------------------------------------------------------
+    global cof_force_normal_n
+    try:
+        cof_force_normal_n = float(ent_forca.get().strip().replace(',', '.'))
+    except Exception:
+        cof_force_normal_n = 0.0
+
     if USE_EXTERNAL_RUNNER:
         try:
             raio_mm = float(ent_raio.get().strip().replace(',', '.'))
@@ -3302,7 +3310,7 @@ def update1(frame):
         log_msg(f"Grafico 1: erro de atualizacao ({e}).")
 
 # update2(frame):
-# - Renderiza grafico 2 (forca/atrito) usando CH1 do DLG.
+# - Renderiza grafico 2 em CoF usando CH1 do DLG.
 # - Usa mesmo eixo temporal do grafico 1 para alinhamento visual.
 # - Respeita configuracao de eixo Y automatico/manual.
 def update2(frame):
@@ -3310,20 +3318,31 @@ def update2(frame):
     try:
         ax2.clear()
         # Regras fixas (validacao):
-        # - Grafico 2 (forca) usa CH1 do DLG.
+        # - Grafico 2 usa CH1 convertido em CoF.
         c1 = canalativo1.get()
         limite_tela_min = aux / freq / 60
         passo = 5
 
-        # Canal 1 (Forca)
+        # Canal 1 (CoF)
         if _is_running() and graSamps and c1 == 1 and len(graSamps) > 0:
-            # Pega a lista bruta de dados de força
+            # Pega a lista bruta de CH1 (forca) para converter em CoF.
             raw_dados = graSamps[0]
             tam = min(len(sampsTimestamp), len(raw_dados))
             
             if tam > 0:
                 t_data = np.array(sampsTimestamp[:tam])
-                y_data = np.array(raw_dados[:tam])
+                y_force = np.array(raw_dados[:tam], dtype=float)
+                fn = cof_force_normal_n
+                if fn is None or fn <= 0.0:
+                    # Fallback para manter o grafico funcional fora de ensaio.
+                    try:
+                        fn = float(ent_forca.get().strip().replace(',', '.'))
+                    except Exception:
+                        fn = 0.0
+                if fn <= 0.0:
+                    y_data = np.full_like(y_force, np.nan)
+                else:
+                    y_data = y_force / fn
 
                 if len(t_data) > 0:
                     # Mesmo ajuste de tempo aqui
@@ -3334,7 +3353,7 @@ def update2(frame):
                     tempo = ((t_data - t_zero) / 60.0)[::passo]
                     dados = y_data[::passo]
                     
-                    ax2.plot(tempo, dados, label='Channel 1', color='#1f77b4') # Desenha a linha azul
+                    ax2.plot(tempo, dados, label='CoF', color='#1f77b4') # Desenha a linha azul
 
         # Configuração Visual Ax2
         handles, labels = ax2.get_legend_handles_labels()
@@ -3346,7 +3365,7 @@ def update2(frame):
         ax2.set_facecolor('black')
         ax2.tick_params(axis='both', labelsize=8)
         ax2.set_xlabel('Tempo [min]', fontsize=9)
-        ax2.set_ylabel('Força de atrito [N]', fontsize=9)
+        ax2.set_ylabel('CoF [-]', fontsize=9)
         
         if not y2_auto:
             ax2.set_ylim(y2_min, y2_max)
@@ -3499,7 +3518,7 @@ def abrir_config_y():
     ent_temp_max = tkinter.Entry(frame, width=9, textvariable=y_temp_max_var)
     ent_temp_max.grid(row=1, column=3, padx=4, pady=2)
 
-    tkinter.Label(frame, text="Atrito/forca (Grafico 2)").grid(row=2, column=0, padx=(0, 8), pady=2, sticky="w")
+    tkinter.Label(frame, text="CoF (Grafico 2)").grid(row=2, column=0, padx=(0, 8), pady=2, sticky="w")
     chk_forca = tkinter.Checkbutton(frame, variable=y_forca_auto_var)
     chk_forca.grid(row=2, column=1, padx=4, pady=2)
     ent_forca_min = tkinter.Entry(frame, width=9, textvariable=y_forca_min_var)
@@ -3552,7 +3571,7 @@ def abrir_config_y():
         r_temp = _parse_range("Temperatura", y_temp_auto_var.get(), y_temp_min_var.get(), y_temp_max_var.get())
         if r_temp == "ERR":
             return
-        r_forca = _parse_range("Atrito/forca", y_forca_auto_var.get(), y_forca_min_var.get(), y_forca_max_var.get())
+        r_forca = _parse_range("CoF", y_forca_auto_var.get(), y_forca_min_var.get(), y_forca_max_var.get())
         if r_forca == "ERR":
             return
         r_atrito = _parse_range("Atrito por volta", y_atrito_auto_var.get(), y_atrito_min_var.get(), y_atrito_max_var.get())
