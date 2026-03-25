@@ -114,6 +114,8 @@ USE_EXTERNAL_RUNNER = True
 external_run_state = None
 # Token monotonic para invalidar threads antigas entre ensaios.
 external_run_token = 0
+# Flag da rotina de tara para evitar execucoes concorrentes.
+tara_running = False
 
 # Persistencia simples de configuracoes do supervisório.
 # Caminho padrao de saida caso o usuario ainda nao tenha configurado.
@@ -634,6 +636,233 @@ def _dlg_check_once(dlg_exe, dlg_ip, dlg_port, bind_port):
         pass
 
     return ok, detail
+
+
+def _resolve_ch1_calib_path(repo_root, dlg_exe):
+    """
+    Resolve o caminho do arquivo de calibracao do CH1.
+
+    Prioridade:
+    1) pasta do dlg_logger_ipc.exe (fluxo real do ensaio);
+    2) caminhos padrao do repositorio.
+    """
+    candidates = []
+    if dlg_exe:
+        exe_dir = os.path.dirname(dlg_exe)
+        candidates.append(os.path.join(exe_dir, "calib_CH1.json"))
+        candidates.append(os.path.join(exe_dir, "out", "calib_CH1.json"))
+    candidates.append(os.path.join(repo_root, "DLG4000", "bin", "Release", "calib_CH1.json"))
+    candidates.append(os.path.join(repo_root, "DLG4000", "bin", "calib_CH1.json"))
+
+    for path in candidates:
+        if path and os.path.exists(path):
+            return path
+    return None
+
+
+def _capture_ch1_mean_tara_once(dlg_exe, dlg_ip, dlg_port, bind_port, duration_s=30, rate_hz=50.0):
+    """
+    Executa uma captura curta do DLG e retorna media valida do CH1.
+
+    Retorna:
+        tuple[float, int]: media_ch1, n_validas
+    """
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
+        tmp_path = tmp.name
+
+    cmd = [
+        dlg_exe,
+        "--out", tmp_path,
+        "--duration", str(int(duration_s)),
+        "--rate", f"{float(rate_hz):.0f}",
+        "--ip", str(dlg_ip),
+        "--port", str(dlg_port),
+        "--bind-port", str(bind_port),
+        "--ipc",
+    ]
+
+    try:
+        # Tempo de sobra para setup/flush alem da janela de 30 s.
+        timeout_s = max(40, int(duration_s) + 15)
+        res = subprocess.run(
+            cmd,
+            input="START\n",
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            **_subprocess_no_window_kwargs()
+        )
+        if res.returncode != 0:
+            log_msg(f"Tara CH1: dlg_logger_ipc retornou rc={res.returncode} (tentando ler CSV).")
+
+        total = 0.0
+        count = 0
+        with open(tmp_path, "r", encoding="utf-8") as f:
+            next(f, None)
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split(",")
+                # Formato esperado: idx,t_qpc,t_s,ch1..ch8,atrito,err
+                if len(parts) < 13:
+                    continue
+                err_txt = parts[-1].strip()
+                ch1_txt = parts[3].strip()
+                if err_txt != "0":
+                    continue
+                if not ch1_txt or ch1_txt.upper() == "NULL":
+                    continue
+                try:
+                    v = float(ch1_txt)
+                except Exception:
+                    continue
+                total += v
+                count += 1
+
+        if count <= 0:
+            raise RuntimeError("captura sem amostras validas de CH1")
+
+        return (total / count), count
+    finally:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+
+def _capture_ch1_mean_tara(dlg_exe, dlg_ip, dlg_port, duration_s=30, rate_hz=50.0):
+    """
+    Captura media de CH1 para tara, com fallback de bind.
+    """
+    last_err = None
+    for bind_port in [41402, 0]:
+        try:
+            mean_v, n_valid = _capture_ch1_mean_tara_once(
+                dlg_exe=dlg_exe,
+                dlg_ip=dlg_ip,
+                dlg_port=dlg_port,
+                bind_port=bind_port,
+                duration_s=duration_s,
+                rate_hz=rate_hz,
+            )
+            return mean_v, n_valid, bind_port
+        except Exception as e:
+            last_err = e
+            if bind_port == 41402:
+                log_msg("Tara CH1: bind 41402 falhou; tentando porta efemera.")
+    raise last_err if last_err else RuntimeError("falha desconhecida na captura de tara")
+
+
+def zerar_celula():
+    """
+    Executa tara de CH1:
+    1) coleta CH1 por 30 s com o sistema em repouso;
+    2) calcula media das amostras validas;
+    3) ajusta intercept da calibracao CH1 para deslocar o zero.
+    """
+    global tara_running
+
+    if tara_running:
+        messagebox.showwarning("Zerar celula", "Rotina de tara ja esta em execucao.")
+        return
+
+    if _is_running() or _external_pipeline_ativo():
+        messagebox.showwarning(
+            "Zerar celula",
+            "Finalize o ensaio/processos em segundo plano antes de executar a tara."
+        )
+        return
+
+    repo_root = orch.find_repo_root()
+    exe_info = orch.check_executables(repo_root)
+    dlg_exe = exe_info.get("dlg_exe")
+    if not dlg_exe:
+        messagebox.showerror(
+            "Zerar celula",
+            "dlg_logger_ipc.exe nao encontrado.\n\nCompile os executaveis C antes de rodar a tara."
+        )
+        return
+
+    calib_path = _resolve_ch1_calib_path(repo_root, dlg_exe)
+    if not calib_path:
+        messagebox.showerror(
+            "Zerar celula",
+            "Arquivo de calibracao CH1 nao encontrado (calib_CH1.json)."
+        )
+        return
+
+    prev_text = label_ensaio_estado.cget("text")
+    prev_fg = label_ensaio_estado.cget("fg")
+    tara_running = True
+    button_frame7_zerar.config(state="disabled")
+    label_ensaio_estado.config(text="Coletando dados para tara", fg="#0078D4")
+    log_msg("Tara CH1: iniciando coleta de 30 s.")
+
+    def _worker():
+        ok = False
+        out_msg = ""
+        try:
+            dlg_ip = getattr(orch, "DEFAULT_DLG_IP", "192.168.1.100")
+            dlg_port = getattr(orch, "DEFAULT_DLG_PORT", 41401)
+            rate_hz = getattr(orch, "DEFAULT_RATE_HZ", 50.0)
+            mean_ch1, n_valid, bind_used = _capture_ch1_mean_tara(
+                dlg_exe=dlg_exe,
+                dlg_ip=dlg_ip,
+                dlg_port=dlg_port,
+                duration_s=30,
+                rate_hz=rate_hz,
+            )
+
+            with open(calib_path, "r", encoding="utf-8") as f:
+                calib = json.load(f)
+            fit = calib.get("fit")
+            if not isinstance(fit, dict):
+                raise RuntimeError("arquivo de calibracao sem bloco fit")
+
+            old_intercept = float(fit.get("intercept", 0.0))
+            # Tara: remove o offset medio medido no repouso.
+            new_intercept = old_intercept - mean_ch1
+            fit["intercept"] = new_intercept
+
+            calib_tmp = calib_path + ".tmp"
+            with open(calib_tmp, "w", encoding="utf-8", newline="\n") as f:
+                json.dump(calib, f, indent=2, ensure_ascii=False)
+                f.write("\n")
+            os.replace(calib_tmp, calib_path)
+
+            ok = True
+            out_msg = (
+                f"Tara aplicada com sucesso.\n\n"
+                f"Arquivo: {calib_path}\n"
+                f"Bind usado: {bind_used}\n"
+                f"Amostras validas CH1: {n_valid}\n"
+                f"Media CH1 (30 s): {mean_ch1:.6f}\n"
+                f"Intercept antigo: {old_intercept:.6f}\n"
+                f"Intercept novo: {new_intercept:.6f}"
+            )
+            log_msg(
+                f"Tara CH1: ok (n={n_valid}, media={mean_ch1:.6f}, "
+                f"intercept: {old_intercept:.6f} -> {new_intercept:.6f})."
+            )
+        except Exception as e:
+            out_msg = f"Falha ao executar tara da celula.\n\n{e}"
+            log_msg(f"Tara CH1: falha ({e}).")
+
+        def _finish_ui():
+            global tara_running
+            tara_running = False
+            button_frame7_zerar.config(state="normal")
+            if not _is_running():
+                label_ensaio_estado.config(text=prev_text, fg=prev_fg)
+            if ok:
+                messagebox.showinfo("Zerar celula", out_msg)
+            else:
+                messagebox.showerror("Zerar celula", out_msg)
+
+        root.after(0, _finish_ui)
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 # Check simples de comunicacao (DLG + Drive) acionado pelo botao de status.
@@ -3887,6 +4116,8 @@ labelframe3_baixo.grid_rowconfigure(6, weight=0)
 # Mantem altura consistente dos botoes; evita "gordura" no Check status.
 labelframe3_baixo.grid_rowconfigure(7, weight=0)
 labelframe3_baixo.grid_rowconfigure(8, weight=0)
+labelframe3_baixo.grid_rowconfigure(9, weight=0)
+labelframe3_baixo.grid_rowconfigure(10, weight=0)
 labelframe3_baixo.grid_columnconfigure(0, weight=1)
 labelframe3_baixo.grid_columnconfigure(1, weight=1)
 
@@ -3970,18 +4201,22 @@ lbl_tempo_decorrido2.grid(row=3, column=1, sticky="w", padx=5, pady=5)
 
 #Botões
 button_frame4_iniciar = tkinter.Button(labelframe3_baixo, text="Iniciar", command=start_acquisition)
-button_frame4_iniciar.grid(sticky="news", row=5, column=0,columnspan=2, padx=5, pady=2)
+button_frame4_iniciar.grid(sticky="news", row=4, column=0,columnspan=2, padx=5, pady=2)
 button_frame5_pausar = tkinter.Button(labelframe3_baixo, text="Pausar", command=pause_acquisition)
-button_frame5_pausar.grid(sticky="news", row=6, column=0,columnspan=2, padx=5, pady=2)
+button_frame5_pausar.grid(sticky="news", row=5, column=0,columnspan=2, padx=5, pady=2)
 button_frame5_parar = tkinter.Button(labelframe3_baixo, text="Parar", command=stop_acquisition)
-button_frame5_parar.grid(sticky="news", row=7, column=0,columnspan=2, padx=5, pady=2)
+button_frame5_parar.grid(sticky="news", row=6, column=0,columnspan=2, padx=5, pady=2)
+
+# Grupo tecnico: tara e check de comunicacao.
+button_frame7_zerar = tkinter.Button(labelframe3_baixo, text="Zerar celula", command=zerar_celula)
+button_frame7_zerar.grid(sticky="news", row=8, column=0, columnspan=2, padx=5, pady=(14, 2))
 
 # Check status (DLG + Drive) - separado dos botoes principais
 button_frame6_status = tkinter.Button(labelframe3_baixo, text="Check status", command=check_status)
-button_frame6_status.grid(sticky="news", row=8, column=0, columnspan=2, padx=5, pady=(10, 2))
+button_frame6_status.grid(sticky="news", row=9, column=0, columnspan=2, padx=5, pady=(2, 2))
 
 status_frame = tkinter.Frame(labelframe3_baixo)
-status_frame.grid(sticky="w", row=9, column=0, columnspan=2, padx=5, pady=(2, 6))
+status_frame.grid(sticky="w", row=10, column=0, columnspan=2, padx=5, pady=(2, 6))
 tkinter.Label(status_frame, text="DLG:", font=("Arial", 9, "bold")).grid(row=0, column=0, padx=(0, 4))
 status_dlg_value = tkinter.Label(status_frame, text="?", fg="gray")
 status_dlg_value.grid(row=0, column=1, padx=(0, 12))

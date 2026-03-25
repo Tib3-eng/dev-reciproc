@@ -110,6 +110,7 @@ SupervisÃ³rio (Python/Tk):
 - stop_run no supervisÃ³rio: ao clicar Parar, estado vira "Finalizando...", envia STOP para ambos, aguarda fechamento e mantem merge final ate salvar arquivos parciais.
 - orchestrator_runtime tem pause_run/resume_run e envia PAUSE/RESUME para ambos os processos IPC.
 - Botao Pausar no supervisÃ³rio externo alterna para Retomar, congela o cronometro e o estado; ao retomar, continua da mesma etapa.
+- Botao "Zerar celula" no supervisÃ³rio: coleta CH1 por 30 s (DLG em repouso), calcula media valida e ajusta `fit.intercept` do `calib_CH1.json` para tara (`novo = antigo - media`); durante a coleta o estado mostra "Coletando dados para tara".
 - novo_tribometro captures run state snapshot to avoid race with global external_run_state.
 
 DriveA5 (Modbus RTU / libmodbus):
