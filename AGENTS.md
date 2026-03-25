@@ -85,6 +85,8 @@ SupervisÃ³rio (Python/Tk):
 - Tabela da UI: `Voltas_pin` = distancia/(2*pi*raio) e `Voltas_mot` = i * Voltas_pin.
 - A aba "configuracoes adicionais" inclui botao "Configurar canais" para abrir CalibraDLG_UI diretamente, com bloqueio se ensaio/processos estiverem ativos.
 - Botao "Configurar Eixos Y (Min / Max)" abre popup compacto com 2 linhas (Temperatura/Grafico 1 e Atrito-forca/Grafico 2), com modo Automatico (padrao) e campos Min/Max manuais.
+- Botao "Configurar eixo X" abre popup para Temperatura+CoF com modo Automatico (duracao total prevista) ou Manual (janela em minutos com varredura ciclica; ao completar a janela reinicia do zero).
+- Alternar eixo X entre manual/automatico durante ensaio preserva historico completo dos graficos 1/2; ao voltar para automatico, a serie volta a mostrar desde o inicio do ensaio.
 - Grafico 2 exibe CoF (CH1/Forca normal) com legenda "CoF" e eixo Y "CoF [-]".
 - Grafico 3 usa eixo X em voltas do pino (considera `Relacao mecanica (i)`), nao em voltas do motor.
 - Grafico 3 (atrito por volta) e calculado em tempo real no supervisÃ³rio a partir de `dlg.csv + drive.csv` (sem stream TURN em C).

@@ -1161,6 +1161,14 @@ y2_min = 0.0
 y2_max = 1.0
 y3_min = 0.0
 y3_max = 1.0
+# Controle de escala X compartilhado entre grafico 1 (Temperatura) e 2 (CoF).
+# - x_auto=True  -> eixo X acompanha duracao total prevista do ensaio.
+# - x_auto=False -> eixo X usa janela manual em minutos e reinicia por ciclos.
+x_auto = True
+x_manual_min = 0.83
+x_auto_total_min = 0.83
+# Referencia temporal para converter timestamp absoluto em tempo relativo no grafico.
+x_time_ref_s = None
 # Forca normal usada para converter CH1 em CoF no grafico 2.
 cof_force_normal_n = 1.0
 
@@ -2030,11 +2038,9 @@ def _tail_dlg_csv_for_graphs(dlg_csv_path, run_token=None):
                         )
                     )
 
-                # Janela deslizante para evitar crescer indefinidamente
-                if len(sampsTimestamp) > aux:
-                    del sampsTimestamp[:-aux]
-                    for i in range(8):
-                        del graSamps[i][:-aux]
+                # Mantem historico completo do ensaio para permitir:
+                # - alternar manual/automatico no eixo X sem perder o passado;
+                # - voltar ao modo automatico e replotar toda a serie.
         log_msg(f"DLG tail: stop token={run_token} rows={n_rows}.")
         graph_log(
             "DLG tail stop rows={0} err={1} short={2} ext_ch1={3} ext_ch2={4}".format(
@@ -2554,6 +2560,7 @@ def start_acquisition():
     # Python "assigned before global declaration" errors (PyInstaller parse).
     global start_time, is_paused, tempo_pause_inicio, p_turns_target
     global p_strokes, p_atrito_ef, p_atrito_max, p_atrito_min, p_coluna_velocidade, contador_amostras_total
+    global x_auto_total_min, x_time_ref_s
 
     # Impede o funcionamento do botão iniciar duas vezes seguidas:
     if running == "true":
@@ -2939,10 +2946,14 @@ def start_acquisition():
         p_atrito_max.clear()
         p_atrito_min.clear()
         p_coluna_velocidade.clear()
+        x_time_ref_s = None
         # Define alvo de voltas para eixo X do grafico 3.
         p_turns_target = _calc_expected_turns_from_table(raio_mm, RELACAO_MECANICA)
 
         dur_total = sum(d for _, d in schedule)
+        # Em modo automatico, eixo X de Temperatura/CoF segue duracao total prevista.
+        if dur_total > 0:
+            x_auto_total_min = float(dur_total) / 60.0
         rate_hz = float(getattr(orch, "DEFAULT_RATE_HZ", 50.0))
 
         # Caminhos padrao (gerados por salvar_arquivo)
@@ -3058,6 +3069,7 @@ def start_acquisition():
                 tempo_pause_inicio = 0
                 timer_started = False
                 external_run_state = None
+                x_time_ref_s = None
                 graph_log("RUN end token={0}".format(run_token))
                 try:
                     label_ensaio_estado.config(text="Finalizado", fg="green")
@@ -3079,6 +3091,7 @@ def start_acquisition():
                         p_atrito_max.clear()
                         p_atrito_min.clear()
                         p_coluna_velocidade.clear()
+                        globals()["x_time_ref_s"] = None
                         globals()["p_turns_target"] = 0.0
                         ax1.clear()
                         ax2.clear()
@@ -3249,7 +3262,7 @@ def pause_acquisition():
 # - Modo externo: envia STOP e aguarda fechamento/merge final.
 # - Modo da versao anterior: zera tensao e limpa buffers/plots.
 def stop_acquisition():
-    global running, is_paused, ip, timer_started, tempo_pause_inicio, p_turns_target
+    global running, is_paused, ip, timer_started, tempo_pause_inicio, p_turns_target, x_time_ref_s
     global graSamps, sampsTimestamp, p_strokes, p_atrito_ef, p_atrito_max, p_atrito_min, p_coluna_velocidade
 
     if running:
@@ -3319,6 +3332,7 @@ def stop_acquisition():
             p_atrito_min.clear()
             p_coluna_velocidade.clear()
             p_turns_target = 0.0
+            x_time_ref_s = None
 
             # Limpa os eixos imediatamente
             ax1.clear()
@@ -3328,7 +3342,7 @@ def stop_acquisition():
 # Ela é chamada automaticamente e repetidamente pelo Matplotlib através da ferramenta de animação no fim do código.
 # update1(frame):
 # - Renderiza grafico 1 (temperatura) usando CH2 do DLG.
-# - Aplica regra de janela deslizante em minutos (sampsTimestamp).
+# - Aplica escala X compartilhada (automatico por duracao total ou manual ciclico).
 # - Respeita configuracao de eixo Y automatico/manual.
 def update1(frame):
     # Acessa a lista de tempos reais
@@ -3343,12 +3357,11 @@ def update1(frame):
         # Mantemos os checkboxes, mas este grafico respeita apenas o canal 2.
         c2 = canalativo2.get()
 
-        # calcula quantos minutos cabem na escala que o usuário digitou no eixo x:
-        # (Total de Amostras 'aux' / Frequência '200') / 60 segundos
-        limite_tela_min = aux / freq / 60
+        # Janela X compartilhada (automatico ou manual ciclico).
+        limite_tela_min = _current_x_window_min()
         passo = 5 # Desenha só 1 ponto a cada 5. Deixa o programa mais leve
 
-        # Função auxiliar para não repetir código e transformar o tempo absoluto em relativo (Sweep).
+        # Funcao auxiliar para preparar e plotar a serie temporal conforme modo X.
         def plotar_canal(idx, cor, label):
             if len(graSamps) > idx:
                 raw_dados = graSamps[idx]
@@ -3360,17 +3373,12 @@ def update1(frame):
                     t_data = np.array(sampsTimestamp[:tam])
                     y_data = np.array(raw_dados[:tam])
                     
-                    # --- TRANSFORMA TEMPO ABSOLUTO EM RELATIVO ---
-                    # O 'sampsTimestamp' guarda o tempo real.
-                    # Mas quando a tela limpa, o gráfico deve começar do 0 visualmente.
-                    # Por isso é feito: TempoAtual - TempoDoPrimeiroPonto
                     if len(t_data) > 0:
-                        t_zero = t_data[0] # Pega o tempo do primeiro ponto atual
-
-                        # Calcula o eixo X
-                        tempo = ((t_data - t_zero) / 60.0)[::passo]
-                        dados = y_data[::passo]
-                        
+                        tempo, dados = _x_plot_series(t_data, y_data)
+                        tempo = tempo[::passo]
+                        dados = dados[::passo]
+                        if len(tempo) == 0:
+                            return
                         # Manda desenhar a linha
                         if cor:
                             ax1.plot(tempo, dados, label=label, color=cor)
@@ -3411,7 +3419,7 @@ def update2(frame):
         # Regras fixas (validacao):
         # - Grafico 2 usa CH1 convertido em CoF.
         c1 = canalativo1.get()
-        limite_tela_min = aux / freq / 60
+        limite_tela_min = _current_x_window_min()
         passo = 5
 
         # Canal 1 (CoF)
@@ -3436,15 +3444,11 @@ def update2(frame):
                     y_data = y_force / fn
 
                 if len(t_data) > 0:
-                    # Mesmo ajuste de tempo aqui
-                    # Pega o instante do primeiro ponto que está na tela
-                    t_zero = t_data[0]
-                    # Subtrai o t_zero de todos os pontos.
-                    # Isso faz o gráfico sempre começar visualmente no 0
-                    tempo = ((t_data - t_zero) / 60.0)[::passo]
-                    dados = y_data[::passo]
-                    
-                    ax2.plot(tempo, dados, label='CoF', color='#1f77b4') # Desenha a linha azul
+                    tempo, dados = _x_plot_series(t_data, y_data)
+                    tempo = tempo[::passo]
+                    dados = dados[::passo]
+                    if len(tempo) > 0:
+                        ax2.plot(tempo, dados, label='CoF', color='#1f77b4') # Desenha a linha azul
 
         # Configuração Visual Ax2
         handles, labels = ax2.get_legend_handles_labels()
@@ -3540,32 +3544,170 @@ def get_aux():
         aux_label.grid(row=3, column=3, sticky="nw")
 
 
+def _calc_total_duration_min_from_table():
+    """
+    Soma as duracoes preenchidas na tabela inferior (em minutos).
 
-# alterar_escala_tempo():
-# - Converte minutos digitados na UI para numero de amostras (aux).
-# - Formula: aux = minutos * 60 * freq.
-def alterar_escala_tempo():
-    """Atualiza a escala do eixo X (min) convertendo para numero de amostras (aux)."""
-    global aux
-    try:
-        txt = entry_escala_x.get().strip().replace(",", ".")
-        if not txt:
-            return
-        minutos = float(txt)
-        if minutos <= 0:
-            raise ValueError()
-        novo_aux = int(minutos * freq * 60)
-        if novo_aux < 1:
-            novo_aux = 1
-        aux = novo_aux
+    Retorno:
+        float >= 0.0
+    """
+    total_min = 0.0
+    for lbl in lista_labels_duracao:
         try:
-            aux_spinbox.delete(0, "end")
-            aux_spinbox.insert(0, str(aux))
+            txt = lbl.cget("text").strip().replace(",", ".")
+        except Exception:
+            continue
+        if not txt or txt in ("xxxx", "Erro"):
+            continue
+        try:
+            v = float(txt)
+        except Exception:
+            continue
+        if v > 0:
+            total_min += v
+    return total_min
+
+
+def _current_x_window_min():
+    """
+    Retorna a janela de eixo X usada pelos graficos 1 e 2.
+    """
+    if x_auto:
+        # Durante ensaio, prioriza a duracao prevista congelada no START.
+        if _is_running() and x_auto_total_min > 0:
+            return x_auto_total_min
+        # Fora de ensaio, usa a soma atual da tabela.
+        total_tbl = _calc_total_duration_min_from_table()
+        if total_tbl > 0:
+            return total_tbl
+        if x_auto_total_min > 0:
+            return x_auto_total_min
+    return max(0.01, float(x_manual_min))
+
+
+def _x_plot_series(t_data, y_data):
+    """
+    Prepara serie temporal para os graficos 1/2 conforme modo do eixo X.
+
+    Modo automatico:
+        tempo relativo continuo desde o inicio do ensaio.
+    Modo manual:
+        janela ciclica em minutos; ao completar a janela, reinicia em 0.
+    """
+    global x_time_ref_s
+
+    if len(t_data) == 0:
+        return np.array([]), np.array([])
+
+    if x_time_ref_s is None:
+        x_time_ref_s = float(t_data[0])
+
+    t_rel_min = (t_data - x_time_ref_s) / 60.0
+
+    if x_auto:
+        return t_rel_min, y_data
+
+    janela_min = max(0.01, float(x_manual_min))
+    # Identifica o ciclo atual da janela manual e exibe apenas esse bloco.
+    ciclos = np.floor(np.maximum(t_rel_min, 0.0) / janela_min)
+    ciclo_atual = np.max(ciclos) if len(ciclos) > 0 else 0.0
+    mask = (ciclos == ciclo_atual)
+    t_plot = t_rel_min[mask] - (ciclo_atual * janela_min)
+    y_plot = y_data[mask]
+    return t_plot, y_plot
+
+
+def abrir_config_x():
+    """
+    Abre popup compacto para configurar eixo X dos graficos 1 e 2.
+
+    Regras:
+    - Configuracao compartilhada entre Temperatura e CoF.
+    - Automatico: usa duracao total prevista do ensaio.
+    - Manual: usa janela fixa em minutos e reinicia o grafico a cada ciclo.
+    """
+    global x_auto, x_manual_min, x_auto_total_min, x_time_ref_s
+
+    win = tkinter.Toplevel(root)
+    win.title("Configurar Eixo X")
+    win.resizable(False, False)
+    win.transient(root)
+    win.grab_set()
+
+    frame = tkinter.Frame(win, padx=8, pady=8)
+    frame.grid(row=0, column=0, sticky="nsew")
+
+    tkinter.Label(frame, text="Eixo X (Temperatura + CoF)", font=("Arial", 9, "bold")) \
+        .grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 6))
+    tkinter.Label(frame, text="Automatico", font=("Arial", 9, "bold")).grid(row=1, column=0, padx=4, pady=(0, 4))
+    tkinter.Label(frame, text="Manual [min]", font=("Arial", 9, "bold")).grid(row=1, column=1, padx=4, pady=(0, 4))
+
+    x_auto_var = tkinter.BooleanVar(value=x_auto)
+    x_manual_var = tkinter.StringVar(value=f"{x_manual_min:.6g}")
+
+    chk_auto = tkinter.Checkbutton(frame, variable=x_auto_var)
+    chk_auto.grid(row=2, column=0, padx=4, pady=2)
+    ent_manual = tkinter.Entry(frame, width=12, textvariable=x_manual_var)
+    ent_manual.grid(row=2, column=1, padx=4, pady=2)
+
+    lbl_info = tkinter.Label(frame, text="", fg="gray25")
+    lbl_info.grid(row=3, column=0, columnspan=3, sticky="w", pady=(4, 0))
+
+    def _refresh_state(*_args):
+        ent_manual.config(state=("disabled" if x_auto_var.get() else "normal"))
+        if x_auto_var.get():
+            previsto = _calc_total_duration_min_from_table()
+            if previsto > 0:
+                lbl_info.config(text=f"Automatico: duracao total prevista = {previsto:.2f} min")
+            else:
+                lbl_info.config(text="Automatico: duracao total prevista sera usada no inicio do ensaio.")
+        else:
+            lbl_info.config(text="Manual: ao completar a janela, o grafico reinicia em 0.")
+
+    x_auto_var.trace_add("write", _refresh_state)
+    _refresh_state()
+
+    btns = tkinter.Frame(frame)
+    btns.grid(row=4, column=0, columnspan=3, sticky="e", pady=(8, 0))
+
+    def _apply():
+        global x_auto, x_manual_min, x_auto_total_min, x_time_ref_s, aux
+
+        if x_auto_var.get():
+            x_auto = True
+            previsto = _calc_total_duration_min_from_table()
+            if previsto > 0:
+                x_auto_total_min = previsto
+            log_msg(f"Eixo X em automatico (duracao prevista={x_auto_total_min:.2f} min).")
+        else:
+            try:
+                v = float(x_manual_var.get().strip().replace(",", "."))
+                if v <= 0:
+                    raise ValueError()
+            except Exception:
+                messagebox.showwarning(
+                    "Valor Invalido",
+                    "Tempo manual do eixo X deve ser um numero positivo (minutos)."
+                )
+                return
+            x_auto = False
+            x_manual_min = v
+            # Mantem buffer suficiente para uma janela manual completa.
+            aux = max(1, int(math.ceil(x_manual_min * 60.0 * freq)))
+            log_msg(f"Eixo X manual: janela={x_manual_min:.2f} min (aux={aux}).")
+
+        # Nao reseta a referencia temporal ao trocar modo:
+        # isso permite retornar ao automatico e replotar todo o ensaio.
+
+        try:
+            canvas1.draw_idle()
+            canvas2.draw_idle()
         except Exception:
             pass
-        log_msg(f"Escala X ajustada: {minutos:.2f} min -> aux={aux}")
-    except Exception:
-        messagebox.showwarning("Valor Invalido", "Escala do eixo X deve ser um numero positivo (minutos).")
+        win.destroy()
+
+    tkinter.Button(btns, text="Aplicar", width=10, command=_apply).pack(side="left", padx=(0, 6))
+    tkinter.Button(btns, text="Cancelar", width=10, command=win.destroy).pack(side="left")
 
 # abrir_config_y():
 # - Abre popup compacto para configurar eixo Y dos graficos 1, 2 e 3.
@@ -4483,18 +4625,14 @@ button_enter_aux.grid(row=3, column=1)
 frame_toolbar = tkinter.Frame(frame_graficos, bg="#d9d9d9", height=40)
 frame_toolbar.pack(side="top", fill="x", padx=5, pady=5)
 
-# Rótulo
-lbl_escala = tkinter.Label(frame_toolbar, text="Escala eixo X [min]:", font=("Arial", 9), bg="#d9d9d9")
-lbl_escala.pack(side="left", padx=3, pady=3)
-
-# Caixa de Entrada (Entry)
-entry_escala_x = tkinter.Entry(frame_toolbar, width=6, font=("Arial", 9))
-entry_escala_x.pack(side="left", padx=2)
-entry_escala_x.insert(0, "0.83") # Valor inicial (equivale a 10000 amostras / 200hz / 60)
-
-# Botão Atualizar
-botao_atualizar_escala = tkinter.Button(frame_toolbar, text="Definir X", command=alterar_escala_tempo, font=("Arial", 9))
-botao_atualizar_escala.pack(side="left", padx=5)
+# --- CONTROLE EIXO X
+btn_config_x = tkinter.Button(
+    frame_toolbar,
+    text="Configurar eixo X",
+    command=abrir_config_x,
+    font=("Arial", 9)
+)
+btn_config_x.pack(side="left", padx=5, pady=3)
 
 # Separador visual
 tkinter.Label(frame_toolbar, text="|", bg="#d9d9d9", fg="gray").pack(side="left", padx=10)
