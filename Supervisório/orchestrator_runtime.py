@@ -71,6 +71,7 @@ class RunState:
     rate_hz: float
     force_normal_n: float
     relacao: float
+    raio_mm: float = 0.0
     # Estado logico de pausa observado pelo orquestrador.
     paused: bool = False
 
@@ -314,13 +315,14 @@ def start_external_run(
     dlg_port: int = DEFAULT_DLG_PORT,
     bind_ip: str = DEFAULT_BIND_IP,
     bind_port: int = DEFAULT_BIND_PORT,
-    com_port: str = "COM4",
+    com_port: str = "COM5",
     slave_id: int = 1,
     baud: int = 115200,
     parity: str = "E",
     show_console: bool = False,
     force_normal_n: float = 0.0,
     relacao: float = 1.0,
+    raio_mm: float = 0.0,
 ) -> RunState:
     """
     Inicia o ensaio em modo externo (executaveis C sem interface).
@@ -346,6 +348,7 @@ def start_external_run(
         bind_ip/bind_port: bind local para recebimento UDP.
         com_port/slave_id/baud/parity: parametros seriais do Drive.
         show_console: quando False, tenta ocultar janela de console no Windows.
+        raio_mm: raio da trilha no disco (usado para derivar velocidade media por volta).
 
     Retorna:
         RunState com handles de processo, caminhos e parametros da execucao.
@@ -470,6 +473,7 @@ def start_external_run(
         rate_hz=rate_hz,
         force_normal_n=force_normal_n,
         relacao=relacao,
+        raio_mm=raio_mm,
     )
 
 
@@ -537,15 +541,19 @@ def _move_dev_artifacts(state: RunState) -> None:
     os.makedirs(dev_dir, exist_ok=True)
 
     pairs = []
+    merge_base = os.path.basename(state.merge_csv) if state.merge_csv else "resultado_ensaio.csv"
+    merge_source_name = f"{merge_base}.merge_source"
     # Signature do merge em C: suporte a nome legado (.txt) e novo.
     merge_sig_new = f"{state.merge_csv}.merge_source"
     merge_sig_old = f"{state.merge_csv}.merge_source.txt"
     if os.path.exists(merge_sig_new):
-        pairs.append((merge_sig_new, os.path.join(dev_dir, "resultado_ensaio.csv.merge_source")))
+        pairs.append((merge_sig_new, os.path.join(dev_dir, merge_source_name)))
     elif os.path.exists(merge_sig_old):
-        pairs.append((merge_sig_old, os.path.join(dev_dir, "resultado_ensaio.csv.merge_source")))
+        pairs.append((merge_sig_old, os.path.join(dev_dir, merge_source_name)))
 
     pairs.extend([
+        (state.dlg_csv, os.path.join(dev_dir, "dlg.csv")),
+        (state.drive_csv, os.path.join(dev_dir, "drive.csv")),
         (state.schedule_csv, os.path.join(dev_dir, "schedule.csv")),
         (os.path.join(rep_dir, "graph_events.log"), os.path.join(dev_dir, "graph_events.log")),
         (os.path.join(rep_dir, "dlg_logger_events.log"), os.path.join(dev_dir, "dlg_logger_events.log")),
@@ -553,17 +561,74 @@ def _move_dev_artifacts(state: RunState) -> None:
     ])
 
     for src, dst in pairs:
+        _move_file_best_effort(src, dst)
+
+
+def _move_file_best_effort(src: str, dst: str) -> None:
+    """
+    Move arquivo com tolerancia a locks temporarios no Windows.
+
+    Observacao:
+    - shutil.move pode fazer copy+delete em alguns cenarios.
+      Se o delete falhar por lock, ficamos com copia no destino e origem
+      ainda presente. Neste caso tentamos remover a origem explicitamente.
+    """
+    try:
+        if not src or not os.path.exists(src):
+            return
+        if os.path.abspath(src) == os.path.abspath(dst):
+            return
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        if os.path.exists(dst):
+            os.remove(dst)
         try:
-            if not src or not os.path.exists(src):
-                continue
-            if os.path.abspath(src) == os.path.abspath(dst):
-                continue
-            if os.path.exists(dst):
-                os.remove(dst)
-            shutil.move(src, dst)
+            # rename atomico quando possivel (mesmo volume)
+            os.replace(src, dst)
         except Exception:
-            # Melhor esforco: nao falha ensaio por erro de organizacao de arquivos.
-            pass
+            shutil.move(src, dst)
+
+        # Se sobrar arquivo na origem (copy+delete parcial), tenta limpar.
+        if os.path.exists(src) and os.path.exists(dst):
+            try:
+                os.remove(src)
+            except Exception:
+                pass
+    except Exception:
+        # Melhor esforco: nao falha ensaio por erro de organizacao de arquivos.
+        pass
+
+
+def finalize_dev_artifacts_after_run(state: RunState, retries: int = 20, sleep_s: float = 0.1) -> None:
+    """
+    Segunda passada de limpeza dos CSVs tecnicos apos fim do ensaio.
+
+    Uso:
+    - Chamar depois que a UI marcar ensaio como encerrado (running=False),
+      para reduzir chance de lock por threads de tail ainda abertas.
+    """
+    if not state:
+        return
+    rep_dir = os.path.dirname(state.merge_csv) if state.merge_csv else ""
+    if not rep_dir:
+        return
+    dev_dir = os.path.join(rep_dir, "DadosDev")
+    os.makedirs(dev_dir, exist_ok=True)
+
+    pending = [
+        (state.dlg_csv, os.path.join(dev_dir, "dlg.csv")),
+        (state.drive_csv, os.path.join(dev_dir, "drive.csv")),
+    ]
+
+    for _ in range(max(1, retries)):
+        all_done = True
+        for src, dst in pending:
+            if src and os.path.exists(src):
+                _move_file_best_effort(src, dst)
+            if src and os.path.exists(src):
+                all_done = False
+        if all_done:
+            break
+        time.sleep(max(0.01, float(sleep_s)))
 
 
 def _rebuild_turn_csv_from_logs(state: RunState) -> None:
@@ -583,6 +648,10 @@ def _rebuild_turn_csv_from_logs(state: RunState) -> None:
         relacao = float(state.relacao) if state.relacao > 0 else 1.0
     except Exception:
         relacao = 1.0
+    try:
+        raio_mm = float(state.raio_mm) if state.raio_mm > 0 else 0.0
+    except Exception:
+        raio_mm = 0.0
     cycles_per_motor_rev = 1.0
     rpm_dir_deadband = 5.0
 
@@ -611,7 +680,7 @@ def _rebuild_turn_csv_from_logs(state: RunState) -> None:
     with open(state.turn_csv, "w", newline="", encoding="utf-8") as fout:
         w = csv.writer(fout, delimiter=";", lineterminator="\n")
         w.writerow([
-            "volta_n", "atrito_med", "atrito_min", "atrito_max", "rpm_medio_volta",
+            "volta_n", "atrito_med", "atrito_min", "atrito_max", "rpm_medio_volta", "velocidade_media_mm_s",
             "n_total_pontos", "n_falhas", "n_validas", "pct_perda"
         ])
 
@@ -755,12 +824,16 @@ def _rebuild_turn_csv_from_logs(state: RunState) -> None:
                             pct_loss = (100.0 * n_fail / n_total) if n_total > 0 else 0.0
                             atr_med = (atr_sum / n_valid) if n_valid > 0 else None
                             rpm_med = (rpm_sum / rpm_cnt) if rpm_cnt > 0 else None
+                            vel_med_mm_s = None
+                            if rpm_med is not None and raio_mm > 0.0 and relacao > 0.0:
+                                vel_med_mm_s = abs(rpm_med) * (2.0 * 3.141592653589793 * raio_mm) / (60.0 * relacao)
                             w.writerow([
                                 turn_n,
                                 f"{atr_med:.6f}" if atr_med is not None else "NULL",
                                 f"{atr_min:.6f}" if atr_min is not None else "NULL",
                                 f"{atr_max:.6f}" if atr_max is not None else "NULL",
                                 f"{rpm_med:.6f}" if rpm_med is not None else "NULL",
+                                f"{vel_med_mm_s:.6f}" if vel_med_mm_s is not None else "NULL",
                                 n_total, n_fail, n_valid, f"{pct_loss:.3f}"
                             ])
                             turn_n += 1

@@ -19,10 +19,12 @@ Modos presentes no arquivo:
 
 Saidas de ensaio:
 - Desktop\\Repositorio\\<data - estudo - nome>\\REP N\\
-  info_ensaio.csv, dlg.csv, drive.csv, atrito_por_volta.csv, resultado_ensaio.csv.
+  <data>-<nome_ensaio>-<estudo>-<repeticao>_I.csv,
+  <data>-<nome_ensaio>-<estudo>-<repeticao>_P.csv,
+  <data>-<nome_ensaio>-<estudo>-<repeticao>_T.csv.
 - Desktop\\Repositorio\\<data - estudo - nome>\\REP N\\DadosDev\\
-  resultado_ensaio.csv.merge_source, schedule.csv, graph_events.log,
-  dlg_logger_events.log, a5_speed_events.log.
+  <arquivo_t>.merge_source, dlg.csv, drive.csv, schedule.csv,
+  graph_events.log, dlg_logger_events.log, a5_speed_events.log.
 
 Pontos de atencao para manutencao:
 - Evitar alterar protocolo IPC textual sem ajustar executaveis C.
@@ -951,7 +953,7 @@ def check_status():
 
     Fluxo:
     1) DLG: executa dlg_logger_ipc por ~2 s em IPC e busca DATA_OK.
-    2) Drive: executa a5_pos_cli --diag na COM4.
+    2) Drive: executa a5_pos_cli --diag na COM5.
     3) Atualiza labels visuais de status (DLG/Drive).
 
     Observacao:
@@ -1050,12 +1052,12 @@ def check_status():
             # Sem executavel nao ha como testar serial/Modbus.
             log_msg('Drive check: a5_pos_cli.exe nao encontrado.')
         else:
-            # COM4 e padrao do projeto
+            # COM5 e padrao do setup atual
             # cmd:
             # - drive_exe: executavel de diagnostico
-            # - COM4: porta serial esperada neste setup
+            # - COM5: porta serial esperada neste setup
             # - --diag: teste basico de comunicacao
-            cmd = [drive_exe, 'COM4', '--diag']
+            cmd = [drive_exe, 'COM5', '--diag']
             res = subprocess.run(
                 cmd,
                 # captura stdout/stderr para evitar poluir o console da UI.
@@ -1439,8 +1441,11 @@ def fechar_janela():
 # - Monta caminho de saida no formato:
 #   REPO_BASE/<data - estudo - ensaio>/REP N/
 # - Bloqueia duplicidade da mesma repeticao.
-# - Define caminhos padrao: info_ensaio.csv, dlg.csv, drive.csv,
-#   resultado_ensaio.csv e schedule.csv.
+# - Define nomes de saida para arquivos finais com padrao:
+#   <data>-<nome_ensaio>-<estudo>-<repeticao>_<sufixo>.csv
+#   sufixos: _I (info), _P (atrito por volta), _T (resultado ensaio).
+# - Durante o ensaio, dlg.csv/drive.csv ficam na pasta REP e ao final
+#   sao movidos para DadosDev.
 # - Inicializa arquivos vazios para evitar erro de append posterior.
 def salvar_arquivo():
     
@@ -1488,13 +1493,21 @@ def salvar_arquivo():
     os.makedirs(caminho_pasta_raiz, exist_ok=True)
     os.makedirs(caminho_pasta, exist_ok=True)
 
-    # Nomes padrao dos arquivos dentro da subpasta
-    caminho_arquivo_1 = os.path.join(caminho_pasta, "info_ensaio.csv")   # metadados do ensaio
+    # Prefixo dos arquivos finais solicitado:
+    # data + "-" + nome_ensaio + "-" + estudo + "-" + repeticao.
+    prefixo_arquivo = orch.sanitize_folder_name(
+        f"{data_str}-{nome_ensaio}-{estudo}-{repeticao}"
+    )
+
+    # Arquivos finais visiveis ao usuario.
+    caminho_arquivo_1 = os.path.join(caminho_pasta, f"{prefixo_arquivo}_I.csv")   # metadados do ensaio
+    caminho_turn_csv = os.path.join(caminho_pasta, f"{prefixo_arquivo}_P.csv")
+    caminho_merge_csv = os.path.join(caminho_pasta, f"{prefixo_arquivo}_T.csv")
+
+    # Arquivos tecnicos de aquisicao (movidos para DadosDev no fim).
     caminho_arquivo_2 = os.path.join(caminho_pasta, "dlg.csv")    # mantido para compatibilidade
     caminho_dlg_csv = os.path.join(caminho_pasta, "dlg.csv")
     caminho_drive_csv = os.path.join(caminho_pasta, "drive.csv")
-    caminho_turn_csv = os.path.join(caminho_pasta, "atrito_por_volta.csv")
-    caminho_merge_csv = os.path.join(caminho_pasta, "resultado_ensaio.csv")
     caminho_schedule_csv = os.path.join(caminho_pasta, "schedule.csv")
     graph_events_log_path = os.path.join(caminho_pasta, "graph_events.log")
 
@@ -2197,7 +2210,7 @@ def _tail_turn_csv_for_graph3(turn_csv_path, turn_proc=None):
     Faz tail de atrito_por_volta.csv e alimenta o grafico 3 em tempo real.
 
     Formato esperado:
-      volta_n;atrito_med;atrito_min;atrito_max;rpm_medio_volta;
+      volta_n;atrito_med;atrito_min;atrito_max;rpm_medio_volta;velocidade_media_mm_s;
       n_total_pontos;n_falhas;n_validas;pct_perda
     """
     waited_s = 0.0
@@ -2989,14 +3002,15 @@ def start_acquisition():
                 # bind_port=0 (efemera) pode gerar execucao sem ACQDATA em
                 # setups onde o DLG responde de forma mais estavel na porta fixa.
                 bind_port=getattr(orch, "DEFAULT_BIND_PORT", 41402),
-                com_port="COM4",
+                com_port="COM5",
                 slave_id=1,
                 baud=115200,
                 parity="E",
                 show_console=False,
                 force_normal_n=forca_normal_n,
                 # i = D2 / D1 (D1=motor, D2=disco), mesma definicao do supervisório.
-                relacao=RELACAO_MECANICA
+                relacao=RELACAO_MECANICA,
+                raio_mm=raio_mm
             )
         except Exception as e:
             # Limpa a pasta criada se o ensaio nao iniciar
@@ -3070,6 +3084,12 @@ def start_acquisition():
                 timer_started = False
                 external_run_state = None
                 x_time_ref_s = None
+                try:
+                    # Segunda passada para garantir que dlg.csv/drive.csv
+                    # sejam recortados para DadosDev apos fechamento das tails.
+                    orch.finalize_dev_artifacts_after_run(state_snapshot)
+                except Exception as e:
+                    log_msg(f"Aviso: nao foi possivel finalizar move de CSVs tecnicos ({e}).")
                 graph_log("RUN end token={0}".format(run_token))
                 try:
                     label_ensaio_estado.config(text="Finalizado", fg="green")

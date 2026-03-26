@@ -101,13 +101,16 @@ SupervisÃ³rio (Python/Tk):
 - wait_and_merge has fallback merge in Python if merge_logs fails or resultado_ensaio.csv is missing.
 - wait_and_merge reconstrói `atrito_por_volta.csv` em Python ao final de todo ensaio para garantir consistencia do arquivo final com os CSVs completos.
 - Rebuild offline em Python usa a mesma regra de wrap/backstep do C (sem `%` direto no delta) para evitar sobrecontagem de voltas por jitter.
-- Outputs go to Desktop\\Repositorio\\<dd-mm-aaaa - Estudo X - Nome do ensaio>\\<REP N> with info_ensaio.csv, dlg.csv, drive.csv, atrito_por_volta.csv, resultado_ensaio.csv.
+- Outputs go to Desktop\\Repositorio\\<dd-mm-aaaa - Estudo X - Nome do ensaio>\\<REP N> with arquivos finais nomeados por padrao:
+  <data>-<nome_ensaio>-<estudo>-<repeticao>_I.csv (info), _P.csv (atrito por volta), _T.csv (resultado ensaio).
 - info_ensaio.csv inclui bloco "Dados de calibracao" com fit do CH1 (slope, intercept, r2) usando a mesma busca do dlg_logger_ipc (calib.json/calib/calib_CH1.json/out + pasta do exe).
 - Artefatos tecnicos finais ficam em Desktop\\Repositorio\\<...>\\<REP N>\\DadosDev\\:
-  resultado_ensaio.csv.merge_source, schedule.csv, graph_events.log, dlg_logger_events.log, a5_speed_events.log.
+  <arquivo_t>.merge_source, dlg.csv, drive.csv, schedule.csv, graph_events.log, dlg_logger_events.log, a5_speed_events.log.
+- Move de dlg.csv/drive.csv para DadosDev e feito em duas passadas (wait_and_merge + finalize_pos-run) para evitar copia sem recorte quando houver lock temporario no Windows.
 - Duplicidade de pasta e bloqueio de inicio consideram data + estudo + nome + repeticao (subpasta REP N).
 - abrir_configurar_canais resolves CalibraDLG_UI.exe automatically via orchestrator runtime helpers.
 - Check status: DLG uses UDP ACQSTOP/SETCH/SETUP/START (8 canais) and waits for ACQDATA (no ICMP ping).
+- Supervisorio (start_external_run + check status) usa COM5 como porta padrao atual do Drive.
 - Check status bind: tenta 41402 (mesma do logger); se falhar, usa porta efemera e registra no log.
 - Pending: If DLG check still fails, suspect DLG busy in another app or firewall/route issues.
 - stop_run: envia STOP via stdin (IPC) e espera curto periodo antes de terminate/kill.
@@ -183,10 +186,11 @@ CSV conventions
 - ASCII logs and CSV only.
 - Fixed headers and units. Use "NULL" rows only for real losses.
 - `resultado_ensaio.csv` and `atrito_por_volta.csv` use `;` as column delimiter.
+- `atrito_por_volta.csv` inclui `velocidade_media_mm_s` por volta, derivada de `rpm_medio_volta` com `v = |rpm| * (2*pi*raio) / (60*i)`.
 - Write outputs into out/ subfolders (gitignored) when creating artifacts.
 - Supervisor (novo_tribometro.py) grava em: Desktop\\Repositorio\\<dd-mm-aaaa - Estudo X - Nome do ensaio>\\<REP N>.
-  Arquivos padrao: info_ensaio.csv, dlg.csv, drive.csv, atrito_por_volta.csv, resultado_ensaio.csv.
-  Pasta tecnica: DadosDev\\ com resultado_ensaio.csv.merge_source, schedule.csv, graph_events.log, dlg_logger_events.log e a5_speed_events.log.
+  Arquivos finais: <data>-<nome_ensaio>-<estudo>-<repeticao>_I.csv, _P.csv, _T.csv.
+  Pasta tecnica: DadosDev\\ com <arquivo_t>.merge_source, dlg.csv, drive.csv, schedule.csv, graph_events.log, dlg_logger_events.log e a5_speed_events.log.
 
 Roadmap (short)
 - Load calibration (a,b) from file and apply on-the-fly in DLG logger.
