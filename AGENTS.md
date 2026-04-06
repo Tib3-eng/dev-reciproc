@@ -101,13 +101,14 @@ SupervisÃ³rio (Python/Tk):
 - wait_and_merge has fallback merge in Python if merge_logs fails or resultado_ensaio.csv is missing.
 - wait_and_merge reconstrói `atrito_por_volta.csv` em Python ao final de todo ensaio para garantir consistencia do arquivo final com os CSVs completos.
 - Rebuild offline em Python usa a mesma regra de wrap/backstep do C (sem `%` direto no delta) para evitar sobrecontagem de voltas por jitter.
-- Outputs go to Desktop\\Repositorio\\<dd-mm-aaaa - Estudo X - Nome do ensaio>\\<REP N> with arquivos finais nomeados por padrao:
+- Outputs go to Desktop\\Repositorio\\<AAAA-MM-DD - PoD - NomeEnsaio_Estudo-Repeticao> with arquivos finais nomeados por padrao:
   <data>-<nome_ensaio>-<estudo>-<repeticao>_I.csv (info), _P.csv (atrito por volta), _T.csv (resultado ensaio).
 - info_ensaio.csv inclui bloco "Dados de calibracao" com fit do CH1 (slope, intercept, r2) usando a mesma busca do dlg_logger_ipc (calib.json/calib/calib_CH1.json/out + pasta do exe).
-- Artefatos tecnicos finais ficam em Desktop\\Repositorio\\<...>\\<REP N>\\DadosDev\\:
+- Artefatos tecnicos finais ficam em Desktop\\Repositorio\\<...>\\DadosDev\\:
   <arquivo_t>.merge_source, dlg.csv, drive.csv, schedule.csv, graph_events.log, dlg_logger_events.log, a5_speed_events.log.
 - Move de dlg.csv/drive.csv para DadosDev e feito em duas passadas (wait_and_merge + finalize_pos-run) para evitar copia sem recorte quando houver lock temporario no Windows.
-- Duplicidade de pasta e bloqueio de inicio consideram data + estudo + nome + repeticao (subpasta REP N).
+- Duplicidade de pasta e bloqueio de inicio consideram data + estudo + nome + repeticao na pasta unica da execucao.
+- Se a pasta da execucao ja existir, o supervisÃ³rio pergunta se deve sobrescrever; ao confirmar duas vezes, apaga a pasta existente e reutiliza a mesma repeticao.
 - abrir_configurar_canais resolves CalibraDLG_UI.exe automatically via orchestrator runtime helpers.
 - Check status: DLG uses UDP ACQSTOP/SETCH/SETUP/START (8 canais) and waits for ACQDATA (no ICMP ping).
 - Supervisorio (start_external_run + check status) usa COM5 como porta padrao atual do Drive.
@@ -118,6 +119,10 @@ SupervisÃ³rio (Python/Tk):
 - orchestrator_runtime tem pause_run/resume_run e envia PAUSE/RESUME para ambos os processos IPC.
 - Botao Pausar no supervisÃ³rio externo alterna para Retomar, congela o cronometro e o estado; ao retomar, continua da mesma etapa.
 - Botao "Zerar celula" no supervisÃ³rio: coleta CH1 por 30 s (DLG em repouso), calcula media valida e ajusta `fit.intercept` do `calib_CH1.json` para tara (`novo = antigo - media`); durante a coleta o estado mostra "Coletando dados para tara".
+- Tara no supervisÃ³rio preserva `fit.slope` (nao altera inclinacao) e ajusta somente `fit.intercept`; grava debug com slope/intercept antes/depois.
+- Inicio de ensaio executa tara automatica obrigatoria com dois popups de confirmacao operacional (sem carga para zerar, depois pronto para iniciar).
+- Log da tara automatica fica em `<pasta do ensaio>\\DadosDev\\zero_ensaio.csv`; tara manual (botao "Zerar celula") grava em `<REPO_BASE>\\ZeroAvulso\\zero_avulso_<timestamp>.csv`.
+- Busca do arquivo de calibracao CH1 prioriza `calib_CH1.json`/`out\\calib_CH1.json`; arquivos genericos (`calib.json`/`calib`) so sao aceitos quando o payload indicar CH1.
 - novo_tribometro captures run state snapshot to avoid race with global external_run_state.
 
 DriveA5 (Modbus RTU / libmodbus):
@@ -188,7 +193,7 @@ CSV conventions
 - `resultado_ensaio.csv` and `atrito_por_volta.csv` use `;` as column delimiter.
 - `atrito_por_volta.csv` inclui `velocidade_media_mm_s` por volta, derivada de `rpm_medio_volta` com `v = |rpm| * (2*pi*raio) / (60*i)`.
 - Write outputs into out/ subfolders (gitignored) when creating artifacts.
-- Supervisor (novo_tribometro.py) grava em: Desktop\\Repositorio\\<dd-mm-aaaa - Estudo X - Nome do ensaio>\\<REP N>.
+- Supervisor (novo_tribometro.py) grava em: Desktop\\Repositorio\\<AAAA-MM-DD - PoD - NomeEnsaio_Estudo-Repeticao>.
   Arquivos finais: <data>-<nome_ensaio>-<estudo>-<repeticao>_I.csv, _P.csv, _T.csv.
   Pasta tecnica: DadosDev\\ com <arquivo_t>.merge_source, dlg.csv, drive.csv, schedule.csv, graph_events.log, dlg_logger_events.log e a5_speed_events.log.
 

@@ -13,7 +13,7 @@ Objetivos praticos:
   como START, PAUSE, RESUME e STOP.
 - Gerar estrutura de saida previsivel (pasta + CSVs) para facilitar auditoria.
 - Rodar merge final dos logs e entregar um CSV consolidado ao supervisorio.
-- Separar artefatos tecnicos em subpasta DadosDev para nao poluir a pasta REP.
+- Separar artefatos tecnicos em subpasta DadosDev para nao poluir a pasta de execucao.
 
 Escopo:
 - Resolver caminhos de executaveis.

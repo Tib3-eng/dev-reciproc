@@ -18,11 +18,11 @@ Modos presentes no arquivo:
 - Fluxo da versao anterior: rotinas locais go/go_p mantidas para referencia tecnica.
 
 Saidas de ensaio:
-- Desktop\\Repositorio\\<data - estudo - nome>\\REP N\\
+- Desktop\\Repositorio\\<AAAA-MM-DD - PoD - NomeEnsaio_Estudo-Repeticao>\\
   <data>-<nome_ensaio>-<estudo>-<repeticao>_I.csv,
   <data>-<nome_ensaio>-<estudo>-<repeticao>_P.csv,
   <data>-<nome_ensaio>-<estudo>-<repeticao>_T.csv.
-- Desktop\\Repositorio\\<data - estudo - nome>\\REP N\\DadosDev\\
+- Desktop\\Repositorio\\<AAAA-MM-DD - PoD - NomeEnsaio_Estudo-Repeticao>\\DadosDev\\
   <arquivo_t>.merge_source, dlg.csv, drive.csv, schedule.csv,
   graph_events.log, dlg_logger_events.log, a5_speed_events.log.
 
@@ -651,29 +651,94 @@ def _resolve_ch1_calib_path(repo_root, dlg_exe):
     """
     path_ch = "calib_CH1.json"
     path_out_ch = os.path.join("out", "calib_CH1.json")
-    candidates = []
-    candidates.append("calib.json")
-    candidates.append("calib")
-    candidates.append(path_ch)
-    candidates.append(path_out_ch)
+
+    def _load_json_quick(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return None
+
+    # 1) Prioriza sempre arquivo explicito de CH1.
+    explicit_candidates = [path_ch, path_out_ch]
+    generic_candidates = ["calib.json", "calib"]
 
     if dlg_exe:
         exe_dir = os.path.dirname(dlg_exe)
-        candidates.append(os.path.join(exe_dir, "calib.json"))
-        candidates.append(os.path.join(exe_dir, "calib"))
-        candidates.append(os.path.join(exe_dir, path_ch))
-        candidates.append(os.path.join(exe_dir, path_out_ch))
+        explicit_candidates.append(os.path.join(exe_dir, path_ch))
+        explicit_candidates.append(os.path.join(exe_dir, path_out_ch))
+        generic_candidates.append(os.path.join(exe_dir, "calib.json"))
+        generic_candidates.append(os.path.join(exe_dir, "calib"))
+
     # Fallback explicito para o mesmo diretorio usado por check_executables().
     if repo_root:
-        candidates.append(os.path.join(repo_root, "DLG4000", "bin", "Release", "calib.json"))
-        candidates.append(os.path.join(repo_root, "DLG4000", "bin", "Release", "calib"))
-        candidates.append(os.path.join(repo_root, "DLG4000", "bin", "Release", "calib_CH1.json"))
-        candidates.append(os.path.join(repo_root, "DLG4000", "bin", "Release", "out", "calib_CH1.json"))
+        release_dir = os.path.join(repo_root, "DLG4000", "bin", "Release")
+        explicit_candidates.append(os.path.join(release_dir, "calib_CH1.json"))
+        explicit_candidates.append(os.path.join(release_dir, "out", "calib_CH1.json"))
+        generic_candidates.append(os.path.join(release_dir, "calib.json"))
+        generic_candidates.append(os.path.join(release_dir, "calib"))
 
-    for path in candidates:
+    for path in explicit_candidates:
         if path and os.path.exists(path):
             return path
+
+    # 2) Em arquivo generico, aceita somente quando houver indicio de CH1.
+    for path in generic_candidates:
+        if not path or not os.path.exists(path):
+            continue
+        calib = _load_json_quick(path)
+        if not isinstance(calib, dict):
+            continue
+        if _is_ch1_calib_payload(calib, path):
+            return path
     return None
+
+
+def _is_ch1_calib_payload(calib, calib_path):
+    """
+    Valida se um payload de calibracao pertence ao CH1.
+
+    Regras:
+    - Nome do arquivo contendo calib_CH1.
+    - Campo channel igual a 1 ou CH1.
+    - Lista channels contendo 1.
+    - Em arquivo sem marcador explicito de canal, aceita por compatibilidade.
+    """
+    if not isinstance(calib, dict):
+        return False
+
+    is_ch1 = False
+    base_name = os.path.basename(calib_path).lower() if calib_path else ""
+    if "calib_ch1" in base_name:
+        is_ch1 = True
+
+    ch = calib.get("channel")
+    if not is_ch1 and ch is not None:
+        try:
+            if int(ch) == 1:
+                is_ch1 = True
+        except Exception:
+            try:
+                if str(ch).strip().upper() == "CH1":
+                    is_ch1 = True
+            except Exception:
+                pass
+
+    ch_list = calib.get("channels")
+    if not is_ch1 and isinstance(ch_list, list):
+        for item in ch_list:
+            try:
+                if int(item) == 1:
+                    is_ch1 = True
+                    break
+            except Exception:
+                pass
+
+    # Se houver marcador explicito e nao for CH1, rejeita.
+    if not is_ch1 and (ch is not None or isinstance(ch_list, list)):
+        return False
+
+    return True
 
 
 def _load_ch1_fit_data(repo_root, dlg_exe):
@@ -693,42 +758,8 @@ def _load_ch1_fit_data(repo_root, dlg_exe):
             calib = json.load(f)
         fit = calib.get("fit", {})
 
-        # Valida se o arquivo parece ser do CH1 sem depender de um unico schema.
-        # Formatos aceitos no projeto:
-        # - channel: 1
-        # - channel: "CH1"
-        # - channels: [1]
-        # - nome do arquivo calib_CH1.json
-        is_ch1 = False
-        base_name = os.path.basename(calib_path).lower()
-        if "calib_ch1" in base_name:
-            is_ch1 = True
-
-        ch = calib.get("channel")
-        if not is_ch1 and ch is not None:
-            try:
-                if int(ch) == 1:
-                    is_ch1 = True
-            except Exception:
-                try:
-                    ch_txt = str(ch).strip().upper()
-                    if ch_txt == "CH1":
-                        is_ch1 = True
-                except Exception:
-                    pass
-
-        ch_list = calib.get("channels")
-        if not is_ch1 and isinstance(ch_list, list):
-            for item in ch_list:
-                try:
-                    if int(item) == 1:
-                        is_ch1 = True
-                        break
-                except Exception:
-                    pass
-
-        # Se o arquivo identifica canal explicitamente e nao for CH1, ignora.
-        if not is_ch1 and (ch is not None or isinstance(ch_list, list)):
+        # Se o arquivo identificar explicitamente outro canal, ignora.
+        if not _is_ch1_calib_payload(calib, calib_path):
             return None
 
         return {
@@ -835,6 +866,281 @@ def _capture_ch1_mean_tara(dlg_exe, dlg_ip, dlg_port, duration_s=30, rate_hz=50.
     raise last_err if last_err else RuntimeError("falha desconhecida na captura de tara")
 
 
+def _write_zero_debug_csv(csv_path, report):
+    """
+    Registra resultado da rotina de zeramento em CSV (modo append).
+
+    O arquivo eh usado para auditoria e suporte tecnico, mantendo historico
+    de intercept/slope antes e depois de cada tara.
+    """
+    if not csv_path:
+        return
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    need_header = not os.path.exists(csv_path)
+    with open(csv_path, "a", encoding="utf-8", newline="\n") as f:
+        if need_header:
+            f.write(
+                "timestamp;modo;status;calib_path;bind_port;n_validas;media_ch1;"
+                "slope_antes;slope_depois;intercept_antes;intercept_depois;"
+                "delta_slope;delta_intercept;erro\n"
+            )
+        f.write(
+            f"{report.get('timestamp','')};"
+            f"{report.get('mode','')};"
+            f"{report.get('status','')};"
+            f"{report.get('calib_path','')};"
+            f"{report.get('bind_port','')};"
+            f"{report.get('n_validas','')};"
+            f"{report.get('media_ch1','')};"
+            f"{report.get('slope_before','')};"
+            f"{report.get('slope_after','')};"
+            f"{report.get('intercept_before','')};"
+            f"{report.get('intercept_after','')};"
+            f"{report.get('delta_slope','')};"
+            f"{report.get('delta_intercept','')};"
+            f"{report.get('error','')}\n"
+        )
+
+
+def _build_zero_avulso_log_path():
+    """
+    Define o caminho de log da tara avulsa.
+
+    Estrutura:
+      <REPO_BASE>\\ZeroAvulso\\zero_avulso_<timestamp>.csv
+    """
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_dir = os.path.join(REPO_BASE, "ZeroAvulso")
+    os.makedirs(base_dir, exist_ok=True)
+    return os.path.join(base_dir, f"zero_avulso_{ts}.csv")
+
+
+def _run_ch1_tara_core(repo_root, dlg_exe, calib_path, duration_s=30, rate_hz=50.0):
+    """
+    Executa a tara do CH1 e retorna um relatorio detalhado.
+
+    Regras:
+    - Ajusta somente `fit.intercept`.
+    - Preserva `fit.slope` de forma explicita.
+    - Reabre o arquivo apos gravacao para confirmar valores aplicados.
+    """
+    dlg_ip = getattr(orch, "DEFAULT_DLG_IP", "192.168.1.100")
+    dlg_port = getattr(orch, "DEFAULT_DLG_PORT", 41401)
+    mean_ch1, n_valid, bind_used = _capture_ch1_mean_tara(
+        dlg_exe=dlg_exe,
+        dlg_ip=dlg_ip,
+        dlg_port=dlg_port,
+        duration_s=duration_s,
+        rate_hz=rate_hz,
+    )
+
+    with open(calib_path, "r", encoding="utf-8") as f:
+        calib = json.load(f)
+    fit = calib.get("fit")
+    if not isinstance(fit, dict):
+        raise RuntimeError("arquivo de calibracao sem bloco fit")
+
+    slope_before = float(fit.get("slope", 1.0))
+    intercept_before = float(fit.get("intercept", 0.0))
+
+    # Tara: remove o offset medio medido no repouso.
+    intercept_after = intercept_before - mean_ch1
+    fit["intercept"] = intercept_after
+    # Guarda de consistencia: slope nao deve ser alterado na tara.
+    fit["slope"] = slope_before
+
+    calib_tmp = calib_path + ".tmp"
+    with open(calib_tmp, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(calib, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    os.replace(calib_tmp, calib_path)
+
+    with open(calib_path, "r", encoding="utf-8") as f:
+        calib_after = json.load(f)
+    fit_after = calib_after.get("fit", {})
+    slope_after = float(fit_after.get("slope", slope_before))
+    intercept_after_file = float(fit_after.get("intercept", intercept_after))
+
+    if abs(slope_after - slope_before) > 1e-12:
+        raise RuntimeError(
+            "Slope foi alterado durante a tara (esperado: sem alteracao)."
+        )
+
+    return {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "calib_path": calib_path,
+        "bind_port": bind_used,
+        "n_validas": n_valid,
+        "media_ch1": f"{mean_ch1:.10g}",
+        "slope_before": f"{slope_before:.12g}",
+        "slope_after": f"{slope_after:.12g}",
+        "intercept_before": f"{intercept_before:.12g}",
+        "intercept_after": f"{intercept_after_file:.12g}",
+        "delta_slope": f"{(slope_after - slope_before):.12g}",
+        "delta_intercept": f"{(intercept_after_file - intercept_before):.12g}",
+    }
+
+
+def _ask_ready_step_dialog(title, body_text, ok_text):
+    """
+    Exibe dialogo modal com botao de confirmacao customizado.
+    """
+    result = {"ok": False}
+    dlg = tkinter.Toplevel(root)
+    dlg.title(title)
+    dlg.resizable(False, False)
+    dlg.transient(root)
+    dlg.grab_set()
+
+    frm = tkinter.Frame(dlg, padx=16, pady=12)
+    frm.pack(fill="both", expand=True)
+    lbl = tkinter.Label(frm, text=body_text, justify="left", anchor="w")
+    lbl.pack(fill="x", pady=(0, 12))
+
+    btns = tkinter.Frame(frm)
+    btns.pack(fill="x")
+
+    def _ok():
+        result["ok"] = True
+        dlg.destroy()
+
+    def _cancel():
+        result["ok"] = False
+        dlg.destroy()
+
+    tkinter.Button(btns, text=ok_text, width=24, command=_ok).pack(side="left")
+    tkinter.Button(btns, text="Cancelar", width=12, command=_cancel).pack(side="right")
+
+    dlg.protocol("WM_DELETE_WINDOW", _cancel)
+    dlg.update_idletasks()
+    try:
+        x = root.winfo_rootx() + max(20, (root.winfo_width() - dlg.winfo_width()) // 2)
+        y = root.winfo_rooty() + max(20, (root.winfo_height() - dlg.winfo_height()) // 2)
+        dlg.geometry(f"+{x}+{y}")
+    except Exception:
+        pass
+    root.wait_window(dlg)
+    return result["ok"]
+
+
+def _cleanup_run_folder_on_abort():
+    """
+    Remove a pasta criada para o ensaio atual quando o inicio e cancelado.
+    """
+    global caminho_arquivo_1, caminho_arquivo_2, caminho_pasta
+    global caminho_dlg_csv, caminho_drive_csv, caminho_turn_csv, caminho_merge_csv, caminho_schedule_csv
+    global graph_events_log_path
+    try:
+        if caminho_pasta and os.path.exists(caminho_pasta):
+            shutil.rmtree(caminho_pasta, ignore_errors=True)
+    except Exception:
+        pass
+    caminho_arquivo_1 = ""
+    caminho_arquivo_2 = ""
+    caminho_dlg_csv = ""
+    caminho_drive_csv = ""
+    caminho_turn_csv = ""
+    caminho_merge_csv = ""
+    caminho_schedule_csv = ""
+    graph_events_log_path = ""
+
+
+def _run_auto_tara_before_start(repo_root, exe_info):
+    """
+    Executa fluxo guiado de tara antes de iniciar cada ensaio.
+
+    Passos:
+    1) Instrui operador a deixar sistema sem carga.
+    2) Captura tara (30 s) e ajusta intercept do CH1.
+    3) Instrui operador a recolocar carga e preparar inicio do ensaio.
+    """
+    dlg_exe = exe_info.get("dlg_exe")
+    if not dlg_exe:
+        messagebox.showerror(
+            "Calibracao obrigatoria",
+            "dlg_logger_ipc.exe nao encontrado.\n\nNao e possivel iniciar sem zerar a celula."
+        )
+        return False
+
+    calib_path = _resolve_ch1_calib_path(repo_root, dlg_exe)
+    if not calib_path:
+        messagebox.showerror(
+            "Calibracao obrigatoria",
+            "Arquivo de calibracao CH1 nao encontrado (calib_CH1.json).\n\n"
+            "Nao e possivel iniciar sem zerar a celula."
+        )
+        return False
+
+    prev_text = label_ensaio_estado.cget("text")
+    prev_fg = label_ensaio_estado.cget("fg")
+    label_ensaio_estado.config(text="Preparando tara automatica", fg="#0078D4")
+    root.update_idletasks()
+
+    messagebox.showinfo(
+        "Calibracao antes do ensaio",
+        "Antes de iniciar, sera executado o zeramento automatico da celula de carga."
+    )
+    if not _ask_ready_step_dialog(
+        "Preparacao para zeramento",
+        "Remova a carga e deixe o braco do pino em equilibrio,\nsem contato com o disco.",
+        "Em condicoes de zerar",
+    ):
+        label_ensaio_estado.config(text=prev_text, fg=prev_fg)
+        return False
+
+    log_report_path = os.path.join(caminho_pasta, "DadosDev", "zero_ensaio.csv")
+    report = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "mode": "auto_ensaio",
+    }
+
+    try:
+        label_ensaio_estado.config(text="Coletando dados para tara", fg="#0078D4")
+        root.update()
+        rate_hz = getattr(orch, "DEFAULT_RATE_HZ", 50.0)
+        report.update(
+            _run_ch1_tara_core(
+                repo_root=repo_root,
+                dlg_exe=dlg_exe,
+                calib_path=calib_path,
+                duration_s=30,
+                rate_hz=rate_hz,
+            )
+        )
+        report["status"] = "OK"
+        report["error"] = ""
+        _write_zero_debug_csv(log_report_path, report)
+        log_msg(
+            "Tara auto: ok (path={0}, slope {1} -> {2}, intercept {3} -> {4}).".format(
+                report.get("calib_path", ""),
+                report.get("slope_before", ""),
+                report.get("slope_after", ""),
+                report.get("intercept_before", ""),
+                report.get("intercept_after", ""),
+            )
+        )
+    except Exception as e:
+        report["status"] = "FAIL"
+        report["error"] = str(e).replace("\n", " ").replace(";", ",")
+        _write_zero_debug_csv(log_report_path, report)
+        label_ensaio_estado.config(text=prev_text, fg=prev_fg)
+        messagebox.showerror("Calibracao obrigatoria", f"Falha no zeramento automatico.\n\n{e}")
+        return False
+
+    label_ensaio_estado.config(text="Aguardando condicao para iniciar ensaio", fg="#0078D4")
+    root.update_idletasks()
+    if not _ask_ready_step_dialog(
+        "Preparacao final",
+        "Coloque a carga e posicione o pino sobre o disco.",
+        "Em condicoes de iniciar ensaio",
+    ):
+        label_ensaio_estado.config(text=prev_text, fg=prev_fg)
+        return False
+
+    label_ensaio_estado.config(text=prev_text, fg=prev_fg)
+    return True
+
+
 def zerar_celula():
     """
     Executa tara de CH1:
@@ -883,50 +1189,51 @@ def zerar_celula():
     def _worker():
         ok = False
         out_msg = ""
+        report = {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "mode": "manual_avulso",
+        }
+        zero_log_path = _build_zero_avulso_log_path()
         try:
-            dlg_ip = getattr(orch, "DEFAULT_DLG_IP", "192.168.1.100")
-            dlg_port = getattr(orch, "DEFAULT_DLG_PORT", 41401)
             rate_hz = getattr(orch, "DEFAULT_RATE_HZ", 50.0)
-            mean_ch1, n_valid, bind_used = _capture_ch1_mean_tara(
-                dlg_exe=dlg_exe,
-                dlg_ip=dlg_ip,
-                dlg_port=dlg_port,
-                duration_s=30,
-                rate_hz=rate_hz,
+            report.update(
+                _run_ch1_tara_core(
+                    repo_root=repo_root,
+                    dlg_exe=dlg_exe,
+                    calib_path=calib_path,
+                    duration_s=30,
+                    rate_hz=rate_hz,
+                )
             )
-
-            with open(calib_path, "r", encoding="utf-8") as f:
-                calib = json.load(f)
-            fit = calib.get("fit")
-            if not isinstance(fit, dict):
-                raise RuntimeError("arquivo de calibracao sem bloco fit")
-
-            old_intercept = float(fit.get("intercept", 0.0))
-            # Tara: remove o offset medio medido no repouso.
-            new_intercept = old_intercept - mean_ch1
-            fit["intercept"] = new_intercept
-
-            calib_tmp = calib_path + ".tmp"
-            with open(calib_tmp, "w", encoding="utf-8", newline="\n") as f:
-                json.dump(calib, f, indent=2, ensure_ascii=False)
-                f.write("\n")
-            os.replace(calib_tmp, calib_path)
-
             ok = True
+            report["status"] = "OK"
+            report["error"] = ""
+            _write_zero_debug_csv(zero_log_path, report)
             out_msg = (
                 f"Tara aplicada com sucesso.\n\n"
-                f"Arquivo: {calib_path}\n"
-                f"Bind usado: {bind_used}\n"
-                f"Amostras validas CH1: {n_valid}\n"
-                f"Media CH1 (30 s): {mean_ch1:.6f}\n"
-                f"Intercept antigo: {old_intercept:.6f}\n"
-                f"Intercept novo: {new_intercept:.6f}"
+                f"Arquivo: {report.get('calib_path','')}\n"
+                f"Bind usado: {report.get('bind_port','')}\n"
+                f"Amostras validas CH1: {report.get('n_validas','')}\n"
+                f"Media CH1 (30 s): {report.get('media_ch1','')}\n"
+                f"Slope antigo: {report.get('slope_before','')}\n"
+                f"Slope novo: {report.get('slope_after','')}\n"
+                f"Intercept antigo: {report.get('intercept_before','')}\n"
+                f"Intercept novo: {report.get('intercept_after','')}\n\n"
+                f"Log avulso: {zero_log_path}"
             )
             log_msg(
-                f"Tara CH1: ok (n={n_valid}, media={mean_ch1:.6f}, "
-                f"intercept: {old_intercept:.6f} -> {new_intercept:.6f})."
+                "Tara CH1 manual: ok (path={0}, slope {1} -> {2}, intercept {3} -> {4}).".format(
+                    report.get("calib_path", ""),
+                    report.get("slope_before", ""),
+                    report.get("slope_after", ""),
+                    report.get("intercept_before", ""),
+                    report.get("intercept_after", ""),
+                )
             )
         except Exception as e:
+            report["status"] = "FAIL"
+            report["error"] = str(e).replace("\n", " ").replace(";", ",")
+            _write_zero_debug_csv(zero_log_path, report)
             out_msg = f"Falha ao executar tara da celula.\n\n{e}"
             log_msg(f"Tara CH1: falha ({e}).")
 
@@ -1438,13 +1745,14 @@ def fechar_janela():
 
 
 # salvar_arquivo():
-# - Monta caminho de saida no formato:
-#   REPO_BASE/<data - estudo - ensaio>/REP N/
-# - Bloqueia duplicidade da mesma repeticao.
+# - Monta caminho de saida em pasta unica por execucao:
+#   REPO_BASE/<AAAA-MM-DD - PoD - NomeEnsaio_Estudo-Repeticao>/
+# - Bloqueia duplicidade pela combinacao data + nome + estudo + repeticao.
+#   Se a pasta existir, solicita confirmacao explicita para sobrescrever.
 # - Define nomes de saida para arquivos finais com padrao:
 #   <data>-<nome_ensaio>-<estudo>-<repeticao>_<sufixo>.csv
 #   sufixos: _I (info), _P (atrito por volta), _T (resultado ensaio).
-# - Durante o ensaio, dlg.csv/drive.csv ficam na pasta REP e ao final
+# - Durante o ensaio, dlg.csv/drive.csv ficam na pasta da execucao e ao final
 #   sao movidos para DadosDev.
 # - Inicializa arquivos vazios para evitar erro de append posterior.
 def salvar_arquivo():
@@ -1456,47 +1764,79 @@ def salvar_arquivo():
     # ---------------------------------------------------------------------------------
     # Estrutura padrao:
     # Pasta base: REPO_BASE
-    # Pasta do ensaio: "dd-mm-aaaa - Estudo X - Nome ensaio"
-    # Subpasta de repeticao: "REP N"
-    # Bloqueio de duplicidade considera a repeticao.
+    # Pasta da execucao: "AAAA-MM-DD - PoD - NomeEnsaio_Estudo-Repeticao"
+    # Bloqueio de duplicidade considera data + nome + estudo + repeticao.
     # ---------------------------------------------------------------------------------
     nome_ensaio = entries_left["Nome do ensaio"].get().strip()
     estudo = entries_left["Estudo"].get().strip()
     repeticao = entries_left["Repetição"].get().strip()
 
-    # Windows nao aceita "/" em nome de pasta, por isso usamos dd-mm-aaaa.
-    data_str = datetime.now().strftime("%d-%m-%Y")
+    # Formato ISO no nome da pasta melhora ordenacao no Explorer.
+    data_dir_str = datetime.now().strftime("%Y-%m-%d")
+    data_file_str = data_dir_str
 
     # Normaliza nomes para Windows (sem caracteres proibidos).
-    nome_pasta_ensaio = orch.sanitize_folder_name(f"{data_str} - Estudo {estudo} - {nome_ensaio}")
-    nome_subpasta_rep = orch.sanitize_folder_name(f"REP {repeticao}")
-    caminho_pasta_raiz = os.path.join(REPO_BASE, nome_pasta_ensaio)
-    caminho_pasta = os.path.join(caminho_pasta_raiz, nome_subpasta_rep)
+    nome_pasta_execucao = orch.sanitize_folder_name(
+        f"{data_dir_str} - PoD - {nome_ensaio}_{estudo}-{repeticao}"
+    )
+    caminho_pasta = os.path.join(REPO_BASE, nome_pasta_execucao)
 
     # Garante pasta base
     if not os.path.exists(REPO_BASE):
         os.makedirs(REPO_BASE, exist_ok=True)
 
-    # Bloqueia se repeticao ja existe para o mesmo ensaio.
+    # Se a pasta dessa execucao ja existir, pergunta se deve sobrescrever.
     if os.path.exists(caminho_pasta):
-        messagebox.showwarning(
-            "Nome já existe",
-            "Já existe um ensaio com esta combinação:\n"
-            "data + estudo + nome + repetição.\n\n"
-            "Altere 'Repetição' (ou os demais campos) para continuar."
+        deseja_sobrescrever = messagebox.askyesno(
+            "Repeticao ja existe",
+            "Ja existe um ensaio com esta combinacao:\n"
+            "AAAA-MM-DD + nome + estudo + repeticao.\n\n"
+            "Se voce clicar em 'Sim', a pasta atual sera APAGADA e "
+            "substituida pelos novos dados.\n\n"
+            "Deseja sobrescrever esta repeticao?",
+            icon="warning",
+            default="no",
         )
-        caminho_arquivo_1 = ""
-        caminho_arquivo_2 = ""
-        graph_events_log_path = ""
-        return
+        if not deseja_sobrescrever:
+            caminho_arquivo_1 = ""
+            caminho_arquivo_2 = ""
+            graph_events_log_path = ""
+            return
 
-    os.makedirs(caminho_pasta_raiz, exist_ok=True)
+        confirma_apagar = messagebox.askyesno(
+            "Confirmacao final",
+            "Confirmar sobrescrita da repeticao?\n\n"
+            "Todos os arquivos existentes nessa pasta serao removidos.",
+            icon="warning",
+            default="no",
+        )
+        if not confirma_apagar:
+            caminho_arquivo_1 = ""
+            caminho_arquivo_2 = ""
+            graph_events_log_path = ""
+            return
+
+        try:
+            # Guarda de seguranca: nunca permitir apagar a pasta base inteira.
+            if os.path.abspath(caminho_pasta) == os.path.abspath(REPO_BASE):
+                raise RuntimeError("Caminho de sobrescrita invalido.")
+            shutil.rmtree(caminho_pasta, ignore_errors=False)
+        except Exception as e:
+            messagebox.showerror(
+                "Erro ao sobrescrever",
+                f"Nao foi possivel apagar a repeticao existente.\n\n{e}"
+            )
+            caminho_arquivo_1 = ""
+            caminho_arquivo_2 = ""
+            graph_events_log_path = ""
+            return
+
     os.makedirs(caminho_pasta, exist_ok=True)
 
     # Prefixo dos arquivos finais solicitado:
     # data + "-" + nome_ensaio + "-" + estudo + "-" + repeticao.
     prefixo_arquivo = orch.sanitize_folder_name(
-        f"{data_str}-{nome_ensaio}-{estudo}-{repeticao}"
+        f"{data_file_str}-{nome_ensaio}-{estudo}-{repeticao}"
     )
 
     # Arquivos finais visiveis ao usuario.
@@ -2806,9 +3146,6 @@ def start_acquisition():
         )
         return
 
-    # Carrega os dados de calibracao CH1 (fit) usando a mesma busca do logger DLG.
-    ch1_fit = _load_ch1_fit_data(repo_root, exe_info.get("dlg_exe"))
-
     salvar_arquivo()
 
     # Se o usuario clicou em "Cancelar" na janela de salvar, a variavel continuara vazia.
@@ -2816,6 +3153,16 @@ def start_acquisition():
     if not caminho_arquivo_1 or not caminho_arquivo_2:
         print("Inicio cancelado: Nenhum local escolhido para salvar.")
         return
+
+    # Antes de iniciar cada ensaio, executa tara automatica obrigatoria.
+    if not _run_auto_tara_before_start(repo_root, exe_info):
+        _cleanup_run_folder_on_abort()
+        log_msg("Inicio cancelado: tara automatica nao concluida.")
+        return
+
+    # Carrega os dados de calibracao CH1 apos a tara, para registrar
+    # os valores efetivamente usados neste ensaio.
+    ch1_fit = _load_ch1_fit_data(repo_root, exe_info.get("dlg_exe"))
     
     try:
         # -----------------------------------------------------------------------------
@@ -3017,9 +3364,6 @@ def start_acquisition():
             try:
                 if caminho_pasta and os.path.exists(caminho_pasta):
                     shutil.rmtree(caminho_pasta, ignore_errors=True)
-                    pasta_pai = os.path.dirname(caminho_pasta)
-                    if pasta_pai and os.path.isdir(pasta_pai) and not os.listdir(pasta_pai):
-                        os.rmdir(pasta_pai)
             except Exception:
                 pass
             messagebox.showerror("Erro ao iniciar", f"Falha ao iniciar loggers C.\n\n{e}")
@@ -3069,8 +3413,8 @@ def start_acquisition():
             finally:
                 # Atualiza estado visual ao final
                 global running, is_paused, external_run_state, tempo_pause_inicio, timer_started, graph_events_log_path
-                # Apos o merge, os artefatos tecnicos vao para REP\\DadosDev.
-                # Atualiza o destino do graph_log para evitar recriar graph_events.log na raiz de REP.
+                # Apos o merge, os artefatos tecnicos vao para <pasta da execucao>\\DadosDev.
+                # Atualiza o destino do graph_log para evitar recriar graph_events.log na raiz da execucao.
                 try:
                     rep_dir = os.path.dirname(caminho_merge_csv)
                     dev_graph = os.path.join(rep_dir, "DadosDev", "graph_events.log")
