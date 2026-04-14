@@ -78,6 +78,8 @@ SupervisÃ³rio (Python/Tk):
 - orchestrator_runtime.py launches dlg_logger_ipc + a5_speed_logger in background and merges logs with merge_logs.
 - conversao mm/s->rpm no orchestrator usa modulo (abs) para enviar setpoint sempre positivo no modo velocidade.
 - UI mostra "Velocidade alvo atual" (mm/s) e "RPM Alvo atual" (setpoint enviado ao Drive).
+- A aba principal inclui bit "Monitoramento": ativa leitura DLG (CH1/CH2) sem ensaio, com janela fixa de 1 minuto nos graficos 1/2.
+- Com monitoramento ativo, o botao Iniciar fica desabilitado; nao e permitido ativar monitoramento durante ensaio/tara.
 - A UI nao usa mais aba de log; mensagens seguem para console e status visuais.
 - Supervisório grava `graph_events.log` por ensaio com diagnostico de confiabilidade dos graficos (DLG tail, voltas por idx, gaps, extremos).
 - A aba "configuracoes adicionais" permite escolher diretorio base fixo dos ensaios; valor persistido em settings local (APPDATA).
@@ -85,11 +87,18 @@ SupervisÃ³rio (Python/Tk):
 - Tabela da UI: `Voltas_pin` = distancia/(2*pi*raio) e `Voltas_mot` = i * Voltas_pin.
 - A aba "configuracoes adicionais" inclui botao "Configurar canais" para abrir CalibraDLG_UI diretamente, com bloqueio se ensaio/processos estiverem ativos.
 - Botao "Configurar Eixos Y (Min / Max)" abre popup compacto com 2 linhas (Temperatura/Grafico 1 e Atrito-forca/Grafico 2), com modo Automatico (padrao) e campos Min/Max manuais.
-- Botao "Configurar eixo X" abre popup para Temperatura+CoF com modo Automatico (duracao total prevista) ou Manual (janela em minutos com varredura ciclica; ao completar a janela reinicia do zero).
+- Botao "Configurar eixo X" abre popup com 2 blocos: (1) Temperatura+CoF com modo Automatico (duracao total prevista) ou Manual (janela em minutos com varredura ciclica), e (2) Grafico 3 com Automatico (distancia total prevista) ou Manual (janela em mm com varredura ciclica).
+- A UI inclui aba "graficos" para visualizacao 2x2 em tempo real: Temperatura + CoF (esquerda) e processamento por volta + por distancia (direita), reutilizando as mesmas configuracoes de eixo X/Y da aba principal.
+- Na aba "graficos", os dois paineis da direita (volta/distancia) exibem atrito no eixo esquerdo e velocidade media (mm/s) no eixo direito.
+- Ao abrir a aba "graficos", a UI entra em modo foco de desempenho: colapsa o painel lateral de graficos da aba principal (sem desmontar layout com pack_forget); ao sair da aba, restaura a largura do painel sem perder continuidade dos dados.
+- Modo foco da aba "graficos" usa throttle de animacao (intervalos lentos em background) para reduzir custo de troca de aba sem stop/start agressivo das animacoes.
+- Renderizacao dos graficos na UI aplica decimacao apenas para exibicao (downsample visual), mantendo dados completos para processamento/arquivo.
 - Alternar eixo X entre manual/automatico durante ensaio preserva historico completo dos graficos 1/2; ao voltar para automatico, a serie volta a mostrar desde o inicio do ensaio.
 - Grafico 2 exibe CoF (CH1/Forca normal) com legenda "CoF" e eixo Y "CoF [-]".
-- Grafico 3 usa eixo X em voltas do pino (considera `Relacao mecanica (i)`), nao em voltas do motor.
-- Grafico 3 (atrito por volta) e calculado em tempo real no supervisÃ³rio a partir de `dlg.csv + drive.csv` (sem stream TURN em C).
+- A aba "configuracoes adicionais" inclui campo persistente "Tamanho do intervalo (mm)" para agregacao do grafico 3 e arquivo _P.
+- Grafico 3 usa eixo X por distancia acumulada do pino (mm), derivada de `P0B-09` + `i = D2/D1` + raio.
+- Grafico 3 (atrito por distancia) e calculado em tempo real no supervisÃ³rio a partir de `dlg.csv + drive.csv` (sem stream TURN em C).
+- Grafico 3 plota tambem `Velocidade media` (mm/s) em eixo Y secundario, convertida de RPM medio do motor por intervalo/volta com `i = D2/D1` e raio do pino.
 - Tail dos CSVs em tempo real (DLG/turnos) usa refresh de EOF no Windows para evitar congelar atualizacao ate o fim do ensaio.
 - Tail dos CSVs em tempo real deve consumir apenas linhas completas (terminadas em '\\n') para evitar parse de linha parcial durante append.
 - Tail threads do supervisÃ³rio usam token de ensaio para evitar duplicacao de pontos entre execucoes consecutivas.
@@ -99,10 +108,10 @@ SupervisÃ³rio (Python/Tk):
 - Se o cronometro nao iniciar por falta de amostras validas do DLG no tempo limite, o supervisÃ³rio aborta o ensaio externo e encerra subprocessos (evita corrida com dlg.csv todo em erro).
 - Taxa padrao de aquisicao no pipeline externo (DLG + Drive) ajustada para 50 Hz; manter ambas iguais para sincronismo.
 - wait_and_merge has fallback merge in Python if merge_logs fails or resultado_ensaio.csv is missing.
-- wait_and_merge reconstrói `atrito_por_volta.csv` em Python ao final de todo ensaio para garantir consistencia do arquivo final com os CSVs completos.
+- wait_and_merge reconstrói o arquivo _P por distancia em Python ao final de todo ensaio para garantir consistencia do arquivo final com os CSVs completos.
 - Rebuild offline em Python usa a mesma regra de wrap/backstep do C (sem `%` direto no delta) para evitar sobrecontagem de voltas por jitter.
 - Outputs go to Desktop\\Repositorio\\<AAAA-MM-DD - PoD - NomeEnsaio_Estudo-Repeticao> with arquivos finais nomeados por padrao:
-  <data>-<nome_ensaio>-<estudo>-<repeticao>_I.csv (info), _P.csv (atrito por volta), _T.csv (resultado ensaio).
+  <data>-<nome_ensaio>-<estudo>-<repeticao>_I.csv (info), _P.csv (atrito por distancia), _T.csv (resultado ensaio).
 - info_ensaio.csv inclui bloco "Dados de calibracao" com fit do CH1 (slope, intercept, r2) usando a mesma busca do dlg_logger_ipc (calib.json/calib/calib_CH1.json/out + pasta do exe).
 - Artefatos tecnicos finais ficam em Desktop\\Repositorio\\<...>\\DadosDev\\:
   <arquivo_t>.merge_source, dlg.csv, drive.csv, schedule.csv, graph_events.log, dlg_logger_events.log, a5_speed_events.log.
@@ -154,11 +163,10 @@ DriveA5 (Modbus RTU / libmodbus):
 - a5_speed_logger aplica rampa linear de setpoint (3 s) entre trocas de segmento, pause/resume e stop de ensaio para reduzir tranco no motor.
 - a5_speed_logger escreve `a5_speed_events.log` ao lado do `drive.csv` com startup, START, pause/resume, progresso por segundo, erros de leitura e encerramento.
 - merge_logs: junta dlg.csv + drive.csv por indice de linha e gera CSV de resultado com colunas: idx,t_s,ch1..ch8,atrito,pos,rpm,dlg_err,drive_pos_err,drive_rpm_err.
-- Atrito por volta (tempo real e final) e processado em Python no supervisÃ³rio com alinhamento por idx entre `dlg.csv` e `drive.csv`.
-- Regra de voltas em Python usa unwrap orientado por direcao (RPM com deadband) e reconstrucao guiada por RPM/dt para tolerar gaps maiores que uma volta entre amostras validas, mantendo guarda de plausibilidade.
-- `atrito_por_volta.csv` e sempre reconstruido no final por `wait_and_merge` usando os CSVs completos.
-- Turn counting (C + Python) usa unwrap orientado por direcao (sinal de RPM com deadband de 5 rpm) e permite multi-wrap entre amostras quando o RPM medido indicar que mais de uma volta pode ter ocorrido no gap.
-- No supervisorio (agregacao em Python), `P0B-09` usa 1 ciclo por volta de motor e converte para voltas do pino por `voltas_pino = voltas_motor / i` (i = D2/D1).
+- Atrito por distancia (tempo real e final) e processado em Python no supervisorio com alinhamento por idx entre `dlg.csv` e `drive.csv`.
+- Regra de distancia em Python usa unwrap orientado por direcao (RPM com deadband) e reconstrucao guiada por RPM/dt para tolerar gaps grandes entre amostras validas, mantendo guarda de plausibilidade.
+- o arquivo _P por distancia e sempre reconstruido no final por `wait_and_merge` usando os CSVs completos.
+- No supervisorio (agregacao em Python), `P0B-09` usa 1 ciclo por volta de motor e converte para distancia do pino por `dist_inc = (voltas_motor / i) * (2*pi*raio)` (i = D2/D1).
 Field notes (DriveA5, based on recent tests):
 - Relative mode (P11-04=0) is more consistent than absolute, but still drifts if completion threshold is loose.
 - P05-21 (positioning completion threshold) around 20 caused ~20 count residual; lowering to 5 or 2 is recommended for tighter closure.
@@ -190,8 +198,9 @@ Operational constraints
 CSV conventions
 - ASCII logs and CSV only.
 - Fixed headers and units. Use "NULL" rows only for real losses.
-- `resultado_ensaio.csv` and `atrito_por_volta.csv` use `;` as column delimiter.
-- `atrito_por_volta.csv` inclui `velocidade_media_mm_s` por volta, derivada de `rpm_medio_volta` com `v = |rpm| * (2*pi*raio) / (60*i)`.
+- `resultado_ensaio.csv` and o arquivo _P por distancia use `;` as column delimiter.
+- Arquivos finais do grafico 3: _DP.csv (distancia) e _VP.csv (volta), ambos com `;` como delimitador.
+- o arquivo _P por distancia inclui `velocidade_media_mm_s` por intervalo, derivada de `rpm_medio_intervalo` com `v = |rpm| * (2*pi*raio) / (60*i)`.
 - Write outputs into out/ subfolders (gitignored) when creating artifacts.
 - Supervisor (novo_tribometro.py) grava em: Desktop\\Repositorio\\<AAAA-MM-DD - PoD - NomeEnsaio_Estudo-Repeticao>.
   Arquivos finais: <data>-<nome_ensaio>-<estudo>-<repeticao>_I.csv, _P.csv, _T.csv.
@@ -213,3 +222,6 @@ Agent behavior
 Multi-exe orchestration
 - Expect multiple executables (one per function). A supervisor program will orchestrate them.
 - Executables should exchange data via files: e.g., calibration tool writes a file that the main DLG logger reads.
+
+- Grafico 3 tem switch de visualizacao: Distancia (processamento por intervalo em mm) ou Volta (processamento por volta do pino).
+- O ensaio gera dois arquivos finais do grafico 3: _DP.csv (distancia) e _VP.csv (volta).

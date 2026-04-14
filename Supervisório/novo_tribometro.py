@@ -20,7 +20,8 @@ Modos presentes no arquivo:
 Saidas de ensaio:
 - Desktop\\Repositorio\\<AAAA-MM-DD - PoD - NomeEnsaio_Estudo-Repeticao>\\
   <data>-<nome_ensaio>-<estudo>-<repeticao>_I.csv,
-  <data>-<nome_ensaio>-<estudo>-<repeticao>_P.csv,
+  <data>-<nome_ensaio>-<estudo>-<repeticao>_DP.csv,
+  <data>-<nome_ensaio>-<estudo>-<repeticao>_VP.csv,
   <data>-<nome_ensaio>-<estudo>-<repeticao>_T.csv.
 - Desktop\\Repositorio\\<AAAA-MM-DD - PoD - NomeEnsaio_Estudo-Repeticao>\\DadosDev\\
   <arquivo_t>.merge_source, dlg.csv, drive.csv, schedule.csv,
@@ -118,12 +119,20 @@ external_run_state = None
 external_run_token = 0
 # Flag da rotina de tara para evitar execucoes concorrentes.
 tara_running = False
+# Estado do modo de monitoramento (DLG sem ensaio ativo).
+monitor_mode_active = False
+monitor_mode_token = 0
+monitor_proc = None
+monitor_tail_thread = None
+monitor_csv_path = ""
 
 # Persistencia simples de configuracoes do supervisório.
 # Caminho padrao de saida caso o usuario ainda nao tenha configurado.
 DEFAULT_REPO_BASE = os.path.join(os.path.expanduser("~"), "Desktop", "Repositorio")
 # Relacao mecanica default (i) usada na conversao mm/s -> rpm.
 DEFAULT_RELACAO = 1.0
+# Tamanho padrao do intervalo de agregacao do grafico 3 (mm).
+DEFAULT_INTERVALO_DIST_MM = 10.0
 APP_SETTINGS_DIR = os.path.join(
     os.getenv("LOCALAPPDATA") or os.path.expanduser("~"),
     "LATRIB"
@@ -194,6 +203,14 @@ except Exception:
     RELACAO_MECANICA = DEFAULT_RELACAO
 if RELACAO_MECANICA <= 0:
     RELACAO_MECANICA = DEFAULT_RELACAO
+
+# Intervalo de distancia (mm) para agregacao do grafico 3 e arquivo _P.
+try:
+    DIST_INTERVAL_MM = float(APP_SETTINGS.get("dist_interval_mm", DEFAULT_INTERVALO_DIST_MM))
+except Exception:
+    DIST_INTERVAL_MM = DEFAULT_INTERVALO_DIST_MM
+if DIST_INTERVAL_MM <= 0:
+    DIST_INTERVAL_MM = DEFAULT_INTERVALO_DIST_MM
 
 
 def _resource_path(name):
@@ -282,6 +299,23 @@ def _set_relacao_mecanica(valor):
     return saved_ok
 
 
+def _set_dist_interval_mm(valor):
+    """
+    Atualiza intervalo de distancia (mm), persiste em JSON e sincroniza UI.
+
+    Args:
+        valor (float): tamanho do intervalo em milimetros.
+    """
+    global DIST_INTERVAL_MM, APP_SETTINGS
+    DIST_INTERVAL_MM = valor
+    APP_SETTINGS["dist_interval_mm"] = DIST_INTERVAL_MM
+    saved_ok = _save_app_settings(APP_SETTINGS)
+    if "dist_interval_var" in globals():
+        dist_interval_var.set(f"{DIST_INTERVAL_MM:.6g}")
+    log_msg(f"Intervalo de distancia definido para: {DIST_INTERVAL_MM:.6g} mm")
+    return saved_ok
+
+
 def salvar_relacao_mecanica():
     """
     Handler da UI para validar e salvar o campo de relacao mecanica.
@@ -316,6 +350,32 @@ def salvar_relacao_mecanica():
         messagebox.showwarning(
             "Relacao",
             "Relacao aplicada em memoria, mas houve falha ao salvar configuracao local."
+        )
+
+
+def salvar_intervalo_distancia():
+    """
+    Handler da UI para validar e salvar o intervalo do grafico 3 por distancia.
+    """
+    txt = dist_interval_var.get().strip().replace(",", ".")
+    if not txt:
+        messagebox.showwarning("Intervalo", "Informe um valor para o intervalo de distancia.")
+        return
+    try:
+        valor = float(txt)
+    except Exception:
+        messagebox.showwarning("Intervalo", "Valor invalido. Use numero maior que zero.")
+        return
+    if valor <= 0:
+        messagebox.showwarning("Intervalo", "Intervalo deve ser maior que zero.")
+        return
+    saved_ok = _set_dist_interval_mm(valor)
+    if saved_ok:
+        messagebox.showinfo("Intervalo", f"Intervalo de distancia salvo: {valor:.6g} mm")
+    else:
+        messagebox.showwarning(
+            "Intervalo",
+            "Intervalo aplicado em memoria, mas houve falha ao salvar configuracao local."
         )
 
 
@@ -520,6 +580,22 @@ def _set_status(label, ok):
         label.config(text='OK', fg='green')
     else:
         label.config(text='X', fg='red')
+
+
+def _set_start_button_state():
+    """
+    Atualiza estado do botao Iniciar conforme modo monitoramento.
+
+    Regras:
+    - Monitoramento ativo: impede inicio de ensaio para evitar concorrencia.
+    - Monitoramento inativo: restaura botao.
+    """
+    if "button_frame4_iniciar" not in globals():
+        return
+    try:
+        button_frame4_iniciar.config(state=("disabled" if monitor_mode_active else "normal"))
+    except Exception:
+        pass
 
 
 # Monta parametros de subprocesso no Windows para evitar console piscando.
@@ -1028,7 +1104,7 @@ def _cleanup_run_folder_on_abort():
     Remove a pasta criada para o ensaio atual quando o inicio e cancelado.
     """
     global caminho_arquivo_1, caminho_arquivo_2, caminho_pasta
-    global caminho_dlg_csv, caminho_drive_csv, caminho_turn_csv, caminho_merge_csv, caminho_schedule_csv
+    global caminho_dlg_csv, caminho_drive_csv, caminho_turn_dist_csv, caminho_turn_volta_csv, caminho_merge_csv, caminho_schedule_csv
     global graph_events_log_path
     try:
         if caminho_pasta and os.path.exists(caminho_pasta):
@@ -1039,7 +1115,8 @@ def _cleanup_run_folder_on_abort():
     caminho_arquivo_2 = ""
     caminho_dlg_csv = ""
     caminho_drive_csv = ""
-    caminho_turn_csv = ""
+    caminho_turn_dist_csv = ""
+    caminho_turn_volta_csv = ""
     caminho_merge_csv = ""
     caminho_schedule_csv = ""
     graph_events_log_path = ""
@@ -1405,6 +1482,9 @@ def check_status():
 aux = 2000
 # freq: taxa base para rotinas e escala de tempo visual.
 freq = 50.0
+# Janela fixa do modo monitoramento para os graficos 1 e 2.
+MONITOR_WINDOW_MIN = 1.0
+MONITOR_MAX_SAMPLES = 4000
 # running: estado geral do ensaio.
 running = False
 # ip: endereco de referencia para rotinas legadas de hardware.
@@ -1421,7 +1501,8 @@ caminho_arquivo_2 = ""
 # Caminhos usados pelo pipeline externo (DLG/Drive/Merge)
 caminho_dlg_csv = ""
 caminho_drive_csv = ""
-caminho_turn_csv = ""
+caminho_turn_dist_csv = ""
+caminho_turn_volta_csv = ""
 caminho_merge_csv = ""
 caminho_schedule_csv = ""
 graph_events_log_path = ""
@@ -1476,18 +1557,36 @@ y3_max = 1.0
 x_auto = True
 x_manual_min = 0.83
 x_auto_total_min = 0.83
+# Controle de escala X do grafico 3 (atrito por distancia).
+# - x3_auto=True  -> eixo X acompanha distancia total prevista.
+# - x3_auto=False -> eixo X usa janela manual em milimetros e reinicia por ciclos.
+x3_auto = True
+x3_manual_mm = 100.0
+x3_auto_total_mm = 100.0
+# Modo de visualizacao do grafico 3: "dist" (distancia) ou "turn" (volta).
+graph3_mode = "dist"
 # Referencia temporal para converter timestamp absoluto em tempo relativo no grafico.
 x_time_ref_s = None
 # Forca normal usada para converter CH1 em CoF no grafico 2.
 cof_force_normal_n = 1.0
 
-# Dados do grafico 3 (atrito). Inicializa para evitar NameError.
+# Dados do grafico 3 (atrito por distancia e por volta).
+# - p_strokes/p_atrito_*: serie por distancia (mantida como base historica).
+# - p_turn_strokes/p_turn_atrito_*: serie por volta.
 p_strokes = []
 p_atrito_ef = []
 p_atrito_max = []
 p_atrito_min = []
 p_coluna_velocidade = []
-p_turns_target = 0.0
+
+p_turn_strokes = []
+p_turn_atrito_ef = []
+p_turn_atrito_max = []
+p_turn_atrito_min = []
+p_turn_coluna_velocidade = []
+
+p_dist_target_mm = 0.0
+p_turn_target = 0.0
 
 # Configuracao do tamanho do bloco para salvar no disco (ex: a cada 1000 linhas)
 tamanho_bloco = 1000 
@@ -1740,6 +1839,8 @@ def go_p():
 # - Envia comando digital da versao anterior para seguranca (SetDigOut).
 # - Finaliza o loop da interface Tkinter.
 def fechar_janela():
+    if monitor_mode_active:
+        _stop_monitor_mode()
     myModule.SetDigOut(ip, 0, 1, 0)
     root.quit()
 
@@ -1751,14 +1852,14 @@ def fechar_janela():
 #   Se a pasta existir, solicita confirmacao explicita para sobrescrever.
 # - Define nomes de saida para arquivos finais com padrao:
 #   <data>-<nome_ensaio>-<estudo>-<repeticao>_<sufixo>.csv
-#   sufixos: _I (info), _P (atrito por volta), _T (resultado ensaio).
+#   sufixos: _I (info), _DP (processado por distancia), _VP (processado por volta), _T (resultado ensaio).
 # - Durante o ensaio, dlg.csv/drive.csv ficam na pasta da execucao e ao final
 #   sao movidos para DadosDev.
 # - Inicializa arquivos vazios para evitar erro de append posterior.
 def salvar_arquivo():
     
     global caminho_arquivo_1, caminho_arquivo_2, caminho_pasta
-    global caminho_dlg_csv, caminho_drive_csv, caminho_turn_csv, caminho_merge_csv, caminho_schedule_csv
+    global caminho_dlg_csv, caminho_drive_csv, caminho_turn_dist_csv, caminho_turn_volta_csv, caminho_merge_csv, caminho_schedule_csv
     global graph_events_log_path
 
     # ---------------------------------------------------------------------------------
@@ -1841,7 +1942,8 @@ def salvar_arquivo():
 
     # Arquivos finais visiveis ao usuario.
     caminho_arquivo_1 = os.path.join(caminho_pasta, f"{prefixo_arquivo}_I.csv")   # metadados do ensaio
-    caminho_turn_csv = os.path.join(caminho_pasta, f"{prefixo_arquivo}_P.csv")
+    caminho_turn_dist_csv = os.path.join(caminho_pasta, f"{prefixo_arquivo}_DP.csv")
+    caminho_turn_volta_csv = os.path.join(caminho_pasta, f"{prefixo_arquivo}_VP.csv")
     caminho_merge_csv = os.path.join(caminho_pasta, f"{prefixo_arquivo}_T.csv")
 
     # Arquivos tecnicos de aquisicao (movidos para DadosDev no fim).
@@ -2404,19 +2506,264 @@ def _tail_dlg_csv_for_graphs(dlg_csv_path, run_token=None):
         log_msg(f"DLG: erro lendo dlg.csv para graficos ({e}).")
 
 
-def _calc_expected_turns_from_table(raio_mm, relacao=1.0):
+def _tail_monitor_csv_for_graphs(dlg_csv_path, monitor_token):
     """
-    Estima o total de voltas fisicas a partir da tabela (distancia/raio).
+    Faz tail do dlg.csv no modo monitoramento (sem ensaio).
+
+    Objetivo:
+    - Exibir CH1/CH2 em tempo real com janela fixa de 1 minuto.
+    - Nao gerar efeitos no pipeline de ensaio.
+    """
+    t0 = time.time()
+    while monitor_mode_active and (monitor_token == monitor_mode_token) and not os.path.exists(dlg_csv_path):
+        if time.time() - t0 > 10.0:
+            log_msg("Monitoramento: timeout aguardando csv do DLG.")
+            return
+        time.sleep(0.05)
+
+    try:
+        with open(dlg_csv_path, "r", encoding="utf-8") as f:
+            header = f.readline()
+            if header and "idx" not in header.lower():
+                f.seek(0)
+
+            while monitor_mode_active and (monitor_token == monitor_mode_token):
+                line, complete = _read_complete_tail_line(f)
+                if not complete:
+                    try:
+                        f.seek(f.tell())
+                    except Exception:
+                        pass
+                    if monitor_proc is not None and monitor_proc.poll() is not None:
+                        break
+                    time.sleep(0.02)
+                    continue
+
+                parts = line.strip().split(",")
+                if len(parts) < 12:
+                    continue
+                try:
+                    t_s = float(parts[2])
+                except Exception:
+                    continue
+
+                err = parts[-1].strip()
+                vals = []
+                for i in range(8):
+                    v = parts[3 + i].strip()
+                    if v == "NULL" or err != "0":
+                        vals.append(float("nan"))
+                    else:
+                        try:
+                            vals.append(float(v))
+                        except Exception:
+                            vals.append(float("nan"))
+
+                sampsTimestamp.append(t_s)
+                for i in range(8):
+                    graSamps[i].append(vals[i])
+
+                # Mantem apenas historico suficiente para 1 min + margem.
+                while len(sampsTimestamp) > MONITOR_MAX_SAMPLES:
+                    sampsTimestamp.pop(0)
+                    for i in range(8):
+                        if graSamps[i]:
+                            graSamps[i].pop(0)
+    except Exception as e:
+        log_msg(f"Monitoramento: erro no tail do DLG ({e}).")
+
+
+def _start_monitor_mode():
+    """
+    Inicia modo monitoramento de CH1/CH2 sem ensaio ativo.
+    """
+    global monitor_mode_active, monitor_mode_token, monitor_proc, monitor_tail_thread, monitor_csv_path
+    global x_time_ref_s
+
+    if monitor_mode_active:
+        return True
+
+    if _is_running() or _external_pipeline_ativo() or tara_running:
+        messagebox.showwarning(
+            "Monitoramento",
+            "Nao e possivel ativar monitoramento durante ensaio/tara."
+        )
+        return False
+
+    repo_root = orch.find_repo_root()
+    exe_info = orch.check_executables(repo_root)
+    dlg_exe = exe_info.get("dlg_exe")
+    if not dlg_exe:
+        messagebox.showerror(
+            "Monitoramento",
+            "dlg_logger_ipc.exe nao encontrado.\n\nCompile os executaveis C antes de usar monitoramento."
+        )
+        return False
+
+    mon_dir = os.path.join(tempfile.gettempdir(), "LATRIB_monitor")
+    os.makedirs(mon_dir, exist_ok=True)
+    monitor_csv_path = os.path.join(
+        mon_dir, f"dlg_monitor_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    )
+
+    # Limpa buffers para comecar o monitor com serie limpa.
+    sampsTimestamp.clear()
+    for i in range(numChannels):
+        graSamps[i].clear()
+    x_time_ref_s = None
+
+    cmd = [
+        dlg_exe,
+        "--out", monitor_csv_path,
+        "--duration", "86400",
+        "--rate", f"{float(getattr(orch, 'DEFAULT_RATE_HZ', 50.0)):.0f}",
+        "--ip", str(getattr(orch, "DEFAULT_DLG_IP", "192.168.1.100")),
+        "--port", str(getattr(orch, "DEFAULT_DLG_PORT", 41401)),
+        "--bind-port", "0",
+        "--ipc",
+    ]
+
+    try:
+        monitor_proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            **_subprocess_no_window_kwargs()
+        )
+
+        ready = True
+        if hasattr(orch, "_wait_ready"):
+            ready = orch._wait_ready(monitor_proc, "DLG monitor", timeout_s=8.0)
+        if not ready:
+            raise RuntimeError("DLG monitor nao respondeu READY.")
+
+        if hasattr(orch, "_send_start"):
+            orch._send_start(monitor_proc)
+        else:
+            monitor_proc.stdin.write("START\n")
+            monitor_proc.stdin.flush()
+    except Exception as e:
+        try:
+            if monitor_proc and monitor_proc.poll() is None:
+                monitor_proc.terminate()
+        except Exception:
+            pass
+        monitor_proc = None
+        log_msg(f"Monitoramento: falha ao iniciar ({e}).")
+        messagebox.showerror("Monitoramento", f"Falha ao iniciar monitoramento.\n\n{e}")
+        return False
+
+    monitor_mode_active = True
+    monitor_mode_token += 1
+    tk = monitor_mode_token
+    monitor_tail_thread = threading.Thread(
+        target=_tail_monitor_csv_for_graphs,
+        args=(monitor_csv_path, tk),
+        daemon=True
+    )
+    monitor_tail_thread.start()
+    _set_start_button_state()
+    try:
+        label_ensaio_estado.config(text="Monitoramento", fg="#0078D4")
+    except Exception:
+        pass
+    log_msg("Monitoramento: ativo (CH1/CH2, janela fixa 1 min).")
+    return True
+
+
+def _stop_monitor_mode():
+    """
+    Encerra monitoramento e libera inicio de ensaio.
+    """
+    global monitor_mode_active, monitor_proc, monitor_tail_thread, monitor_csv_path
+    global x_time_ref_s
+
+    monitor_mode_active = False
+
+    try:
+        if monitor_proc is not None and monitor_proc.poll() is None:
+            if hasattr(orch, "_send_ipc"):
+                orch._send_ipc(monitor_proc, "STOP")
+            else:
+                monitor_proc.stdin.write("STOP\n")
+                monitor_proc.stdin.flush()
+            try:
+                monitor_proc.wait(timeout=2.0)
+            except Exception:
+                try:
+                    monitor_proc.terminate()
+                    monitor_proc.wait(timeout=1.0)
+                except Exception:
+                    try:
+                        monitor_proc.kill()
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+    monitor_proc = None
+    monitor_tail_thread = None
+    if "monitor_mode_var" in globals():
+        try:
+            monitor_mode_var.set(False)
+        except Exception:
+            pass
+    _set_start_button_state()
+    if not _is_running():
+        try:
+            label_ensaio_estado.config(text="Aguardando novo ensaio", fg="black")
+        except Exception:
+            pass
+
+    # Limpa buffers de monitor para evitar confusao visual ao sair do modo.
+    sampsTimestamp.clear()
+    for i in range(numChannels):
+        graSamps[i].clear()
+    x_time_ref_s = None
+
+    if monitor_csv_path:
+        try:
+            os.remove(monitor_csv_path)
+        except Exception:
+            pass
+        monitor_csv_path = ""
+
+    log_msg("Monitoramento: desativado.")
+
+
+def toggle_monitor_mode():
+    """
+    Callback do bit de monitoramento na aba principal.
+    """
+    if "monitor_mode_var" not in globals():
+        return
+
+    if bool(monitor_mode_var.get()):
+        if _is_running() or _external_pipeline_ativo() or tara_running:
+            messagebox.showwarning(
+                "Monitoramento",
+                "Nao e possivel ativar monitoramento durante ensaio/tara."
+            )
+            monitor_mode_var.set(False)
+            return
+        ok = _start_monitor_mode()
+        if not ok:
+            monitor_mode_var.set(False)
+    else:
+        _stop_monitor_mode()
+
+
+def _calc_expected_distance_mm_from_table():
+    """
+    Soma a distancia total prevista da tabela inferior (mm).
 
     Regras:
     - Soma apenas linhas com velocidade e distancia validas.
-    - Retorna voltas do pino (fisicas): distancia / (2*pi*raio).
+    - Ignora linhas vazias e valores <= 0.
     """
-    if raio_mm <= 0:
-        return 0.0
-    if relacao <= 0:
-        relacao = 1.0
-    total_pin = 0.0
+    total_dist_mm = 0.0
     for i in range(11):
         vel_txt = lista_entries_velocidade[i].get().strip().replace(",", ".")
         dist_txt = lista_entries_distancia[i].get().strip().replace(",", ".")
@@ -2429,8 +2776,20 @@ def _calc_expected_turns_from_table(raio_mm, relacao=1.0):
             continue
         if vel <= 0 or dist <= 0:
             continue
-        total_pin += dist / (2.0 * 3.141592653589793 * raio_mm)
-    return total_pin
+        total_dist_mm += dist
+    return total_dist_mm
+
+
+def _calc_expected_pin_turns_from_table(raio_mm):
+    """
+    Estima total de voltas fisicas do pino a partir da distancia total prevista.
+    """
+    if raio_mm <= 0:
+        return 0.0
+    total_dist_mm = _calc_expected_distance_mm_from_table()
+    if total_dist_mm <= 0:
+        return 0.0
+    return total_dist_mm / (2.0 * math.pi * raio_mm)
 
 
 def _num_or_nan(txt):
@@ -2443,23 +2802,53 @@ def _num_or_nan(txt):
         return float("nan")
 
 
-def _append_turn_point(volta_n, atr_med, atr_min, atr_max, rpm_med):
+def _rpm_motor_to_pin_speed_mm_s(rpm_arr, raio_mm, relacao_mecanica):
     """
-    Adiciona ponto do grafico 3 com deduplicacao por volta crescente.
+    Converte RPM do motor para velocidade linear no pino (mm/s).
+
+    Modelo fisico usado:
+    - i = D2 / D1 (D1 motor, D2 disco).
+    - rpm_disco = rpm_motor / i
+    - v_pino = |rpm_disco| * (2*pi*raio) / 60
+
+    Args:
+        rpm_arr (array-like): serie de RPM medio por intervalo (lado motor).
+        raio_mm (float): raio da trilha do pino em mm.
+        relacao_mecanica (float): i = D2 / D1.
+
+    Returns:
+        np.ndarray: serie de velocidade em mm/s (NaN para entradas invalidas).
+    """
+    try:
+        arr = np.asarray(rpm_arr, dtype=float)
+    except Exception:
+        return np.array([])
+    if arr.size == 0:
+        return np.array([])
+    if raio_mm <= 0:
+        return np.full(arr.shape, np.nan, dtype=float)
+    i = float(relacao_mecanica) if relacao_mecanica and relacao_mecanica > 0 else 1.0
+    return np.abs(arr) * (2.0 * math.pi * float(raio_mm)) / (60.0 * i)
+
+
+def _append_dist_point(dist_mm, atr_med, atr_min, atr_max, rpm_med):
+    """
+    Adiciona ponto do grafico 3 com deduplicacao por distancia crescente.
     """
     if p_strokes:
         try:
-            if float(volta_n) <= float(p_strokes[-1]):
-                graph_log(f"TURN drop non-monotonic: incoming={volta_n} last={p_strokes[-1]}")
+            if float(dist_mm) <= float(p_strokes[-1]):
+                graph_log(f"DIST drop non-monotonic: incoming={dist_mm} last={p_strokes[-1]}")
                 return False
-            gap = float(volta_n) - float(p_strokes[-1])
-            if gap > 1.2:
-                graph_log(f"TURN gap detected: last={p_strokes[-1]} incoming={volta_n} gap={gap:.3f}")
+            gap = float(dist_mm) - float(p_strokes[-1])
+            gap_warn = max(1.2, float(DIST_INTERVAL_MM) * 1.5)
+            if gap > gap_warn:
+                graph_log(f"DIST gap detected: last={p_strokes[-1]} incoming={dist_mm} gap_mm={gap:.3f}")
         except Exception:
             return False
     if not math.isnan(atr_max) and abs(atr_max) > 2000.0:
-        graph_log(f"TURN extreme atr_max={atr_max:.6f} volta={volta_n}")
-    p_strokes.append(volta_n)
+        graph_log(f"DIST extreme atr_max={atr_max:.6f} dist_mm={dist_mm}")
+    p_strokes.append(dist_mm)
     p_atrito_ef.append(atr_med)
     p_atrito_min.append(atr_min)
     p_atrito_max.append(atr_max)
@@ -2467,11 +2856,35 @@ def _append_turn_point(volta_n, atr_med, atr_min, atr_max, rpm_med):
     return True
 
 
+def _append_turn_point(turn_n, atr_med, atr_min, atr_max, rpm_med):
+    """
+    Adiciona ponto do grafico 3 (modo por volta) com deduplicacao crescente.
+    """
+    if p_turn_strokes:
+        try:
+            if float(turn_n) <= float(p_turn_strokes[-1]):
+                graph_log(f"TURN drop non-monotonic: incoming={turn_n} last={p_turn_strokes[-1]}")
+                return False
+            gap = float(turn_n) - float(p_turn_strokes[-1])
+            if gap > 1.2:
+                graph_log(f"TURN gap detected: last={p_turn_strokes[-1]} incoming={turn_n} gap={gap:.3f}")
+        except Exception:
+            return False
+    if not math.isnan(atr_max) and abs(atr_max) > 2000.0:
+        graph_log(f"TURN extreme atr_max={atr_max:.6f} turn={turn_n}")
+    p_turn_strokes.append(turn_n)
+    p_turn_atrito_ef.append(atr_med)
+    p_turn_atrito_min.append(atr_min)
+    p_turn_atrito_max.append(atr_max)
+    p_turn_coluna_velocidade.append(rpm_med)
+    return True
+
+
 def _tail_turn_stdout_for_graph3(turn_proc, run_token=None):
     """
-    Consome eventos TURN emitidos por turn_stats_ipc (IPC) e atualiza o grafico 3.
+    Consome eventos de agregacao emitidos por processo externo e atualiza o grafico 3.
     Formato esperado no stdout:
-      TURN,volta_n,atrito_med,atrito_min,atrito_max,rpm_medio_volta,n_total,n_falhas,n_validas,pct_perda
+      DIST,dist_mm,atrito_med,atrito_min,atrito_max,rpm_medio_intervalo,n_total,n_falhas,n_validas,pct_perda
     """
     if turn_proc is None or turn_proc.stdout is None:
         return
@@ -2494,16 +2907,18 @@ def _tail_turn_stdout_for_graph3(turn_proc, run_token=None):
             line = line.strip()
             if not line:
                 continue
-            if not line.startswith("TURN,"):
+            if not (line.startswith("DIST,") or line.startswith("TURN,")):
                 if line != "READY":
                     log_msg(f"Turnos: {line}")
                 continue
+            is_turn = line.startswith("TURN,")
+            is_dist = line.startswith("DIST,")
 
             parts = line.split(",")
             if len(parts) < 10:
                 continue
             try:
-                volta_n = float(parts[1])
+                x_val = float(parts[1])
             except Exception:
                 continue
 
@@ -2517,10 +2932,15 @@ def _tail_turn_stdout_for_graph3(turn_proc, run_token=None):
             if _turn_rt_get_mode() != "stream":
                 n_turn_ignored += 1
             else:
-                if _append_turn_point(volta_n, atr_med, atr_min, atr_max, rpm_med):
+                appended = False
+                if is_turn:
+                    appended = _append_turn_point(x_val, atr_med, atr_min, atr_max, rpm_med)
+                elif is_dist:
+                    appended = _append_dist_point(x_val, atr_med, atr_min, atr_max, rpm_med)
+                if appended:
                     n_turn_ok += 1
                     if not first_logged:
-                        log_msg("Turnos: primeira volta recebida para o grafico 3.")
+                        log_msg("Grafico 3: primeiro ponto recebido no stream.")
                         first_logged = True
                     if not math.isnan(atr_max) and abs(atr_max) > 2000.0:
                         n_turn_extreme += 1
@@ -2529,14 +2949,15 @@ def _tail_turn_stdout_for_graph3(turn_proc, run_token=None):
             n_turn += 1
             if n_turn % 20 == 0:
                 graph_log(
-                    "TURN stream stats read={0} ok={1} drop={2} ignored={3} extreme={4} last_volta={5}".format(
-                        n_turn, n_turn_ok, n_turn_drop, n_turn_ignored, n_turn_extreme, volta_n
+                    "GRAPH3 stream stats read={0} ok={1} drop={2} ignored={3} extreme={4} last_x={5} mode={6}".format(
+                        n_turn, n_turn_ok, n_turn_drop, n_turn_ignored, n_turn_extreme, x_val,
+                        ("TURN" if is_turn else "DIST")
                     )
                 )
         log_msg(f"Turn stream: stop token={run_token} turns={n_turn}.")
         _turn_rt_mark_stream_closed()
         graph_log(
-            "TURN stream stop read={0} ok={1} drop={2} ignored={3} extreme={4}".format(
+            "GRAPH3 stream stop read={0} ok={1} drop={2} ignored={3} extreme={4}".format(
                 n_turn, n_turn_ok, n_turn_drop, n_turn_ignored, n_turn_extreme
             )
         )
@@ -2547,18 +2968,18 @@ def _tail_turn_stdout_for_graph3(turn_proc, run_token=None):
 
 def _tail_turn_csv_for_graph3(turn_csv_path, turn_proc=None):
     """
-    Faz tail de atrito_por_volta.csv e alimenta o grafico 3 em tempo real.
+    Faz tail de arquivo _P e alimenta o grafico 3 em tempo real.
 
-    Formato esperado:
-      volta_n;atrito_med;atrito_min;atrito_max;rpm_medio_volta;velocidade_media_mm_s;
-      n_total_pontos;n_falhas;n_validas;pct_perda
+    Formatos aceitos:
+      distancia_mm;atrito_med;atrito_min;atrito_max;rpm_medio_intervalo;...
+      volta_n;atrito_med;atrito_min;atrito_max;rpm_medio_volta;...
     """
     waited_s = 0.0
     while _is_running() and not os.path.exists(turn_csv_path):
         time.sleep(0.05)
         waited_s += 0.05
         if waited_s >= 15.0:
-            log_msg("Turnos: aguardando atrito_por_volta.csv...")
+            log_msg("Distancia: aguardando arquivo _P...")
             waited_s = 0.0
 
     try:
@@ -2566,8 +2987,11 @@ def _tail_turn_csv_for_graph3(turn_csv_path, turn_proc=None):
             header = f.readline()
             header_l = header.lower() if header else ""
             # Aceita cabecalhos antigos/novos sem depender de caixa.
-            if header and ("volta_n" not in header_l and "volta" not in header_l):
+            is_turn_file = ("volta_n" in header_l)
+            is_dist_file = ("distancia_mm" in header_l) or (not is_turn_file)
+            if header and (not is_turn_file and not is_dist_file):
                 f.seek(0)
+                is_dist_file = True
 
             first_logged = False
             n_rows = 0
@@ -2598,7 +3022,7 @@ def _tail_turn_csv_for_graph3(turn_csv_path, turn_proc=None):
                 if len(parts) < 9:
                     continue
                 try:
-                    volta_n = float(parts[0])
+                    x_val = float(parts[0])
                 except Exception:
                     continue
 
@@ -2608,35 +3032,48 @@ def _tail_turn_csv_for_graph3(turn_csv_path, turn_proc=None):
                 rpm_med = _num_or_nan(parts[4])
 
                 n_rows += 1
-                if _append_turn_point(volta_n, atr_med, atr_min, atr_max, rpm_med):
+                appended = _append_turn_point(x_val, atr_med, atr_min, atr_max, rpm_med) if is_turn_file else _append_dist_point(x_val, atr_med, atr_min, atr_max, rpm_med)
+                if appended:
                     n_ok += 1
                     if not first_logged:
-                        log_msg("Turnos: primeira volta recebida para o grafico 3.")
+                        log_msg("Grafico 3: primeiro ponto recebido via tail CSV.")
                         first_logged = True
                 else:
                     n_drop += 1
                 if n_rows % 20 == 0:
-                    graph_log(f"TURN csv stats rows={n_rows} ok={n_ok} drop={n_drop} last={volta_n}")
+                    graph_log(
+                        f"GRAPH3 csv stats rows={n_rows} ok={n_ok} drop={n_drop} last_x={x_val} mode={'TURN' if is_turn_file else 'DIST'}"
+                    )
     except Exception as e:
-        log_msg(f"Turnos: erro lendo atrito_por_volta.csv ({e}).")
+        log_msg(f"Distancia: erro lendo arquivo _P ({e}).")
 
 
-def _tail_realtime_turns_from_logs(dlg_csv_path, drive_csv_path, relacao_mecanica, cycles_per_motor_rev=1.0, run_token=None):
+def _tail_realtime_dist_from_logs(
+    dlg_csv_path,
+    drive_csv_path,
+    relacao_mecanica,
+    raio_mm,
+    dist_interval_mm,
+    cycles_per_motor_rev=1.0,
+    run_token=None
+):
     """
-    Calcula atrito por volta em tempo real diretamente de dlg.csv + drive.csv.
-
-    Motivo:
-    - Garante atualizacao do grafico 3 mesmo quando o stream IPC do agregador C
-      atrasar ou ficar indisponivel.
+    Calcula atrito por distancia e por volta em tempo real de dlg.csv + drive.csv.
 
     Definicao fisica usada:
-    - i = D2 / D1 (D1=motor, D2=disco)
-    - voltas_pino = voltas_motor / i
+    - i = D2 / D1 (D1=motor, D2=disco).
+    - voltas_pino = voltas_motor / i.
+    - distancia_incremental = voltas_pino * (2*pi*raio).
     """
     if relacao_mecanica <= 0:
         relacao_mecanica = 1.0
     if cycles_per_motor_rev <= 0:
         cycles_per_motor_rev = 1.0
+    if raio_mm <= 0:
+        log_msg("Distancia RT: raio invalido para agregacao do grafico 3.")
+        return
+    if dist_interval_mm <= 0:
+        dist_interval_mm = 1.0
     rpm_dir_deadband = 5.0
 
     def _acc_reset():
@@ -2651,17 +3088,43 @@ def _tail_realtime_turns_from_logs(dlg_csv_path, drive_csv_path, relacao_mecanic
             "rpm_sum": 0.0,
         }
 
+    def _emit_dist_point(dist_mm, acc_data):
+        atr_med = float("nan")
+        atr_min = float("nan")
+        atr_max = float("nan")
+        rpm_med = float("nan")
+        if acc_data["n_valid"] > 0:
+            atr_med = acc_data["atr_sum"] / float(acc_data["n_valid"])
+            atr_min = acc_data["atr_min"] if acc_data["atr_min"] is not None else float("nan")
+            atr_max = acc_data["atr_max"] if acc_data["atr_max"] is not None else float("nan")
+        if acc_data["rpm_cnt"] > 0:
+            rpm_med = acc_data["rpm_sum"] / float(acc_data["rpm_cnt"])
+        return _append_dist_point(dist_mm, atr_med, atr_min, atr_max, rpm_med)
+
+    def _emit_turn_point(turn_n, acc_data):
+        atr_med = float("nan")
+        atr_min = float("nan")
+        atr_max = float("nan")
+        rpm_med = float("nan")
+        if acc_data["n_valid"] > 0:
+            atr_med = acc_data["atr_sum"] / float(acc_data["n_valid"])
+            atr_min = acc_data["atr_min"] if acc_data["atr_min"] is not None else float("nan")
+            atr_max = acc_data["atr_max"] if acc_data["atr_max"] is not None else float("nan")
+        if acc_data["rpm_cnt"] > 0:
+            rpm_med = acc_data["rpm_sum"] / float(acc_data["rpm_cnt"])
+        return _append_turn_point(turn_n, atr_med, atr_min, atr_max, rpm_med)
+
     # Aguarda ambos arquivos existirem.
     t0 = time.time()
     while _is_running() and _run_token_alive(run_token) and (not os.path.exists(dlg_csv_path) or not os.path.exists(drive_csv_path)):
         if time.time() - t0 > 15:
-            log_msg("Turnos RT: timeout aguardando dlg.csv/drive.csv.")
+            log_msg("Distancia RT: timeout aguardando dlg.csv/drive.csv.")
             return
         time.sleep(0.05)
 
     # Arbitro de fonte:
-    # - prioriza stream TURN do agregador C
-    # - ativa fallback apenas se stream nao aparecer (startup) ou travar.
+    # - prioriza stream DIST/TURN vindo do agregador externo.
+    # - ativa fallback local apenas se stream nao aparecer ou travar.
     t_gate = time.time()
     while _is_running() and _run_token_alive(run_token):
         with turn_rt_lock:
@@ -2684,19 +3147,23 @@ def _tail_realtime_turns_from_logs(dlg_csv_path, drive_csv_path, relacao_mecanic
                 break
             if (now - t_gate) > TURN_RT_STARTUP_GRACE_S:
                 _turn_rt_switch_to_fallback(
-                    f"sem TURN inicial em {TURN_RT_STARTUP_GRACE_S:.1f}s"
+                    f"sem ponto inicial de stream em {TURN_RT_STARTUP_GRACE_S:.1f}s"
                 )
                 break
         time.sleep(0.05)
 
     if _turn_rt_get_mode() != "fallback":
-        # Stream segue saudavel; fallback nao entra.
         return
 
-    first_logged = False
-    acc = _acc_reset()
-    turn_n = 1
-    turn_progress = 0.0
+    first_dist_logged = False
+    first_turn_logged = False
+    acc_dist = _acc_reset()
+    acc_turn = _acc_reset()
+    interval_idx = 1
+    next_boundary_mm = dist_interval_mm
+    next_boundary_turn = 1.0
+    cum_dist_mm = 0.0
+    cum_turn = 0.0
     prev_pos = 0.0
     prev_pos_valid = False
     prev_t_s = 0.0
@@ -2712,7 +3179,6 @@ def _tail_realtime_turns_from_logs(dlg_csv_path, drive_csv_path, relacao_mecanic
         with open(dlg_csv_path, "r", encoding="utf-8") as fdlg, \
              open(drive_csv_path, "r", encoding="utf-8") as fdrv:
 
-            # Headers
             hd = fdlg.readline()
             hr = fdrv.readline()
             if hd and "idx" not in hd.lower():
@@ -2813,89 +3279,98 @@ def _tail_realtime_turns_from_logs(dlg_csv_path, drive_csv_path, relacao_mecanic
                 except Exception:
                     pass
 
-                # Acumulo da volta atual
-                acc["n_total"] += 1
+                # Acumulo dos agregadores do grafico 3.
+                acc_dist["n_total"] += 1
+                acc_turn["n_total"] += 1
                 if atr_ok and pos_ok:
-                    acc["n_valid"] += 1
-                    acc["atr_sum"] += atr
-                    if acc["atr_min"] is None or atr < acc["atr_min"]:
-                        acc["atr_min"] = atr
-                    if acc["atr_max"] is None or atr > acc["atr_max"]:
-                        acc["atr_max"] = atr
+                    acc_dist["n_valid"] += 1
+                    acc_turn["n_valid"] += 1
+                    acc_dist["atr_sum"] += atr
+                    acc_turn["atr_sum"] += atr
+                    if acc_dist["atr_min"] is None or atr < acc_dist["atr_min"]:
+                        acc_dist["atr_min"] = atr
+                    if acc_turn["atr_min"] is None or atr < acc_turn["atr_min"]:
+                        acc_turn["atr_min"] = atr
+                    if acc_dist["atr_max"] is None or atr > acc_dist["atr_max"]:
+                        acc_dist["atr_max"] = atr
+                    if acc_turn["atr_max"] is None or atr > acc_turn["atr_max"]:
+                        acc_turn["atr_max"] = atr
                     if rpm_ok:
-                        acc["rpm_sum"] += rpm
-                        acc["rpm_cnt"] += 1
+                        acc_dist["rpm_sum"] += rpm
+                        acc_turn["rpm_sum"] += rpm
+                        acc_dist["rpm_cnt"] += 1
+                        acc_turn["rpm_cnt"] += 1
                 else:
-                    acc["n_fail"] += 1
+                    acc_dist["n_fail"] += 1
+                    acc_turn["n_fail"] += 1
 
-                # Progresso por volta (wrap bidirecional)
-                if pos_ok:
-                    if prev_pos_valid and pos_mod > 1.0:
-                        raw_diff = pos - prev_pos
-                        d_eff = 0.0
-                        if rpm_ok and abs(rpm) >= rpm_dir_deadband:
-                            dir_sign = 1 if rpm >= 0.0 else -1
+                if pos_ok and prev_pos_valid and pos_mod > 1.0:
+                    raw_diff = pos - prev_pos
+                    d_eff = 0.0
+                    if rpm_ok and abs(rpm) >= rpm_dir_deadband:
+                        dir_sign = 1 if rpm >= 0.0 else -1
 
-                        if dir_sign >= 0:
-                            d_eff = raw_diff
-                            if d_eff < (-0.5 * pos_mod):
-                                d_eff += pos_mod
-                            elif d_eff < 0.0:
-                                d_eff = 0.0
+                    if dir_sign >= 0:
+                        d_eff = raw_diff
+                        if d_eff < (-0.5 * pos_mod):
+                            d_eff += pos_mod
+                        elif d_eff < 0.0:
+                            d_eff = 0.0
+                    else:
+                        d_eff = raw_diff
+                        if d_eff > (0.5 * pos_mod):
+                            d_eff -= pos_mod
+                        elif d_eff > 0.0:
+                            d_eff = 0.0
+
+                    if d_eff != 0.0:
+                        dt_s = 0.0
+                        if prev_t_valid and not np.isnan(t_s_drv):
+                            dt_s = t_s_drv - prev_t_s
+                            if dt_s <= 0.0 or dt_s > 1.0:
+                                dt_s = 0.0
+                        if rpm_ok and dt_s > 0.0:
+                            max_step = pos_mod * (abs(rpm) / 60.0) * dt_s * 3.0 + 5.0
+                        elif rpm_ok:
+                            max_step = pos_mod * (abs(rpm) / 60.0) * 0.05 * 3.0 + 5.0
                         else:
-                            d_eff = raw_diff
-                            if d_eff > (0.5 * pos_mod):
-                                d_eff -= pos_mod
-                            elif d_eff > 0.0:
-                                d_eff = 0.0
+                            max_step = pos_mod * 0.05
+                        if abs(d_eff) > max_step:
+                            d_eff = 0.0
 
-                        if d_eff != 0.0:
-                            dt_s = 0.0
-                            if prev_t_valid and not np.isnan(t_s_drv):
-                                dt_s = t_s_drv - prev_t_s
-                                if dt_s <= 0.0 or dt_s > 1.0:
-                                    dt_s = 0.0
-                            if rpm_ok and dt_s > 0.0:
-                                max_step = pos_mod * (abs(rpm) / 60.0) * dt_s * 3.0 + 5.0
-                            elif rpm_ok:
-                                max_step = pos_mod * (abs(rpm) / 60.0) * 0.05 * 3.0 + 5.0
-                            else:
-                                max_step = pos_mod * 0.05
-                            if abs(d_eff) > max_step:
-                                d_eff = 0.0
+                    motor_turn_inc = abs(d_eff) / (pos_mod * cycles_per_motor_rev)
+                    pin_turn_inc = motor_turn_inc / relacao_mecanica
+                    dist_inc_mm = pin_turn_inc * (2.0 * math.pi * raio_mm)
+                    if pin_turn_inc > 0.0:
+                        cum_turn += pin_turn_inc
+                    if dist_inc_mm > 0.0:
+                        cum_dist_mm += dist_inc_mm
 
-                        motor_turn_inc = abs(d_eff) / (pos_mod * cycles_per_motor_rev)
-                        pin_turn_inc = motor_turn_inc / relacao_mecanica
-                        turn_progress += pin_turn_inc
+                    while cum_dist_mm >= next_boundary_mm:
+                        if _turn_rt_get_mode() == "fallback":
+                            if _emit_dist_point(float(next_boundary_mm), acc_dist) and not first_dist_logged:
+                                log_msg("Distancia RT: primeiro intervalo recebido para o grafico 3.")
+                                first_dist_logged = True
+                        interval_idx += 1
+                        next_boundary_mm = float(interval_idx) * dist_interval_mm
+                        acc_dist = _acc_reset()
 
-                        while turn_progress >= 1.0:
-                            atr_med = float("nan")
-                            atr_min = float("nan")
-                            atr_max = float("nan")
-                            rpm_med = float("nan")
-                            if acc["n_valid"] > 0:
-                                atr_med = acc["atr_sum"] / float(acc["n_valid"])
-                                atr_min = acc["atr_min"] if acc["atr_min"] is not None else float("nan")
-                                atr_max = acc["atr_max"] if acc["atr_max"] is not None else float("nan")
-                            if acc["rpm_cnt"] > 0:
-                                rpm_med = acc["rpm_sum"] / float(acc["rpm_cnt"])
+                    while cum_turn >= next_boundary_turn:
+                        if _turn_rt_get_mode() == "fallback":
+                            if _emit_turn_point(float(next_boundary_turn), acc_turn) and not first_turn_logged:
+                                log_msg("Volta RT: primeira volta recebida para o grafico 3.")
+                                first_turn_logged = True
+                        next_boundary_turn += 1.0
+                        acc_turn = _acc_reset()
 
-                            if _turn_rt_get_mode() == "fallback":
-                                if _append_turn_point(float(turn_n), atr_med, atr_min, atr_max, rpm_med) and not first_logged:
-                                    log_msg("Turnos RT: primeira volta recebida para o grafico 3.")
-                                    first_logged = True
-
-                            turn_n += 1
-                            turn_progress -= 1.0
-                            acc = _acc_reset()
-
+                if pos_ok:
                     prev_pos = pos
                     prev_pos_valid = True
                     if not np.isnan(t_s_drv):
                         prev_t_s = t_s_drv
                         prev_t_valid = True
     except Exception as e:
-        log_msg(f"Turnos RT: erro no agregador em tempo real ({e}).")
+        log_msg(f"Distancia RT: erro no agregador em tempo real ({e}).")
 # start_acquisition():
 # - Funcao central de inicio de ensaio.
 # - Etapas principais:
@@ -2911,9 +3386,18 @@ def start_acquisition():
     global running
     # NOTE: declare globals before any assignment inside this function to avoid
     # Python "assigned before global declaration" errors (PyInstaller parse).
-    global start_time, is_paused, tempo_pause_inicio, p_turns_target
-    global p_strokes, p_atrito_ef, p_atrito_max, p_atrito_min, p_coluna_velocidade, contador_amostras_total
-    global x_auto_total_min, x_time_ref_s
+    global start_time, is_paused, tempo_pause_inicio, p_dist_target_mm, p_turn_target
+    global p_strokes, p_atrito_ef, p_atrito_max, p_atrito_min, p_coluna_velocidade
+    global p_turn_strokes, p_turn_atrito_ef, p_turn_atrito_max, p_turn_atrito_min, p_turn_coluna_velocidade
+    global contador_amostras_total
+    global x_auto_total_min, x3_auto_total_mm, x_time_ref_s
+
+    if monitor_mode_active:
+        messagebox.showwarning(
+            "Monitoramento ativo",
+            "Desative o modo Monitoramento antes de iniciar um ensaio."
+        )
+        return
 
     # Impede o funcionamento do botão iniciar duas vezes seguidas:
     if running == "true":
@@ -3195,6 +3679,7 @@ def start_acquisition():
             coluna_raio = float(ent_raio.get().strip().replace(',','.'))
             f.write(f"Raio [mm],{coluna_raio},\n")
             f.write(f"Relacao mecanica (i),{RELACAO_MECANICA},\n")
+            f.write(f"Intervalo distancia [mm],{DIST_INTERVAL_MM},\n")
             coluna_forca = float(ent_forca.get().strip().replace(',','.'))
             f.write(f"Força normal [N],{coluna_forca},\n")
             f.write("Dados de calibração,Fit CH1,\n")
@@ -3306,9 +3791,17 @@ def start_acquisition():
         p_atrito_max.clear()
         p_atrito_min.clear()
         p_coluna_velocidade.clear()
+        p_turn_strokes.clear()
+        p_turn_atrito_ef.clear()
+        p_turn_atrito_max.clear()
+        p_turn_atrito_min.clear()
+        p_turn_coluna_velocidade.clear()
         x_time_ref_s = None
-        # Define alvo de voltas para eixo X do grafico 3.
-        p_turns_target = _calc_expected_turns_from_table(raio_mm, RELACAO_MECANICA)
+        # Define alvo de distancia para eixo X do grafico 3.
+        p_dist_target_mm = _calc_expected_distance_mm_from_table()
+        p_turn_target = _calc_expected_pin_turns_from_table(raio_mm)
+        if p_dist_target_mm > 0:
+            x3_auto_total_mm = p_dist_target_mm
 
         dur_total = sum(d for _, d in schedule)
         # Em modo automatico, eixo X de Temperatura/CoF segue duracao total prevista.
@@ -3320,7 +3813,8 @@ def start_acquisition():
         out_paths = {
             "dlg_csv": caminho_dlg_csv,
             "drive_csv": caminho_drive_csv,
-            "turn_csv": caminho_turn_csv,
+            "turn_dist_csv": caminho_turn_dist_csv,
+            "turn_vp_csv": caminho_turn_volta_csv,
             "merge_csv": caminho_merge_csv,
             "schedule_csv": caminho_schedule_csv,
         }
@@ -3357,7 +3851,8 @@ def start_acquisition():
                 force_normal_n=forca_normal_n,
                 # i = D2 / D1 (D1=motor, D2=disco), mesma definicao do supervisório.
                 relacao=RELACAO_MECANICA,
-                raio_mm=raio_mm
+                raio_mm=raio_mm,
+                distance_interval_mm=DIST_INTERVAL_MM
             )
         except Exception as e:
             # Limpa a pasta criada se o ensaio nao iniciar
@@ -3380,8 +3875,8 @@ def start_acquisition():
         is_paused = False
         tempo_pause_inicio = 0
         graph_log(
-            "RUN start token={0} rate_hz={1} dur_total_s={2:.3f} relacao={3:.6f} turns_target={4:.6f}".format(
-                run_token, rate_hz, dur_total, RELACAO_MECANICA, p_turns_target
+            "RUN start token={0} rate_hz={1} dur_total_s={2:.3f} relacao={3:.6f} dist_target_mm={4:.6f} turn_target={5:.6f} interval_mm={6:.6f}".format(
+                run_token, rate_hz, dur_total, RELACAO_MECANICA, p_dist_target_mm, p_turn_target, DIST_INTERVAL_MM
             )
         )
         try:
@@ -3455,8 +3950,14 @@ def start_acquisition():
                         p_atrito_max.clear()
                         p_atrito_min.clear()
                         p_coluna_velocidade.clear()
+                        p_turn_strokes.clear()
+                        p_turn_atrito_ef.clear()
+                        p_turn_atrito_max.clear()
+                        p_turn_atrito_min.clear()
+                        p_turn_coluna_velocidade.clear()
                         globals()["x_time_ref_s"] = None
-                        globals()["p_turns_target"] = 0.0
+                        globals()["p_dist_target_mm"] = 0.0
+                        globals()["p_turn_target"] = 0.0
                         ax1.clear()
                         ax2.clear()
                         ax3.clear()
@@ -3477,10 +3978,11 @@ def start_acquisition():
             daemon=True
         ).start()
         # Grafico 3 em tempo real:
-        # agrega por idx diretamente de dlg.csv+drive.csv no Python.
+        # agrega por idx diretamente de dlg.csv+drive.csv no Python,
+        # por intervalos de distancia configurados.
         threading.Thread(
-            target=_tail_realtime_turns_from_logs,
-            args=(caminho_dlg_csv, caminho_drive_csv, RELACAO_MECANICA, 1.0, run_token),
+            target=_tail_realtime_dist_from_logs,
+            args=(caminho_dlg_csv, caminho_drive_csv, RELACAO_MECANICA, raio_mm, DIST_INTERVAL_MM, 1.0, run_token),
             daemon=True
         ).start()
 
@@ -3507,6 +4009,10 @@ def start_acquisition():
     p_atrito_ef.clear()
     p_atrito_max.clear()
     p_atrito_min.clear()
+    p_turn_strokes.clear()
+    p_turn_atrito_ef.clear()
+    p_turn_atrito_max.clear()
+    p_turn_atrito_min.clear()
 
     running = "true"
 
@@ -3626,8 +4132,9 @@ def pause_acquisition():
 # - Modo externo: envia STOP e aguarda fechamento/merge final.
 # - Modo da versao anterior: zera tensao e limpa buffers/plots.
 def stop_acquisition():
-    global running, is_paused, ip, timer_started, tempo_pause_inicio, p_turns_target, x_time_ref_s
+    global running, is_paused, ip, timer_started, tempo_pause_inicio, p_dist_target_mm, p_turn_target, x_time_ref_s
     global graSamps, sampsTimestamp, p_strokes, p_atrito_ef, p_atrito_max, p_atrito_min, p_coluna_velocidade
+    global p_turn_strokes, p_turn_atrito_ef, p_turn_atrito_max, p_turn_atrito_min, p_turn_coluna_velocidade
 
     if running:
         resposta = messagebox.askyesno("Confirmação", "Deseja parar o programa?")
@@ -3695,7 +4202,13 @@ def stop_acquisition():
             p_atrito_max.clear()
             p_atrito_min.clear()
             p_coluna_velocidade.clear()
-            p_turns_target = 0.0
+            p_turn_strokes.clear()
+            p_turn_atrito_ef.clear()
+            p_turn_atrito_max.clear()
+            p_turn_atrito_min.clear()
+            p_turn_coluna_velocidade.clear()
+            p_dist_target_mm = 0.0
+            p_turn_target = 0.0
             x_time_ref_s = None
 
             # Limpa os eixos imediatamente
@@ -3741,6 +4254,7 @@ def update1(frame):
                         tempo, dados = _x_plot_series(t_data, y_data)
                         tempo = tempo[::passo]
                         dados = dados[::passo]
+                        tempo, dados = _downsample_for_plot(tempo, dados, max_points=1400)
                         if len(tempo) == 0:
                             return
                         # Manda desenhar a linha
@@ -3749,7 +4263,7 @@ def update1(frame):
                         else:
                             ax1.plot(tempo, dados, label=label)
 
-        if _is_running() and graSamps and c2:
+        if (_is_running() or monitor_mode_active) and graSamps and c2:
             # CH2 (temperatura) = index 1 na lista graSamps.
             plotar_canal(1, None, 'Channel 2')
 
@@ -3787,7 +4301,7 @@ def update2(frame):
         passo = 5
 
         # Canal 1 (CoF)
-        if _is_running() and graSamps and c1 == 1 and len(graSamps) > 0:
+        if (_is_running() or monitor_mode_active) and graSamps and c1 == 1 and len(graSamps) > 0:
             # Pega a lista bruta de CH1 (forca) para converter em CoF.
             raw_dados = graSamps[0]
             tam = min(len(sampsTimestamp), len(raw_dados))
@@ -3811,6 +4325,7 @@ def update2(frame):
                     tempo, dados = _x_plot_series(t_data, y_data)
                     tempo = tempo[::passo]
                     dados = dados[::passo]
+                    tempo, dados = _downsample_for_plot(tempo, dados, max_points=1400)
                     if len(tempo) > 0:
                         ax2.plot(tempo, dados, label='CoF', color='#1f77b4') # Desenha a linha azul
 
@@ -3833,43 +4348,430 @@ def update2(frame):
 
 
 # Nicolas
-# Limpa o ax3 e plota atrito medio/min/max por volta.
+# Limpa o ax3 e plota atrito medio/min/max por distancia.
 # update3(frame):
-# - Renderiza grafico 3 por volta (atrito medio/max/min).
-# - Eixo X segue voltas registradas, com limite previsto do ensaio.
-# - Opera sobre listas p_strokes/p_atrito_* alimentadas por _tail_turn_csv_for_graph3().
+# - Renderiza grafico 3 por distancia (atrito medio/max/min por intervalo).
+# - Eixo X segue distancia registrada, com limite previsto do ensaio.
+# - Opera sobre listas p_strokes/p_atrito_* alimentadas pelos agregadores.
 def update3(frame):
     """
-    Atualiza o grafico 3 (atrito por volta).
+    Atualiza o grafico 3 (atrito por distancia).
     Mantem labels corretos mesmo fora de ensaio para evitar voltar ao layout antigo.
     """
     try:
+        global ax3_twin
         ax3.clear()
+        if ax3_twin is None:
+            ax3_twin = ax3.twinx()
+        ax3_twin.clear()
+        # Garante que o eixo secundario fique sempre do lado direito.
+        ax3_twin.yaxis.set_label_position("right")
+        ax3_twin.yaxis.tick_right()
+        ax3_twin.spines["right"].set_visible(True)
+        ax3_twin.spines["left"].set_visible(False)
+        ax3_twin.spines["right"].set_position(("axes", 1.0))
+        ax3_twin.patch.set_alpha(0.0)
+        mode = graph3_mode_var.get() if "graph3_mode_var" in globals() else graph3_mode
+        mode = str(mode).strip().lower()
+        if mode not in ("dist", "turn"):
+            mode = "dist"
 
-        if len(p_strokes) > 0:
-            ax3.plot(p_strokes, p_atrito_max, color='red', label='Atrito max', linewidth=1)
-            ax3.plot(p_strokes, p_atrito_ef, color='black', label='Atrito medio', linewidth=1)
-            ax3.plot(p_strokes, p_atrito_min, color='cyan', label='Atrito min', linewidth=1)
+        if mode == "turn":
+            x_vals = np.array(p_turn_strokes, dtype=float) if len(p_turn_strokes) > 0 else np.array([])
+            y_max = np.array(p_turn_atrito_max, dtype=float) if len(p_turn_atrito_max) > 0 else np.array([])
+            y_med = np.array(p_turn_atrito_ef, dtype=float) if len(p_turn_atrito_ef) > 0 else np.array([])
+            y_min = np.array(p_turn_atrito_min, dtype=float) if len(p_turn_atrito_min) > 0 else np.array([])
+            rpm_vals = np.array(p_turn_coluna_velocidade, dtype=float) if len(p_turn_coluna_velocidade) > 0 else np.array([])
+        else:
+            x_vals = np.array(p_strokes, dtype=float) if len(p_strokes) > 0 else np.array([])
+            y_max = np.array(p_atrito_max, dtype=float) if len(p_atrito_max) > 0 else np.array([])
+            y_med = np.array(p_atrito_ef, dtype=float) if len(p_atrito_ef) > 0 else np.array([])
+            y_min = np.array(p_atrito_min, dtype=float) if len(p_atrito_min) > 0 else np.array([])
+            rpm_vals = np.array(p_coluna_velocidade, dtype=float) if len(p_coluna_velocidade) > 0 else np.array([])
 
-        x_target = max(1.0, float(p_turns_target) if p_turns_target > 0 else 1.0)
-        if p_strokes:
-            x_target = max(x_target, float(p_strokes[-1]))
+        vel_plot = np.array([])
+
+        if len(x_vals) > 0:
+            if x3_auto:
+                x_plot = x_vals
+                y_max_plot = y_max
+                y_med_plot = y_med
+                y_min_plot = y_min
+                rpm_plot = rpm_vals
+            else:
+                span_mm = max(0.001, float(x3_manual_mm))
+                if mode == "turn":
+                    try:
+                        raio_mm = float(ent_raio.get().strip().replace(",", "."))
+                    except Exception:
+                        raio_mm = 0.0
+                    if raio_mm > 0:
+                        span_mm = max(0.001, span_mm / (2.0 * math.pi * raio_mm))
+                ciclos = np.floor(np.maximum(x_vals, 0.0) / span_mm)
+                ciclo_atual = np.max(ciclos) if len(ciclos) > 0 else 0.0
+                mask = (ciclos == ciclo_atual)
+                x_plot = x_vals[mask] - (ciclo_atual * span_mm)
+                y_max_plot = y_max[mask]
+                y_med_plot = y_med[mask]
+                y_min_plot = y_min[mask]
+                rpm_plot = rpm_vals[mask]
+
+            try:
+                raio_mm = float(ent_raio.get().strip().replace(",", "."))
+            except Exception:
+                raio_mm = 0.0
+            vel_plot = _rpm_motor_to_pin_speed_mm_s(rpm_plot, raio_mm, RELACAO_MECANICA)
+            x_plot, y_max_plot, y_med_plot, y_min_plot, vel_plot = _downsample_for_plot(
+                x_plot, y_max_plot, y_med_plot, y_min_plot, vel_plot, max_points=1200
+            )
+            ax3.plot(x_plot, y_max_plot, color='red', label='Atrito max', linewidth=1)
+            ax3.plot(x_plot, y_med_plot, color='black', label='Atrito medio', linewidth=1)
+            ax3.plot(x_plot, y_min_plot, color='cyan', label='Atrito min', linewidth=1)
+            if len(vel_plot) == len(x_plot) and len(vel_plot) > 0:
+                valid_v = np.isfinite(vel_plot)
+                if np.any(valid_v):
+                    ax3_twin.plot(
+                        x_plot[valid_v],
+                        vel_plot[valid_v],
+                        color='darkorange',
+                        linestyle='--',
+                        linewidth=1,
+                        label='Velocidade media'
+                    )
+
+        if x3_auto:
+            if mode == "turn":
+                x_target = max(1.0, float(p_turn_target) if p_turn_target > 0 else 1.0)
+                if not _is_running():
+                    try:
+                        raio_mm = float(ent_raio.get().strip().replace(",", "."))
+                    except Exception:
+                        raio_mm = 0.0
+                    previsto_turn = _calc_expected_pin_turns_from_table(raio_mm)
+                    if previsto_turn > 0:
+                        x_target = max(x_target, float(previsto_turn))
+            else:
+                x_target = max(
+                    1.0,
+                    float(p_dist_target_mm) if p_dist_target_mm > 0 else 1.0,
+                    float(x3_auto_total_mm) if x3_auto_total_mm > 0 else 1.0,
+                )
+                if not _is_running():
+                    previsto_mm = _calc_expected_distance_mm_from_table()
+                    if previsto_mm > 0:
+                        x_target = max(x_target, float(previsto_mm))
+            if len(x_vals) > 0:
+                if mode == "turn":
+                    x_target = max(x_target, float(x_vals[-1]))
+                else:
+                    x_target = max(x_target, float(x_vals[-1]))
+        else:
+            if mode == "turn":
+                try:
+                    raio_mm = float(ent_raio.get().strip().replace(",", "."))
+                except Exception:
+                    raio_mm = 0.0
+                if raio_mm > 0:
+                    x_target = max(1.0, float(x3_manual_mm) / (2.0 * math.pi * raio_mm))
+                else:
+                    x_target = max(1.0, float(x3_manual_mm))
+            else:
+                x_target = max(1.0, float(x3_manual_mm))
         ax3.set_xlim(0, x_target)
 
-        ax3.set_xlabel('Voltas (pino)', fontsize=9)
+        if mode == "turn":
+            ax3.set_xlabel('Voltas (pino)', fontsize=9)
+        else:
+            ax3.set_xlabel('Distancia [mm]', fontsize=9)
         ax3.set_ylabel('Atrito [-]', fontsize=9)
         ax3.grid(True, alpha=0.5)
         ax3.tick_params(axis='both', labelsize=8)
         ax3.set_facecolor('white')
+        ax3_twin.set_ylabel('Velocidade [mm/s]', fontsize=9, color='darkorange')
+        ax3_twin.yaxis.set_label_coords(1.10, 0.5)
+        ax3_twin.tick_params(axis='y', labelsize=8, colors='darkorange')
+        ax3_twin.grid(False)
+        if len(vel_plot) > 0 and np.any(np.isfinite(vel_plot)):
+            vmax = np.nanmax(vel_plot)
+            if np.isfinite(vmax):
+                ax3_twin.set_ylim(0, max(1.0, float(vmax) * 1.15))
         if not y3_auto:
             ax3.set_ylim(y3_min, y3_max)
 
         h1, l1 = ax3.get_legend_handles_labels()
-        if h1:
-            ax3.legend(h1, l1, loc='upper center', bbox_to_anchor=(0.5, -0.20),
-                       fontsize='small', ncol=3)
+        h2, l2 = ax3_twin.get_legend_handles_labels()
+        handles = h1 + h2
+        labels = l1 + l2
+        if handles:
+            # Legenda unificada horizontal abaixo do G3 para nao cobrir elementos.
+            ax3.legend(
+                handles, labels,
+                loc='upper center',
+                bbox_to_anchor=(0.5, -0.20),
+                borderaxespad=0.0,
+                fontsize='small',
+                ncol=4
+            )
     except Exception as e:
         log_msg(f"Grafico 3: erro de atualizacao ({e}).")
+
+
+def _plot_temp_axis_view(ax):
+    """
+    Desenha temperatura (CH2) em um eixo fornecido, usando as mesmas
+    configuracoes de X/Y do grafico 1 da aba principal.
+    """
+    ax.clear()
+    c2 = canalativo2.get()
+    limite_tela_min = _current_x_window_min()
+    passo = 5
+
+    if (_is_running() or monitor_mode_active) and graSamps and c2 and len(graSamps) > 1:
+        raw_dados = graSamps[1]
+        tam = min(len(sampsTimestamp), len(raw_dados))
+        if tam > 0:
+            t_data = np.array(sampsTimestamp[:tam])
+            y_data = np.array(raw_dados[:tam])
+            if len(t_data) > 0:
+                tempo, dados = _x_plot_series(t_data, y_data)
+                tempo = tempo[::passo]
+                dados = dados[::passo]
+                tempo, dados = _downsample_for_plot(tempo, dados, max_points=1100)
+                if len(tempo) > 0:
+                    ax.plot(tempo, dados, label='Channel 2')
+
+    if ax.get_legend_handles_labels()[0]:
+        ax.legend(loc='upper right', fontsize='x-small')
+    ax.set_xlim(0, limite_tela_min)
+    ax.grid(alpha=0.5, lw=0.5)
+    ax.set_facecolor('black')
+    ax.tick_params(axis='both', labelsize=8)
+    ax.set_xlabel('Tempo [min]', fontsize=9)
+    ax.set_ylabel('Temperatura [°C]', fontsize=9)
+    if not y1_auto:
+        ax.set_ylim(y1_min, y1_max)
+
+
+def _plot_cof_axis_view(ax):
+    """
+    Desenha CoF (CH1/forca normal) em um eixo fornecido, usando as mesmas
+    configuracoes de X/Y do grafico 2 da aba principal.
+    """
+    ax.clear()
+    c1 = canalativo1.get()
+    limite_tela_min = _current_x_window_min()
+    passo = 5
+
+    if (_is_running() or monitor_mode_active) and graSamps and c1 == 1 and len(graSamps) > 0:
+        raw_dados = graSamps[0]
+        tam = min(len(sampsTimestamp), len(raw_dados))
+        if tam > 0:
+            t_data = np.array(sampsTimestamp[:tam])
+            y_force = np.array(raw_dados[:tam], dtype=float)
+            fn = cof_force_normal_n
+            if fn is None or fn <= 0.0:
+                try:
+                    fn = float(ent_forca.get().strip().replace(',', '.'))
+                except Exception:
+                    fn = 0.0
+            if fn <= 0.0:
+                y_data = np.full_like(y_force, np.nan)
+            else:
+                y_data = y_force / fn
+
+            if len(t_data) > 0:
+                tempo, dados = _x_plot_series(t_data, y_data)
+                tempo = tempo[::passo]
+                dados = dados[::passo]
+                tempo, dados = _downsample_for_plot(tempo, dados, max_points=1100)
+                if len(tempo) > 0:
+                    ax.plot(tempo, dados, label='CoF', color='#1f77b4')
+
+    if ax.get_legend_handles_labels()[0]:
+        ax.legend(loc='upper right', fontsize='x-small')
+    ax.set_xlim(0, limite_tela_min)
+    ax.grid(alpha=0.5, lw=0.5)
+    ax.set_facecolor('black')
+    ax.tick_params(axis='both', labelsize=8)
+    ax.set_xlabel('Tempo [min]', fontsize=9)
+    ax.set_ylabel('CoF [-]', fontsize=9)
+    if not y2_auto:
+        ax.set_ylim(y2_min, y2_max)
+
+
+def _plot_g3_mode_axis_view(ax, mode, twin_ax=None):
+    """
+    Desenha atrito agregado no eixo informado para um modo fixo:
+    - mode='dist': processamento por distancia.
+    - mode='turn': processamento por volta.
+
+    Usa as mesmas configuracoes de eixo X/Y do grafico 3 principal.
+    """
+    ax.clear()
+    if twin_ax is not None:
+        twin_ax.clear()
+        twin_ax.yaxis.set_label_position("right")
+        twin_ax.yaxis.tick_right()
+        twin_ax.spines["right"].set_visible(True)
+        twin_ax.spines["left"].set_visible(False)
+        twin_ax.spines["right"].set_position(("axes", 1.0))
+        twin_ax.patch.set_alpha(0.0)
+    mode = str(mode).strip().lower()
+    if mode not in ("dist", "turn"):
+        mode = "dist"
+
+    if mode == "turn":
+        x_vals = np.array(p_turn_strokes, dtype=float) if len(p_turn_strokes) > 0 else np.array([])
+        y_max = np.array(p_turn_atrito_max, dtype=float) if len(p_turn_atrito_max) > 0 else np.array([])
+        y_med = np.array(p_turn_atrito_ef, dtype=float) if len(p_turn_atrito_ef) > 0 else np.array([])
+        y_min = np.array(p_turn_atrito_min, dtype=float) if len(p_turn_atrito_min) > 0 else np.array([])
+        rpm_vals = np.array(p_turn_coluna_velocidade, dtype=float) if len(p_turn_coluna_velocidade) > 0 else np.array([])
+    else:
+        x_vals = np.array(p_strokes, dtype=float) if len(p_strokes) > 0 else np.array([])
+        y_max = np.array(p_atrito_max, dtype=float) if len(p_atrito_max) > 0 else np.array([])
+        y_med = np.array(p_atrito_ef, dtype=float) if len(p_atrito_ef) > 0 else np.array([])
+        y_min = np.array(p_atrito_min, dtype=float) if len(p_atrito_min) > 0 else np.array([])
+        rpm_vals = np.array(p_coluna_velocidade, dtype=float) if len(p_coluna_velocidade) > 0 else np.array([])
+
+    vel_plot = np.array([])
+    x_plot = np.array([])
+    rpm_plot = np.array([])
+
+    if len(x_vals) > 0:
+        if x3_auto:
+            x_plot = x_vals
+            y_max_plot = y_max
+            y_med_plot = y_med
+            y_min_plot = y_min
+            rpm_plot = rpm_vals
+        else:
+            span_mm = max(0.001, float(x3_manual_mm))
+            if mode == "turn":
+                try:
+                    raio_mm = float(ent_raio.get().strip().replace(",", "."))
+                except Exception:
+                    raio_mm = 0.0
+                if raio_mm > 0:
+                    span_mm = max(0.001, span_mm / (2.0 * math.pi * raio_mm))
+            ciclos = np.floor(np.maximum(x_vals, 0.0) / span_mm)
+            ciclo_atual = np.max(ciclos) if len(ciclos) > 0 else 0.0
+            mask = (ciclos == ciclo_atual)
+            x_plot = x_vals[mask] - (ciclo_atual * span_mm)
+            y_max_plot = y_max[mask]
+            y_med_plot = y_med[mask]
+            y_min_plot = y_min[mask]
+            rpm_plot = rpm_vals[mask]
+
+        if twin_ax is not None:
+            try:
+                raio_mm = float(ent_raio.get().strip().replace(",", "."))
+            except Exception:
+                raio_mm = 0.0
+            vel_plot = _rpm_motor_to_pin_speed_mm_s(rpm_plot, raio_mm, RELACAO_MECANICA)
+            x_plot, y_max_plot, y_med_plot, y_min_plot, vel_plot = _downsample_for_plot(
+                x_plot, y_max_plot, y_med_plot, y_min_plot, vel_plot, max_points=900
+            )
+        else:
+            x_plot, y_max_plot, y_med_plot, y_min_plot = _downsample_for_plot(
+                x_plot, y_max_plot, y_med_plot, y_min_plot, max_points=900
+            )
+
+        ax.plot(x_plot, y_max_plot, color='red', label='Atrito max', linewidth=1)
+        ax.plot(x_plot, y_med_plot, color='black', label='Atrito medio', linewidth=1)
+        ax.plot(x_plot, y_min_plot, color='cyan', label='Atrito min', linewidth=1)
+
+        if twin_ax is not None:
+            if len(vel_plot) == len(x_plot) and len(vel_plot) > 0:
+                valid_v = np.isfinite(vel_plot)
+                if np.any(valid_v):
+                    twin_ax.plot(
+                        x_plot[valid_v],
+                        vel_plot[valid_v],
+                        color='darkorange',
+                        linestyle='--',
+                        linewidth=1,
+                        label='Velocidade media'
+                    )
+
+    if x3_auto:
+        if mode == "turn":
+            x_target = max(1.0, float(p_turn_target) if p_turn_target > 0 else 1.0)
+            if not _is_running():
+                try:
+                    raio_mm = float(ent_raio.get().strip().replace(",", "."))
+                except Exception:
+                    raio_mm = 0.0
+                previsto_turn = _calc_expected_pin_turns_from_table(raio_mm)
+                if previsto_turn > 0:
+                    x_target = max(x_target, float(previsto_turn))
+        else:
+            x_target = max(
+                1.0,
+                float(p_dist_target_mm) if p_dist_target_mm > 0 else 1.0,
+                float(x3_auto_total_mm) if x3_auto_total_mm > 0 else 1.0,
+            )
+            if not _is_running():
+                previsto_mm = _calc_expected_distance_mm_from_table()
+                if previsto_mm > 0:
+                    x_target = max(x_target, float(previsto_mm))
+        if len(x_vals) > 0:
+            x_target = max(x_target, float(x_vals[-1]))
+    else:
+        if mode == "turn":
+            try:
+                raio_mm = float(ent_raio.get().strip().replace(",", "."))
+            except Exception:
+                raio_mm = 0.0
+            if raio_mm > 0:
+                x_target = max(1.0, float(x3_manual_mm) / (2.0 * math.pi * raio_mm))
+            else:
+                x_target = max(1.0, float(x3_manual_mm))
+        else:
+            x_target = max(1.0, float(x3_manual_mm))
+
+    ax.set_xlim(0, x_target)
+    ax.grid(True, alpha=0.5)
+    ax.tick_params(axis='both', labelsize=8)
+    ax.set_facecolor('white')
+    if mode == "turn":
+        ax.set_xlabel('Voltas (pino)', fontsize=9)
+        ax.set_title('Processamento por volta', fontsize=10)
+    else:
+        ax.set_xlabel('Distancia [mm]', fontsize=9)
+        ax.set_title('Processamento por distancia', fontsize=10)
+    ax.set_ylabel('Atrito [-]', fontsize=9)
+    if not y3_auto:
+        ax.set_ylim(y3_min, y3_max)
+    if twin_ax is not None:
+        twin_ax.set_ylabel('Velocidade [mm/s]', fontsize=8, color='darkorange')
+        twin_ax.yaxis.set_label_coords(1.06, 0.5)
+        twin_ax.tick_params(axis='y', labelsize=7, colors='darkorange')
+        twin_ax.grid(False)
+        if len(vel_plot) > 0 and np.any(np.isfinite(vel_plot)):
+            vmax = np.nanmax(vel_plot)
+            if np.isfinite(vmax):
+                twin_ax.set_ylim(0, max(1.0, float(vmax) * 1.15))
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = twin_ax.get_legend_handles_labels() if twin_ax is not None else ([], [])
+    handles = h1 + h2
+    labels = l1 + l2
+    if handles:
+        ax.legend(handles, labels, loc='upper right', fontsize='x-small')
+
+
+def update_graficos_tab(frame):
+    """
+    Atualiza a aba de visualizacao com 4 graficos simultaneos:
+    - Temperatura e CoF (esquerda)
+    - Atrito por volta e por distancia (direita)
+    """
+    try:
+        _plot_temp_axis_view(axg_temp)
+        _plot_cof_axis_view(axg_cof)
+        _plot_g3_mode_axis_view(axg_turn, "turn", axg_turn_twin)
+        _plot_g3_mode_axis_view(axg_dist, "dist", axg_dist_twin)
+    except Exception as e:
+        log_msg(f"Aba graficos: erro de atualizacao ({e}).")
 
 
 
@@ -3936,6 +4838,8 @@ def _current_x_window_min():
     """
     Retorna a janela de eixo X usada pelos graficos 1 e 2.
     """
+    if monitor_mode_active:
+        return MONITOR_WINDOW_MIN
     if x_auto:
         # Durante ensaio, prioriza a duracao prevista congelada no START.
         if _is_running() and x_auto_total_min > 0:
@@ -3968,6 +4872,14 @@ def _x_plot_series(t_data, y_data):
 
     t_rel_min = (t_data - x_time_ref_s) / 60.0
 
+    if monitor_mode_active:
+        t_end = float(t_rel_min[-1]) if len(t_rel_min) > 0 else 0.0
+        t_ini = max(0.0, t_end - MONITOR_WINDOW_MIN)
+        mask = (t_rel_min >= t_ini)
+        t_plot = t_rel_min[mask] - t_ini
+        y_plot = y_data[mask]
+        return t_plot, y_plot
+
     if x_auto:
         return t_rel_min, y_data
 
@@ -3981,16 +4893,62 @@ def _x_plot_series(t_data, y_data):
     return t_plot, y_plot
 
 
+def _downsample_for_plot(x_arr, *y_arrs, max_points=1200):
+    """
+    Reduz quantidade de pontos apenas para exibicao em tela.
+
+    Mantem os dados completos em memoria/arquivo e aplica thinning uniforme
+    apenas no caminho de renderizacao para reduzir custo de redraw.
+    """
+    try:
+        n = len(x_arr)
+    except Exception:
+        return (x_arr,) + y_arrs
+    if n <= 0 or n <= int(max_points):
+        return (x_arr,) + y_arrs
+    step = max(1, int(math.ceil(float(n) / float(max_points))))
+    sl = slice(None, None, step)
+    out = [x_arr[sl]]
+    for y in y_arrs:
+        try:
+            out.append(y[sl] if len(y) == n else y)
+        except Exception:
+            out.append(y)
+    return tuple(out)
+
+
+def _set_graph3_mode(mode):
+    """
+    Atualiza modo de visualizacao do grafico 3.
+
+    Args:
+        mode (str): "dist" para processamento por distancia, "turn" para por volta.
+    """
+    global graph3_mode
+    mode = str(mode).strip().lower()
+    if mode not in ("dist", "turn"):
+        mode = "dist"
+    graph3_mode = mode
+    if "graph3_mode_var" in globals():
+        graph3_mode_var.set(mode)
+    try:
+        canvas3.draw_idle()
+    except Exception:
+        pass
+
+
 def abrir_config_x():
     """
-    Abre popup compacto para configurar eixo X dos graficos 1 e 2.
+    Abre popup compacto para configurar eixo X dos graficos 1/2 e 3.
 
     Regras:
     - Configuracao compartilhada entre Temperatura e CoF.
     - Automatico: usa duracao total prevista do ensaio.
     - Manual: usa janela fixa em minutos e reinicia o grafico a cada ciclo.
+    - Grafico 3: configuracao separada por distancia (mm).
     """
     global x_auto, x_manual_min, x_auto_total_min, x_time_ref_s
+    global x3_auto, x3_manual_mm, x3_auto_total_mm, aux
 
     win = tkinter.Toplevel(root)
     win.title("Configurar Eixo X")
@@ -4014,28 +4972,56 @@ def abrir_config_x():
     ent_manual = tkinter.Entry(frame, width=12, textvariable=x_manual_var)
     ent_manual.grid(row=2, column=1, padx=4, pady=2)
 
-    lbl_info = tkinter.Label(frame, text="", fg="gray25")
-    lbl_info.grid(row=3, column=0, columnspan=3, sticky="w", pady=(4, 0))
+    tkinter.Label(frame, text="Eixo X (Grafico 3 - Distancia)", font=("Arial", 9, "bold")) \
+        .grid(row=3, column=0, columnspan=3, sticky="w", pady=(10, 6))
+    tkinter.Label(frame, text="Automatico", font=("Arial", 9, "bold")).grid(row=4, column=0, padx=4, pady=(0, 4))
+    tkinter.Label(frame, text="Manual [mm]", font=("Arial", 9, "bold")).grid(row=4, column=1, padx=4, pady=(0, 4))
+
+    x3_auto_var = tkinter.BooleanVar(value=x3_auto)
+    x3_manual_var = tkinter.StringVar(value=f"{x3_manual_mm:.6g}")
+
+    chk3_auto = tkinter.Checkbutton(frame, variable=x3_auto_var)
+    chk3_auto.grid(row=5, column=0, padx=4, pady=2)
+    ent3_manual = tkinter.Entry(frame, width=12, textvariable=x3_manual_var)
+    ent3_manual.grid(row=5, column=1, padx=4, pady=2)
+
+    lbl_info_12 = tkinter.Label(frame, text="", fg="gray25")
+    lbl_info_12.grid(row=6, column=0, columnspan=3, sticky="w", pady=(4, 0))
+    lbl_info_3 = tkinter.Label(frame, text="", fg="gray25")
+    lbl_info_3.grid(row=7, column=0, columnspan=3, sticky="w", pady=(2, 0))
 
     def _refresh_state(*_args):
         ent_manual.config(state=("disabled" if x_auto_var.get() else "normal"))
+        ent3_manual.config(state=("disabled" if x3_auto_var.get() else "normal"))
+
         if x_auto_var.get():
             previsto = _calc_total_duration_min_from_table()
             if previsto > 0:
-                lbl_info.config(text=f"Automatico: duracao total prevista = {previsto:.2f} min")
+                lbl_info_12.config(text=f"Graficos 1/2 automatico: duracao prevista = {previsto:.2f} min")
             else:
-                lbl_info.config(text="Automatico: duracao total prevista sera usada no inicio do ensaio.")
+                lbl_info_12.config(text="Graficos 1/2 automatico: duracao sera congelada ao iniciar ensaio.")
         else:
-            lbl_info.config(text="Manual: ao completar a janela, o grafico reinicia em 0.")
+            lbl_info_12.config(text="Graficos 1/2 manual: ao completar a janela, reinicia em 0.")
+
+        if x3_auto_var.get():
+            previsto_mm = _calc_expected_distance_mm_from_table()
+            if previsto_mm > 0:
+                lbl_info_3.config(text=f"Grafico 3 automatico: distancia prevista = {previsto_mm:.2f} mm")
+            else:
+                lbl_info_3.config(text="Grafico 3 automatico: distancia prevista sera congelada no START.")
+        else:
+            lbl_info_3.config(text="Grafico 3 manual: janela em mm com varredura ciclica.")
 
     x_auto_var.trace_add("write", _refresh_state)
+    x3_auto_var.trace_add("write", _refresh_state)
     _refresh_state()
 
     btns = tkinter.Frame(frame)
-    btns.grid(row=4, column=0, columnspan=3, sticky="e", pady=(8, 0))
+    btns.grid(row=8, column=0, columnspan=3, sticky="e", pady=(8, 0))
 
     def _apply():
-        global x_auto, x_manual_min, x_auto_total_min, x_time_ref_s, aux
+        global x_auto, x_manual_min, x_auto_total_min
+        global x3_auto, x3_manual_mm, x3_auto_total_mm, aux
 
         if x_auto_var.get():
             x_auto = True
@@ -4060,12 +5046,31 @@ def abrir_config_x():
             aux = max(1, int(math.ceil(x_manual_min * 60.0 * freq)))
             log_msg(f"Eixo X manual: janela={x_manual_min:.2f} min (aux={aux}).")
 
-        # Nao reseta a referencia temporal ao trocar modo:
-        # isso permite retornar ao automatico e replotar todo o ensaio.
+        if x3_auto_var.get():
+            x3_auto = True
+            previsto_mm = _calc_expected_distance_mm_from_table()
+            if previsto_mm > 0:
+                x3_auto_total_mm = previsto_mm
+            log_msg(f"Eixo X G3 em automatico (distancia prevista={x3_auto_total_mm:.2f} mm).")
+        else:
+            try:
+                v3 = float(x3_manual_var.get().strip().replace(",", "."))
+                if v3 <= 0:
+                    raise ValueError()
+            except Exception:
+                messagebox.showwarning(
+                    "Valor Invalido",
+                    "Distancia manual do eixo X (Grafico 3) deve ser um numero positivo em mm."
+                )
+                return
+            x3_auto = False
+            x3_manual_mm = v3
+            log_msg(f"Eixo X G3 manual: janela={x3_manual_mm:.2f} mm.")
 
         try:
             canvas1.draw_idle()
             canvas2.draw_idle()
+            canvas3.draw_idle()
         except Exception:
             pass
         win.destroy()
@@ -4123,7 +5128,7 @@ def abrir_config_y():
     ent_forca_max = tkinter.Entry(frame, width=9, textvariable=y_forca_max_var)
     ent_forca_max.grid(row=2, column=3, padx=4, pady=2)
 
-    tkinter.Label(frame, text="Atrito por volta (Grafico 3)").grid(row=3, column=0, padx=(0, 8), pady=2, sticky="w")
+    tkinter.Label(frame, text="Atrito por distancia (Grafico 3)").grid(row=3, column=0, padx=(0, 8), pady=2, sticky="w")
     chk_atrito = tkinter.Checkbutton(frame, variable=y_atrito_auto_var)
     chk_atrito.grid(row=3, column=1, padx=4, pady=2)
     ent_atrito_min = tkinter.Entry(frame, width=9, textvariable=y_atrito_min_var)
@@ -4171,7 +5176,7 @@ def abrir_config_y():
         r_forca = _parse_range("CoF", y_forca_auto_var.get(), y_forca_min_var.get(), y_forca_max_var.get())
         if r_forca == "ERR":
             return
-        r_atrito = _parse_range("Atrito por volta", y_atrito_auto_var.get(), y_atrito_min_var.get(), y_atrito_max_var.get())
+        r_atrito = _parse_range("Atrito por distancia", y_atrito_auto_var.get(), y_atrito_min_var.get(), y_atrito_max_var.get())
         if r_atrito == "ERR":
             return
 
@@ -4355,6 +5360,15 @@ aba_cfg.grid_rowconfigure(0, weight=1)
 aba_cfg.grid_columnconfigure(0, weight=1)
 nb.add(aba_cfg, text="configuracoes adicionais")
 
+# ------------------------------------------------------------------
+# ABA DE GRAFICOS (VISUALIZACAO 2x2)
+# ------------------------------------------------------------------
+aba_graficos = tkinter.Frame(nb)
+aba_graficos.grid(sticky="news", row=0, column=0)
+aba_graficos.grid_rowconfigure(0, weight=1)
+aba_graficos.grid_columnconfigure(0, weight=1)
+nb.add(aba_graficos, text="graficos")
+
 cfg_frame = tkinter.LabelFrame(aba_cfg, text="configuracoes")
 cfg_frame.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
 cfg_frame.grid_columnconfigure(1, weight=1)
@@ -4401,19 +5415,39 @@ tkinter.Label(
 
 tkinter.Label(
     cfg_frame,
-    text="Calibracao de canais",
+    text="Tamanho do intervalo (mm)",
     font=("Arial", 10, "bold")
 ).grid(row=6, column=0, sticky="w", padx=6, pady=(8, 4), columnspan=3)
 
+dist_interval_var = tkinter.StringVar(value=f"{DIST_INTERVAL_MM:.6g}")
+entry_dist_interval = tkinter.Entry(cfg_frame, textvariable=dist_interval_var)
+entry_dist_interval.grid(row=7, column=0, sticky="ew", padx=6, pady=(2, 4))
+
+btn_salvar_intervalo = tkinter.Button(cfg_frame, text="Salvar intervalo", command=salvar_intervalo_distancia)
+btn_salvar_intervalo.grid(row=7, column=1, sticky="w", padx=6, pady=(2, 4))
+
+tkinter.Label(
+    cfg_frame,
+    text="Grafico 3 e arquivo _P agregam por blocos de distancia deste tamanho.",
+    anchor="w",
+    justify="left"
+).grid(row=8, column=0, columnspan=3, sticky="w", padx=6, pady=(2, 10))
+
+tkinter.Label(
+    cfg_frame,
+    text="Calibracao de canais",
+    font=("Arial", 10, "bold")
+).grid(row=9, column=0, sticky="w", padx=6, pady=(8, 4), columnspan=3)
+
 btn_cfg_canais = tkinter.Button(cfg_frame, text="Configurar canais", command=abrir_configurar_canais)
-btn_cfg_canais.grid(row=7, column=0, sticky="w", padx=6, pady=(2, 6))
+btn_cfg_canais.grid(row=10, column=0, sticky="w", padx=6, pady=(2, 6))
 
 tkinter.Label(
     cfg_frame,
     text="Recomendado: sem ensaio ativo e sem processos de aquisicao em segundo plano.",
     anchor="w",
     justify="left"
-).grid(row=8, column=0, columnspan=3, sticky="w", padx=6, pady=(2, 8))
+).grid(row=11, column=0, columnspan=3, sticky="w", padx=6, pady=(2, 8))
 
 #'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 
@@ -4823,6 +5857,17 @@ button_frame5_pausar.grid(sticky="news", row=5, column=0,columnspan=2, padx=5, p
 button_frame5_parar = tkinter.Button(labelframe3_baixo, text="Parar", command=stop_acquisition)
 button_frame5_parar.grid(sticky="news", row=6, column=0,columnspan=2, padx=5, pady=2)
 
+# Bit de monitoramento (CH1/CH2 sem ensaio), bloqueia inicio enquanto ativo.
+monitor_mode_var = tkinter.BooleanVar(value=False)
+chk_monitor = tkinter.Checkbutton(
+    labelframe3_baixo,
+    text="Monitoramento",
+    variable=monitor_mode_var,
+    command=toggle_monitor_mode
+)
+chk_monitor.grid(sticky="w", row=7, column=0, columnspan=2, padx=5, pady=(2, 2))
+_set_start_button_state()
+
 # Grupo tecnico: tara e check de comunicacao.
 button_frame7_zerar = tkinter.Button(labelframe3_baixo, text="Zerar celula", command=zerar_celula)
 button_frame7_zerar.grid(sticky="news", row=8, column=0, columnspan=2, padx=5, pady=(14, 2))
@@ -5005,6 +6050,31 @@ tkinter.Label(frame_toolbar, text="|", bg="#d9d9d9", fg="gray").pack(side="left"
 btn_config_y = tkinter.Button(frame_toolbar, text="Configurar Eixos Y (Min / Max)", command=abrir_config_y, font=("Arial", 9))
 btn_config_y.pack(side="left", padx=5)
 
+# --- MODO DO GRAFICO 3 (distancia x volta)
+tkinter.Label(frame_toolbar, text="|", bg="#d9d9d9", fg="gray").pack(side="left", padx=10)
+tkinter.Label(frame_toolbar, text="G3:", bg="#d9d9d9", font=("Arial", 9, "bold")).pack(side="left", padx=(0, 4))
+graph3_mode_var = tkinter.StringVar(value=graph3_mode)
+rb_g3_dist = tkinter.Radiobutton(
+    frame_toolbar,
+    text="Distancia",
+    variable=graph3_mode_var,
+    value="dist",
+    bg="#d9d9d9",
+    command=lambda: _set_graph3_mode("dist"),
+    font=("Arial", 9)
+)
+rb_g3_dist.pack(side="left", padx=(0, 4))
+rb_g3_turn = tkinter.Radiobutton(
+    frame_toolbar,
+    text="Volta",
+    variable=graph3_mode_var,
+    value="turn",
+    bg="#d9d9d9",
+    command=lambda: _set_graph3_mode("turn"),
+    font=("Arial", 9)
+)
+rb_g3_turn.pack(side="left")
+
 fig1 = Figure(figsize=(6.5, 1.9), dpi=100)
 ax1 = fig1.add_subplot(111)
 
@@ -5026,9 +6096,9 @@ canvas2.get_tk_widget().pack(side="top", fill="both", expand=True, padx=5, pady=
 
 fig3 = Figure(figsize=(6.5, 2.9), dpi=100)
 ax3 = fig3.add_subplot(111)
-fig3.subplots_adjust(top=0.90, bottom=0.35)
+fig3.subplots_adjust(top=0.90, bottom=0.34, right=0.90)
 ax3_twin = None
-ax3.set_xlabel('Voltas', fontsize=9)
+ax3.set_xlabel('Distancia [mm]', fontsize=9)
 ax3.set_ylabel('Atrito [-]', fontsize=9)
 ax3.grid(True, alpha=0.5)
 ax3.set_facecolor('white')
@@ -5037,10 +6107,124 @@ canvas3 = FigureCanvasTkAgg(fig3, master=frame_graficos)
 # side="top" ou "bottom" para empilhar os gráficos um embaixo do outro
 canvas3.get_tk_widget().pack(side="top", fill="both", expand=True, padx=5, pady=2)
 
+# Figura da aba "graficos" (4 painéis simultaneos).
+fig_graficos = Figure(figsize=(10.0, 6.5), dpi=100)
+axg_temp = fig_graficos.add_subplot(221)
+axg_cof = fig_graficos.add_subplot(223)
+axg_turn = fig_graficos.add_subplot(222)
+axg_dist = fig_graficos.add_subplot(224)
+axg_turn_twin = axg_turn.twinx()
+axg_dist_twin = axg_dist.twinx()
+fig_graficos.subplots_adjust(left=0.06, right=0.93, top=0.95, bottom=0.08, hspace=0.35, wspace=0.24)
+
+canvas_graficos = FigureCanvasTkAgg(fig_graficos, master=aba_graficos)
+canvas_graficos.get_tk_widget().pack(side="top", fill="both", expand=True, padx=6, pady=6)
+
 
 ani1 = FuncAnimation(fig1, update1, frames=np.linspace(0, 10, 100), interval=200, cache_frame_data="true")
 ani2 = FuncAnimation(fig2, update2, frames=np.linspace(0, 10, 100), interval=200, cache_frame_data="true")
 ani3 = FuncAnimation(fig3, update3, frames=np.linspace(0, 10, 100), interval=200, cache_frame_data="true")
+ani_graficos = FuncAnimation(fig_graficos, update_graficos_tab, frames=np.linspace(0, 10, 100), interval=250, cache_frame_data="true")
+
+# Perfil de atualizacao para reduzir custo na troca de abas sem stop/start agressivo.
+ANIM_INTERVAL_MAIN_ACTIVE = 200
+ANIM_INTERVAL_MAIN_BG = 450
+ANIM_INTERVAL_TAB_ACTIVE = 250
+ANIM_INTERVAL_TAB_BG = 700
+
+
+# Controle de desempenho por aba:
+# - Aba "graficos": entra em modo foco (oculta painel esquerdo e atualiza so 4 graficos).
+# - Outras abas: restaura painel esquerdo e atualiza graficos originais.
+graficos_focus_mode = False
+graficos_side_saved_width = None
+
+
+def _set_graficos_focus_mode(enabled):
+    """
+    Alterna modo foco da aba de visualizacao 2x2.
+
+    enabled=True:
+      - Oculta frame lateral de graficos da aba principal.
+      - Mantem animacoes da aba principal em modo lento (throttle).
+      - Mantem animacao da aba "graficos" em modo rapido.
+
+    enabled=False:
+      - Restaura frame lateral.
+      - Reativa velocidade normal da aba principal.
+      - Coloca animacao da aba "graficos" em modo lento.
+    """
+    global graficos_focus_mode, graficos_side_saved_width
+    enabled = bool(enabled)
+    if graficos_focus_mode == enabled:
+        return
+
+    try:
+        if enabled:
+            if graficos_side_saved_width is None:
+                try:
+                    w_now = int(frame_graficos.winfo_width())
+                except Exception:
+                    w_now = 0
+                if w_now <= 10:
+                    try:
+                        w_now = int(frame_graficos.winfo_reqwidth())
+                    except Exception:
+                        w_now = 680
+                graficos_side_saved_width = max(320, w_now)
+            # Em vez de pack_forget/pack (que causa reflow agressivo),
+            # apenas colapsa o painel lateral para largura minima.
+            try:
+                frame_graficos.pack_propagate(False)
+            except Exception:
+                pass
+            frame_graficos.configure(width=1)
+            ani1.event_source.interval = ANIM_INTERVAL_MAIN_BG
+            ani2.event_source.interval = ANIM_INTERVAL_MAIN_BG
+            ani3.event_source.interval = ANIM_INTERVAL_MAIN_BG
+            ani_graficos.event_source.interval = ANIM_INTERVAL_TAB_ACTIVE
+        else:
+            # Restaura largura do painel lateral sem desmontar o layout.
+            restore_w = graficos_side_saved_width if graficos_side_saved_width else 680
+            frame_graficos.configure(width=int(restore_w))
+            try:
+                frame_graficos.pack_propagate(False)
+            except Exception:
+                pass
+            # Deixa o Tk recalcular geometria antes de forcar redraw dos eixos.
+            try:
+                main_frame.update_idletasks()
+            except Exception:
+                pass
+            ani1.event_source.interval = ANIM_INTERVAL_MAIN_ACTIVE
+            ani2.event_source.interval = ANIM_INTERVAL_MAIN_ACTIVE
+            ani3.event_source.interval = ANIM_INTERVAL_MAIN_ACTIVE
+            ani_graficos.event_source.interval = ANIM_INTERVAL_TAB_BG
+            try:
+                root.after(30, canvas1.draw_idle)
+                root.after(40, canvas2.draw_idle)
+                root.after(50, canvas3.draw_idle)
+            except Exception:
+                pass
+        graficos_focus_mode = enabled
+    except Exception as e:
+        log_msg(f"Aba graficos: falha ao alternar modo foco ({e}).")
+
+
+def _on_notebook_tab_changed(event=None):
+    """
+    Handler de troca de aba para aplicar modo foco na aba 'graficos'.
+    """
+    try:
+        tab_id = nb.select()
+        tab_txt = str(nb.tab(tab_id, "text")).strip().lower()
+        _set_graficos_focus_mode(tab_txt == "graficos")
+    except Exception as e:
+        log_msg(f"Aba graficos: falha ao ler aba ativa ({e}).")
+
+
+nb.bind("<<NotebookTabChanged>>", _on_notebook_tab_changed)
+root.after(0, _on_notebook_tab_changed)
 
 #matplotlib.pyplot.show(block=False)
 

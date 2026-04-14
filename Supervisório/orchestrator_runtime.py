@@ -58,7 +58,8 @@ class RunState:
     # Caminhos de arquivos de saida do ensaio.
     dlg_csv: str
     drive_csv: str
-    turn_csv: str
+    turn_dist_csv: str
+    turn_vp_csv: str
     merge_csv: str
     schedule_csv: str
     # Caminhos dos executaveis usados (util para diagnostico em log).
@@ -72,6 +73,7 @@ class RunState:
     force_normal_n: float
     relacao: float
     raio_mm: float = 0.0
+    distance_interval_mm: float = 10.0
     # Estado logico de pausa observado pelo orquestrador.
     paused: bool = False
 
@@ -111,7 +113,7 @@ def build_output_paths(base_dir: str, nome_ensaio: str, estudo: str) -> dict:
         estudo: identificador de estudo/repeticao.
 
     Retorna:
-        dict com caminhos: folder, info_csv, dlg_csv, drive_csv, turn_csv, merge_csv, schedule_csv.
+        dict com caminhos: folder, info_csv, dlg_csv, drive_csv, turn_dist_csv, turn_vp_csv, merge_csv, schedule_csv.
 
     Excecoes:
         FileExistsError: quando a pasta ja existe (evita sobrescrever ensaio).
@@ -127,7 +129,8 @@ def build_output_paths(base_dir: str, nome_ensaio: str, estudo: str) -> dict:
         "info_csv": os.path.join(folder_path, "info_ensaio.csv"),
         "dlg_csv": os.path.join(folder_path, "dlg.csv"),
         "drive_csv": os.path.join(folder_path, "drive.csv"),
-        "turn_csv": os.path.join(folder_path, "atrito_por_volta.csv"),
+        "turn_dist_csv": os.path.join(folder_path, "atrito_por_distancia.csv"),
+        "turn_vp_csv": os.path.join(folder_path, "atrito_por_volta.csv"),
         "merge_csv": os.path.join(folder_path, "resultado_ensaio.csv"),
         "schedule_csv": os.path.join(folder_path, "schedule.csv"),
     }
@@ -323,6 +326,7 @@ def start_external_run(
     force_normal_n: float = 0.0,
     relacao: float = 1.0,
     raio_mm: float = 0.0,
+    distance_interval_mm: float = 10.0,
 ) -> RunState:
     """
     Inicia o ensaio em modo externo (executaveis C sem interface).
@@ -340,7 +344,7 @@ def start_external_run(
     Ocasiando menos percas de dados por aquisicoes com problemas.
     Parametros:
         repo_root: raiz do repositorio para localizar .exe.
-        out_paths: caminhos de saida (dlg_csv, drive_csv, turn_csv, merge_csv, schedule_csv).
+        out_paths: caminhos de saida (dlg_csv, drive_csv, turn_dist_csv, turn_vp_csv, merge_csv, schedule_csv).
         schedule: lista de etapas (rpm, duracao_s).
         duration_s: duracao total do ensaio.
         rate_hz: taxa alvo de aquisicao.
@@ -349,6 +353,7 @@ def start_external_run(
         com_port/slave_id/baud/parity: parametros seriais do Drive.
         show_console: quando False, tenta ocultar janela de console no Windows.
         raio_mm: raio da trilha no disco (usado para derivar velocidade media por volta).
+        distance_interval_mm: tamanho do intervalo (mm) para agregar arquivo _P.
 
     Retorna:
         RunState com handles de processo, caminhos e parametros da execucao.
@@ -356,9 +361,20 @@ def start_external_run(
     Excecoes:
         FileNotFoundError: quando algum executavel obrigatorio nao e encontrado.
     """
-    if "turn_csv" not in out_paths or not out_paths.get("turn_csv"):
+    if "turn_dist_csv" not in out_paths or not out_paths.get("turn_dist_csv"):
         base_folder = os.path.dirname(out_paths.get("merge_csv", "")) or os.getcwd()
-        out_paths["turn_csv"] = os.path.join(base_folder, "atrito_por_volta.csv")
+        old_turn = out_paths.get("turn_csv")
+        if old_turn:
+            out_paths["turn_dist_csv"] = old_turn
+        else:
+            out_paths["turn_dist_csv"] = os.path.join(base_folder, "atrito_por_distancia.csv")
+    if "turn_vp_csv" not in out_paths or not out_paths.get("turn_vp_csv"):
+        base_folder = os.path.dirname(out_paths.get("merge_csv", "")) or os.getcwd()
+        dist_name = os.path.basename(out_paths.get("turn_dist_csv", "")) or ""
+        if dist_name.endswith("_DP.csv"):
+            out_paths["turn_vp_csv"] = os.path.join(base_folder, dist_name.replace("_DP.csv", "_VP.csv"))
+        else:
+            out_paths["turn_vp_csv"] = os.path.join(base_folder, "atrito_por_volta.csv")
 
     write_schedule_csv(out_paths["schedule_csv"], schedule)
 
@@ -462,7 +478,8 @@ def start_external_run(
         turn_proc=None,
         dlg_csv=out_paths["dlg_csv"],
         drive_csv=out_paths["drive_csv"],
-        turn_csv=out_paths["turn_csv"],
+        turn_dist_csv=out_paths["turn_dist_csv"],
+        turn_vp_csv=out_paths["turn_vp_csv"],
         merge_csv=out_paths["merge_csv"],
         schedule_csv=out_paths["schedule_csv"],
         dlg_exe=dlg_exe,
@@ -474,6 +491,7 @@ def start_external_run(
         force_normal_n=force_normal_n,
         relacao=relacao,
         raio_mm=raio_mm,
+        distance_interval_mm=distance_interval_mm,
     )
 
 
@@ -633,10 +651,10 @@ def finalize_dev_artifacts_after_run(state: RunState, retries: int = 20, sleep_s
 
 def _rebuild_turn_csv_from_logs(state: RunState) -> None:
     """
-    Regera atrito_por_volta.csv em modo offline (sem IPC) usando logs finais.
+    Regera arquivos _DP e _VP em modo offline (sem IPC) usando logs finais.
 
     Esse passo roda ao final do ensaio para garantir consistencia dos dados
-    por volta, mesmo se o processo em tempo real tiver encerrado cedo.
+    por distancia e por volta, mesmo se o processamento em tempo real atrasar.
     """
     if not state:
         return
@@ -652,6 +670,10 @@ def _rebuild_turn_csv_from_logs(state: RunState) -> None:
         raio_mm = float(state.raio_mm) if state.raio_mm > 0 else 0.0
     except Exception:
         raio_mm = 0.0
+    try:
+        distance_interval_mm = float(state.distance_interval_mm) if state.distance_interval_mm > 0 else 10.0
+    except Exception:
+        distance_interval_mm = 10.0
     cycles_per_motor_rev = 1.0
     rpm_dir_deadband = 5.0
 
@@ -677,9 +699,48 @@ def _rebuild_turn_csv_from_logs(state: RunState) -> None:
         except Exception:
             return default
 
-    with open(state.turn_csv, "w", newline="", encoding="utf-8") as fout:
-        w = csv.writer(fout, delimiter=";", lineterminator="\n")
-        w.writerow([
+    turn_dist_csv = state.turn_dist_csv
+    turn_vp_csv = state.turn_vp_csv
+
+    def _acc_reset():
+        return {
+            "n_total": 0,
+            "n_fail": 0,
+            "n_valid": 0,
+            "atr_sum": 0.0,
+            "atr_min": None,
+            "atr_max": None,
+            "rpm_sum": 0.0,
+            "rpm_cnt": 0,
+        }
+
+    def _emit_row(writer, x_value, acc):
+        pct_loss = (100.0 * acc["n_fail"] / acc["n_total"]) if acc["n_total"] > 0 else 0.0
+        atr_med = (acc["atr_sum"] / acc["n_valid"]) if acc["n_valid"] > 0 else None
+        rpm_med = (acc["rpm_sum"] / acc["rpm_cnt"]) if acc["rpm_cnt"] > 0 else None
+        vel_med_mm_s = None
+        if rpm_med is not None and raio_mm > 0.0 and relacao > 0.0:
+            vel_med_mm_s = abs(rpm_med) * (2.0 * 3.141592653589793 * raio_mm) / (60.0 * relacao)
+        writer.writerow([
+            x_value,
+            f"{atr_med:.6f}" if atr_med is not None else "NULL",
+            f"{acc['atr_min']:.6f}" if acc["atr_min"] is not None else "NULL",
+            f"{acc['atr_max']:.6f}" if acc["atr_max"] is not None else "NULL",
+            f"{rpm_med:.6f}" if rpm_med is not None else "NULL",
+            f"{vel_med_mm_s:.6f}" if vel_med_mm_s is not None else "NULL",
+            acc["n_total"], acc["n_fail"], acc["n_valid"], f"{pct_loss:.3f}"
+        ])
+
+    with open(turn_dist_csv, "w", newline="", encoding="utf-8") as fdist, \
+         open(turn_vp_csv, "w", newline="", encoding="utf-8") as fturn:
+        wd = csv.writer(fdist, delimiter=";", lineterminator="\n")
+        wt = csv.writer(fturn, delimiter=";", lineterminator="\n")
+
+        wd.writerow([
+            "distancia_mm", "atrito_med", "atrito_min", "atrito_max", "rpm_medio_intervalo", "velocidade_media_mm_s",
+            "n_total_pontos", "n_falhas", "n_validas", "pct_perda"
+        ])
+        wt.writerow([
             "volta_n", "atrito_med", "atrito_min", "atrito_max", "rpm_medio_volta", "velocidade_media_mm_s",
             "n_total_pontos", "n_falhas", "n_validas", "pct_perda"
         ])
@@ -701,17 +762,13 @@ def _rebuild_turn_csv_from_logs(state: RunState) -> None:
             prev_t_s = 0.0
             prev_t_valid = False
             dir_sign = 1
-            turn_progress = 0.0
-            turn_n = 1
+            cum_dist_mm = 0.0
+            cum_turn = 0.0
+            next_boundary_mm = distance_interval_mm
+            next_boundary_turn = 1.0
 
-            n_total = 0
-            n_fail = 0
-            n_valid = 0
-            atr_sum = 0.0
-            atr_min = None
-            atr_max = None
-            rpm_sum = 0.0
-            rpm_cnt = 0
+            acc_dist = _acc_reset()
+            acc_turn = _acc_reset()
 
             while True:
                 if not have_d:
@@ -766,87 +823,79 @@ def _rebuild_turn_csv_from_logs(state: RunState) -> None:
                 pos_ok = (pos_err == 0 and pos is not None)
                 rpm_ok = (rpm_err == 0 and rpm is not None)
 
-                n_total += 1
+                acc_dist["n_total"] += 1
+                acc_turn["n_total"] += 1
                 if atr_ok and pos_ok:
-                    n_valid += 1
-                    atr_sum += atr
-                    atr_min = atr if atr_min is None else min(atr_min, atr)
-                    atr_max = atr if atr_max is None else max(atr_max, atr)
+                    acc_dist["n_valid"] += 1
+                    acc_turn["n_valid"] += 1
+                    acc_dist["atr_sum"] += atr
+                    acc_turn["atr_sum"] += atr
+                    acc_dist["atr_min"] = atr if acc_dist["atr_min"] is None else min(acc_dist["atr_min"], atr)
+                    acc_turn["atr_min"] = atr if acc_turn["atr_min"] is None else min(acc_turn["atr_min"], atr)
+                    acc_dist["atr_max"] = atr if acc_dist["atr_max"] is None else max(acc_dist["atr_max"], atr)
+                    acc_turn["atr_max"] = atr if acc_turn["atr_max"] is None else max(acc_turn["atr_max"], atr)
                     if rpm_ok:
-                        rpm_sum += rpm
-                        rpm_cnt += 1
+                        acc_dist["rpm_sum"] += rpm
+                        acc_turn["rpm_sum"] += rpm
+                        acc_dist["rpm_cnt"] += 1
+                        acc_turn["rpm_cnt"] += 1
                 else:
-                    n_fail += 1
+                    acc_dist["n_fail"] += 1
+                    acc_turn["n_fail"] += 1
+
+                if pos_ok and prev_pos_valid:
+                    raw_diff = pos - prev_pos
+                    d_eff = 0.0
+                    if rpm_ok and abs(rpm) >= rpm_dir_deadband:
+                        dir_sign = 1 if rpm >= 0.0 else -1
+
+                    if dir_sign >= 0:
+                        d_eff = raw_diff
+                        if d_eff < (-0.5 * pos_mod):
+                            d_eff += pos_mod
+                        elif d_eff < 0.0:
+                            d_eff = 0.0
+                    else:
+                        d_eff = raw_diff
+                        if d_eff > (0.5 * pos_mod):
+                            d_eff -= pos_mod
+                        elif d_eff > 0.0:
+                            d_eff = 0.0
+
+                    if d_eff != 0.0:
+                        dt_s = 0.0
+                        if prev_t_valid and t_s_drv is not None:
+                            dt_s = t_s_drv - prev_t_s
+                            if dt_s <= 0.0 or dt_s > 1.0:
+                                dt_s = 0.0
+                        if rpm_ok and dt_s > 0.0:
+                            max_step = pos_mod * (abs(rpm) / 60.0) * dt_s * 3.0 + 5.0
+                        elif rpm_ok:
+                            max_step = pos_mod * (abs(rpm) / 60.0) * 0.05 * 3.0 + 5.0
+                        else:
+                            max_step = pos_mod * 0.05
+                        if abs(d_eff) > max_step:
+                            d_eff = 0.0
+
+                    motor_turn_inc = abs(d_eff) / (pos_mod * cycles_per_motor_rev)
+                    pin_turn_inc = motor_turn_inc / relacao
+                    dist_inc_mm = pin_turn_inc * (2.0 * 3.141592653589793 * raio_mm)
+                    if pin_turn_inc > 0.0:
+                        cum_turn += pin_turn_inc
+                    if dist_inc_mm > 0.0:
+                        cum_dist_mm += dist_inc_mm
+
+                    while cum_dist_mm >= next_boundary_mm:
+                        _emit_row(wd, f"{next_boundary_mm:.6f}", acc_dist)
+                        next_boundary_mm += distance_interval_mm
+                        acc_dist = _acc_reset()
+
+                    while cum_turn >= next_boundary_turn:
+                        _emit_row(wt, f"{next_boundary_turn:.6f}", acc_turn)
+                        next_boundary_turn += 1.0
+                        acc_turn = _acc_reset()
 
                 if pos_ok:
-                    if prev_pos_valid:
-                        raw_diff = pos - prev_pos
-                        d_eff = 0.0
-                        if rpm_ok and abs(rpm) >= rpm_dir_deadband:
-                            dir_sign = 1 if rpm >= 0.0 else -1
-
-                        if dir_sign >= 0:
-                            d_eff = raw_diff
-                            if d_eff < (-0.5 * pos_mod):
-                                d_eff += pos_mod
-                            elif d_eff < 0.0:
-                                d_eff = 0.0
-                        else:
-                            d_eff = raw_diff
-                            if d_eff > (0.5 * pos_mod):
-                                d_eff -= pos_mod
-                            elif d_eff > 0.0:
-                                d_eff = 0.0
-
-                        # Guard rail: rejeita saltos impossiveis para evitar
-                        # sobrecontagem de voltas por glitches de leitura.
-                        if d_eff != 0.0:
-                            dt_s = 0.0
-                            if prev_t_valid and t_s_drv is not None:
-                                dt_s = t_s_drv - prev_t_s
-                                if dt_s <= 0.0 or dt_s > 1.0:
-                                    dt_s = 0.0
-                            if rpm_ok and dt_s > 0.0:
-                                max_step = pos_mod * (abs(rpm) / 60.0) * dt_s * 3.0 + 5.0
-                            elif rpm_ok:
-                                max_step = pos_mod * (abs(rpm) / 60.0) * 0.05 * 3.0 + 5.0
-                            else:
-                                max_step = pos_mod * 0.05
-                            if abs(d_eff) > max_step:
-                                d_eff = 0.0
-
-                        motor_turn_inc = abs(d_eff) / (pos_mod * cycles_per_motor_rev)
-                        # i = D2/D1 -> voltas_pino = voltas_motor / i
-                        pin_turn_inc = motor_turn_inc / relacao
-                        turn_progress += pin_turn_inc
-
-                        while turn_progress >= 1.0:
-                            pct_loss = (100.0 * n_fail / n_total) if n_total > 0 else 0.0
-                            atr_med = (atr_sum / n_valid) if n_valid > 0 else None
-                            rpm_med = (rpm_sum / rpm_cnt) if rpm_cnt > 0 else None
-                            vel_med_mm_s = None
-                            if rpm_med is not None and raio_mm > 0.0 and relacao > 0.0:
-                                vel_med_mm_s = abs(rpm_med) * (2.0 * 3.141592653589793 * raio_mm) / (60.0 * relacao)
-                            w.writerow([
-                                turn_n,
-                                f"{atr_med:.6f}" if atr_med is not None else "NULL",
-                                f"{atr_min:.6f}" if atr_min is not None else "NULL",
-                                f"{atr_max:.6f}" if atr_max is not None else "NULL",
-                                f"{rpm_med:.6f}" if rpm_med is not None else "NULL",
-                                f"{vel_med_mm_s:.6f}" if vel_med_mm_s is not None else "NULL",
-                                n_total, n_fail, n_valid, f"{pct_loss:.3f}"
-                            ])
-                            turn_n += 1
-                            turn_progress -= 1.0
-                            n_total = 0
-                            n_fail = 0
-                            n_valid = 0
-                            atr_sum = 0.0
-                            atr_min = None
-                            atr_max = None
-                            rpm_sum = 0.0
-                            rpm_cnt = 0
-
                     prev_pos = pos
                     prev_pos_valid = True
                     prev_t_s = t_s_drv if t_s_drv is not None else prev_t_s
