@@ -91,7 +91,7 @@ SupervisÃ³rio (Python/Tk):
 - A UI inclui aba "graficos" para visualizacao 2x2 em tempo real: Temperatura + CoF (esquerda) e processamento por volta + por distancia (direita), reutilizando as mesmas configuracoes de eixo X/Y da aba principal.
 - Na aba "graficos", os dois paineis da direita (volta/distancia) exibem atrito no eixo esquerdo e velocidade media (mm/s) no eixo direito.
 - Ao abrir a aba "graficos", a UI entra em modo foco de desempenho: colapsa o painel lateral de graficos da aba principal (sem desmontar layout com pack_forget); ao sair da aba, restaura a largura do painel sem perder continuidade dos dados.
-- Modo foco da aba "graficos" usa throttle de animacao (intervalos lentos em background) para reduzir custo de troca de aba sem stop/start agressivo das animacoes.
+- Renderizacao dos graficos usa um unico agendador Tk: redesenha somente a vista ativa (coluna lateral ou aba 2x2) e aguarda curto periodo apos troca de aba antes de chamar Matplotlib.
 - Renderizacao dos graficos na UI aplica decimacao apenas para exibicao (downsample visual), mantendo dados completos para processamento/arquivo.
 - Alternar eixo X entre manual/automatico durante ensaio preserva historico completo dos graficos 1/2; ao voltar para automatico, a serie volta a mostrar desde o inicio do ensaio.
 - Grafico 2 exibe CoF (CH1/Forca normal) com legenda "CoF" e eixo Y "CoF [-]".
@@ -216,6 +216,7 @@ Roadmap (short)
 Agent behavior
 - Read the repo and produce a plan before editing, unless trivial.
 - Propose focused diffs; avoid broad reformatting.
+- Build the changed executable/app before final handoff when a local build path is available; for supervisor UI changes, regenerate `Supervisório\dist\novo_tribometro.exe` with the existing PyInstaller spec.
 - If unexpected changes appear that you did not make, stop and ask.
 - Keep AGENTS.md updated when protocol, calibration, or behavior changes are introduced.
 

@@ -70,10 +70,9 @@ from tkinter import messagebox, filedialog
 from tkinter import ttk
 
 # Bibliotecas externas para calculo/plot:
-# - numpy: suporte numerico (ex.: geracao de frames para animacao).
+# - numpy: suporte numerico para processamento e reducao de series.
 # - matplotlib: graficos embutidos na UI Tkinter.
 import numpy as np
-from matplotlib.animation import FuncAnimation
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
@@ -1588,6 +1587,39 @@ p_turn_coluna_velocidade = []
 p_dist_target_mm = 0.0
 p_turn_target = 0.0
 
+# Revisoes de renderizacao dos graficos.
+# Threads de tail atualizam dados; a UI le essas revisoes no loop Tk e redesenha
+# apenas quando ha dado/configuracao nova na aba atualmente visivel.
+graph_revision_lock = threading.Lock()
+graph_data_revision = 0
+graph_config_revision = 0
+
+
+def _bump_graph_data_revision():
+    global graph_data_revision
+    try:
+        with graph_revision_lock:
+            graph_data_revision += 1
+    except Exception:
+        pass
+
+
+def _bump_graph_config_revision():
+    global graph_config_revision
+    try:
+        with graph_revision_lock:
+            graph_config_revision += 1
+    except Exception:
+        pass
+
+
+def _current_graph_revision():
+    try:
+        with graph_revision_lock:
+            return (graph_data_revision, graph_config_revision)
+    except Exception:
+        return (0, 0)
+
 # Configuracao do tamanho do bloco para salvar no disco (ex: a cada 1000 linhas)
 tamanho_bloco = 1000 
 
@@ -1711,6 +1743,8 @@ def go():
                             graSamps[iCh].append(val) # Adiciona o novo valor na lista de plotagem do gráfico
                             
                             linha_para_salvar += f"; {val:.3f}" # Adiciona string do valor
+
+                        _bump_graph_data_revision()
 
                         # Adiciona a linha no buffer da memória
                         buffer_escrita.append(linha_para_salvar + "\n")
@@ -1839,8 +1873,15 @@ def go_p():
 # - Envia comando digital da versao anterior para seguranca (SetDigOut).
 # - Finaliza o loop da interface Tkinter.
 def fechar_janela():
+    global graph_render_job
     if monitor_mode_active:
         _stop_monitor_mode()
+    try:
+        if graph_render_job is not None:
+            root.after_cancel(graph_render_job)
+            graph_render_job = None
+    except Exception:
+        pass
     myModule.SetDigOut(ip, 0, 1, 0)
     root.quit()
 
@@ -2469,6 +2510,7 @@ def _tail_dlg_csv_for_graphs(dlg_csv_path, run_token=None):
                 sampsTimestamp.append(t_s)
                 for i in range(8):
                     graSamps[i].append(vals[i])
+                _bump_graph_data_revision()
                 n_rows += 1
                 if err == "0" and not first_valid_logged:
                     graph_log(f"DLG first valid row: idx={parts[0]} t_s={t_s:.6f} ch1={vals[0]} ch2={vals[1]}")
@@ -2569,6 +2611,7 @@ def _tail_monitor_csv_for_graphs(dlg_csv_path, monitor_token):
                     for i in range(8):
                         if graSamps[i]:
                             graSamps[i].pop(0)
+                _bump_graph_data_revision()
     except Exception as e:
         log_msg(f"Monitoramento: erro no tail do DLG ({e}).")
 
@@ -2611,6 +2654,7 @@ def _start_monitor_mode():
     for i in range(numChannels):
         graSamps[i].clear()
     x_time_ref_s = None
+    _bump_graph_config_revision()
 
     cmd = [
         dlg_exe,
@@ -2722,6 +2766,7 @@ def _stop_monitor_mode():
     for i in range(numChannels):
         graSamps[i].clear()
     x_time_ref_s = None
+    _bump_graph_config_revision()
 
     if monitor_csv_path:
         try:
@@ -2853,6 +2898,7 @@ def _append_dist_point(dist_mm, atr_med, atr_min, atr_max, rpm_med):
     p_atrito_min.append(atr_min)
     p_atrito_max.append(atr_max)
     p_coluna_velocidade.append(rpm_med)
+    _bump_graph_data_revision()
     return True
 
 
@@ -2877,6 +2923,7 @@ def _append_turn_point(turn_n, atr_med, atr_min, atr_max, rpm_med):
     p_turn_atrito_min.append(atr_min)
     p_turn_atrito_max.append(atr_max)
     p_turn_coluna_velocidade.append(rpm_med)
+    _bump_graph_data_revision()
     return True
 
 
@@ -3807,6 +3854,7 @@ def start_acquisition():
         # Em modo automatico, eixo X de Temperatura/CoF segue duracao total prevista.
         if dur_total > 0:
             x_auto_total_min = float(dur_total) / 60.0
+        _bump_graph_config_revision()
         rate_hz = float(getattr(orch, "DEFAULT_RATE_HZ", 50.0))
 
         # Caminhos padrao (gerados por salvar_arquivo)
@@ -3958,6 +4006,7 @@ def start_acquisition():
                         globals()["x_time_ref_s"] = None
                         globals()["p_dist_target_mm"] = 0.0
                         globals()["p_turn_target"] = 0.0
+                        _bump_graph_config_revision()
                         ax1.clear()
                         ax2.clear()
                         ax3.clear()
@@ -4029,6 +4078,7 @@ def start_acquisition():
         graSamps[i].clear()
 
     sampsTimestamp.clear()
+    _bump_graph_config_revision()
         
     is_paused = False # Garante que começa despausado
     #button_frame5_pausar.config(text="Pausar", bg="SystemButtonFace")
@@ -4210,13 +4260,14 @@ def stop_acquisition():
             p_dist_target_mm = 0.0
             p_turn_target = 0.0
             x_time_ref_s = None
+            _bump_graph_config_revision()
 
             # Limpa os eixos imediatamente
             ax1.clear()
 
 # Nicolas
 # update1(frame): Limpa o ax1, verifica os canais ativos, processa o tempo baseada na frequência e plota o gráfico (ax1.plot) da temperatura.
-# Ela é chamada automaticamente e repetidamente pelo Matplotlib através da ferramenta de animação no fim do código.
+# Ela é chamada pelo agendador Tk dos graficos, somente quando a coluna lateral esta visivel.
 # update1(frame):
 # - Renderiza grafico 1 (temperatura) usando CH2 do DLG.
 # - Aplica escala X compartilhada (automatico por duracao total ou manual ciclico).
@@ -4931,8 +4982,9 @@ def _set_graph3_mode(mode):
     graph3_mode = mode
     if "graph3_mode_var" in globals():
         graph3_mode_var.set(mode)
+    _bump_graph_config_revision()
     try:
-        canvas3.draw_idle()
+        _request_graph_render(force=True)
     except Exception:
         pass
 
@@ -5067,10 +5119,9 @@ def abrir_config_x():
             x3_manual_mm = v3
             log_msg(f"Eixo X G3 manual: janela={x3_manual_mm:.2f} mm.")
 
+        _bump_graph_config_revision()
         try:
-            canvas1.draw_idle()
-            canvas2.draw_idle()
-            canvas3.draw_idle()
+            _request_graph_render(force=True)
         except Exception:
             pass
         win.destroy()
@@ -5191,10 +5242,9 @@ def abrir_config_y():
         if r_atrito is not None:
             y3_min, y3_max = r_atrito
 
+        _bump_graph_config_revision()
         try:
-            canvas1.draw_idle()
-            canvas2.draw_idle()
-            canvas3.draw_idle()
+            _request_graph_render(force=True)
         except Exception:
             pass
         win.destroy()
@@ -5241,7 +5291,11 @@ def get_channels():
         No fluxo atual, canais do DLG sao tratados pelo logger externo e
         pela calibracao dedicada (CalibraDLG/CalibraDLG_UI).
     """
-    pass
+    _bump_graph_config_revision()
+    try:
+        _request_graph_render(force=True)
+    except Exception:
+        pass
 
 # variáveis globais
 # Variaveis globais historicas da UI (mantidas por compatibilidade).
@@ -6029,7 +6083,7 @@ button_enter_aux.grid(row=3, column=1)
 
 ##################################
 # Nicolas
-# Criando o gráfico - Tudo abaixo, até ani3 é criação dos gráficos
+# Criando o gráfico - Tudo abaixo ate o agendador central e criacao/render dos graficos
 # --- BARRA DE CONTROLE DE ESCALA (DENTRO DO FRAME DOS GRÁFICOS) ---
 frame_toolbar = tkinter.Frame(frame_graficos, bg="#d9d9d9", height=40)
 frame_toolbar.pack(side="top", fill="x", padx=5, pady=5)
@@ -6120,24 +6174,118 @@ fig_graficos.subplots_adjust(left=0.06, right=0.93, top=0.95, bottom=0.08, hspac
 canvas_graficos = FigureCanvasTkAgg(fig_graficos, master=aba_graficos)
 canvas_graficos.get_tk_widget().pack(side="top", fill="both", expand=True, padx=6, pady=6)
 
+#
+# Agendador central dos graficos.
+#
+# Antes havia uma animacao Matplotlib por figura. Na pratica, os 3 graficos laterais
+# continuavam redesenhando quando a aba 2x2 estava aberta, e a aba 2x2 tambem
+# redesenhava quando estava escondida. O loop abaixo mantem apenas um timer Tk:
+# ele atualiza somente a vista ativa e espera a troca de aba assentar antes de
+# chamar Matplotlib.
+GRAPH_MAIN_INTERVAL_MS = 220
+GRAPH_TAB_INTERVAL_MS = 300
+GRAPH_IDLE_INTERVAL_MS = 900
+GRAPH_SWITCH_QUIET_MS = 180
 
-ani1 = FuncAnimation(fig1, update1, frames=np.linspace(0, 10, 100), interval=200, cache_frame_data="true")
-ani2 = FuncAnimation(fig2, update2, frames=np.linspace(0, 10, 100), interval=200, cache_frame_data="true")
-ani3 = FuncAnimation(fig3, update3, frames=np.linspace(0, 10, 100), interval=200, cache_frame_data="true")
-ani_graficos = FuncAnimation(fig_graficos, update_graficos_tab, frames=np.linspace(0, 10, 100), interval=250, cache_frame_data="true")
-
-# Perfil de atualizacao para reduzir custo na troca de abas sem stop/start agressivo.
-ANIM_INTERVAL_MAIN_ACTIVE = 200
-ANIM_INTERVAL_MAIN_BG = 450
-ANIM_INTERVAL_TAB_ACTIVE = 250
-ANIM_INTERVAL_TAB_BG = 700
-
-
-# Controle de desempenho por aba:
-# - Aba "graficos": entra em modo foco (oculta painel esquerdo e atualiza so 4 graficos).
-# - Outras abas: restaura painel esquerdo e atualiza graficos originais.
 graficos_focus_mode = False
 graficos_side_saved_width = None
+graph_render_job = None
+graph_render_busy = False
+graph_force_render = True
+graph_last_main_revision = None
+graph_last_tab_revision = None
+graph_switch_quiet_until = 0.0
+
+
+def _selected_tab_is_graficos():
+    try:
+        tab_id = nb.select()
+        tab_txt = str(nb.tab(tab_id, "text")).strip().lower()
+        return tab_txt == "graficos"
+    except Exception:
+        return False
+
+
+def _graph_next_interval_ms(tab_active):
+    if _is_running() or monitor_mode_active:
+        return GRAPH_TAB_INTERVAL_MS if tab_active else GRAPH_MAIN_INTERVAL_MS
+    return GRAPH_IDLE_INTERVAL_MS
+
+
+def _schedule_graph_render(delay_ms):
+    global graph_render_job
+    if graph_render_job is not None:
+        return
+    try:
+        graph_render_job = root.after(max(1, int(delay_ms)), _graph_render_loop)
+    except Exception:
+        graph_render_job = None
+
+
+def _request_graph_render(force=False, delay_ms=1):
+    global graph_force_render, graph_render_job
+    if force:
+        graph_force_render = True
+    if graph_render_job is not None and force:
+        try:
+            root.after_cancel(graph_render_job)
+        except Exception:
+            pass
+        graph_render_job = None
+    _schedule_graph_render(delay_ms)
+
+
+def _render_main_graphs():
+    update1(None)
+    update2(None)
+    update3(None)
+    canvas1.draw_idle()
+    canvas2.draw_idle()
+    canvas3.draw_idle()
+
+
+def _render_graficos_tab():
+    update_graficos_tab(None)
+    canvas_graficos.draw_idle()
+
+
+def _graph_render_loop():
+    global graph_render_job, graph_render_busy, graph_force_render
+    global graph_last_main_revision, graph_last_tab_revision
+
+    graph_render_job = None
+    tab_active = _selected_tab_is_graficos()
+    next_delay = _graph_next_interval_ms(tab_active)
+
+    try:
+        if time.monotonic() < graph_switch_quiet_until:
+            _schedule_graph_render(60)
+            return
+
+        if graph_render_busy:
+            _schedule_graph_render(80)
+            return
+
+        revision = _current_graph_revision()
+        if tab_active:
+            needs_render = graph_force_render or (revision != graph_last_tab_revision)
+        else:
+            needs_render = graph_force_render or (revision != graph_last_main_revision)
+
+        if needs_render:
+            graph_render_busy = True
+            if tab_active:
+                _render_graficos_tab()
+                graph_last_tab_revision = revision
+            else:
+                _render_main_graphs()
+                graph_last_main_revision = revision
+            graph_force_render = False
+    except Exception as e:
+        log_msg(f"Graficos: erro no agendador de renderizacao ({e}).")
+    finally:
+        graph_render_busy = False
+        _schedule_graph_render(next_delay)
 
 
 def _set_graficos_focus_mode(enabled):
@@ -6145,18 +6293,17 @@ def _set_graficos_focus_mode(enabled):
     Alterna modo foco da aba de visualizacao 2x2.
 
     enabled=True:
-      - Oculta frame lateral de graficos da aba principal.
-      - Mantem animacoes da aba principal em modo lento (throttle).
-      - Mantem animacao da aba "graficos" em modo rapido.
+      - Colapsa o painel lateral.
+      - Desenha apenas a figura 2x2.
 
     enabled=False:
-      - Restaura frame lateral.
-      - Reativa velocidade normal da aba principal.
-      - Coloca animacao da aba "graficos" em modo lento.
+      - Restaura o painel lateral.
+      - Desenha apenas a coluna lateral.
     """
-    global graficos_focus_mode, graficos_side_saved_width
+    global graficos_focus_mode, graficos_side_saved_width, graph_switch_quiet_until
     enabled = bool(enabled)
     if graficos_focus_mode == enabled:
+        _request_graph_render(force=True, delay_ms=GRAPH_SWITCH_QUIET_MS)
         return
 
     try:
@@ -6172,41 +6319,22 @@ def _set_graficos_focus_mode(enabled):
                     except Exception:
                         w_now = 680
                 graficos_side_saved_width = max(320, w_now)
-            # Em vez de pack_forget/pack (que causa reflow agressivo),
-            # apenas colapsa o painel lateral para largura minima.
             try:
                 frame_graficos.pack_propagate(False)
             except Exception:
                 pass
             frame_graficos.configure(width=1)
-            ani1.event_source.interval = ANIM_INTERVAL_MAIN_BG
-            ani2.event_source.interval = ANIM_INTERVAL_MAIN_BG
-            ani3.event_source.interval = ANIM_INTERVAL_MAIN_BG
-            ani_graficos.event_source.interval = ANIM_INTERVAL_TAB_ACTIVE
         else:
-            # Restaura largura do painel lateral sem desmontar o layout.
             restore_w = graficos_side_saved_width if graficos_side_saved_width else 680
             frame_graficos.configure(width=int(restore_w))
             try:
                 frame_graficos.pack_propagate(False)
             except Exception:
                 pass
-            # Deixa o Tk recalcular geometria antes de forcar redraw dos eixos.
-            try:
-                main_frame.update_idletasks()
-            except Exception:
-                pass
-            ani1.event_source.interval = ANIM_INTERVAL_MAIN_ACTIVE
-            ani2.event_source.interval = ANIM_INTERVAL_MAIN_ACTIVE
-            ani3.event_source.interval = ANIM_INTERVAL_MAIN_ACTIVE
-            ani_graficos.event_source.interval = ANIM_INTERVAL_TAB_BG
-            try:
-                root.after(30, canvas1.draw_idle)
-                root.after(40, canvas2.draw_idle)
-                root.after(50, canvas3.draw_idle)
-            except Exception:
-                pass
+
         graficos_focus_mode = enabled
+        graph_switch_quiet_until = time.monotonic() + (GRAPH_SWITCH_QUIET_MS / 1000.0)
+        _request_graph_render(force=True, delay_ms=GRAPH_SWITCH_QUIET_MS)
     except Exception as e:
         log_msg(f"Aba graficos: falha ao alternar modo foco ({e}).")
 
@@ -6225,6 +6353,7 @@ def _on_notebook_tab_changed(event=None):
 
 nb.bind("<<NotebookTabChanged>>", _on_notebook_tab_changed)
 root.after(0, _on_notebook_tab_changed)
+_request_graph_render(force=True, delay_ms=250)
 
 #matplotlib.pyplot.show(block=False)
 
