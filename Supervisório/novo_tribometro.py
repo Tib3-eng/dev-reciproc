@@ -22,7 +22,8 @@ Saidas de ensaio:
   <data>-<nome_ensaio>-<estudo>-<repeticao>_I.csv,
   <data>-<nome_ensaio>-<estudo>-<repeticao>_DP.csv,
   <data>-<nome_ensaio>-<estudo>-<repeticao>_VP.csv,
-  <data>-<nome_ensaio>-<estudo>-<repeticao>_T.csv.
+  <data>-<nome_ensaio>-<estudo>-<repeticao>_T.csv,
+  <data>-<nome_ensaio>-<estudo>-<repeticao>_G.png.
 - Desktop\\Repositorio\\<AAAA-MM-DD - PoD - NomeEnsaio_Estudo-Repeticao>\\DadosDev\\
   <arquivo_t>.merge_source, dlg.csv, drive.csv, schedule.csv,
   graph_events.log, dlg_logger_events.log, a5_speed_events.log.
@@ -116,6 +117,8 @@ USE_EXTERNAL_RUNNER = True
 external_run_state = None
 # Token monotonic para invalidar threads antigas entre ensaios.
 external_run_token = 0
+# True enquanto o ensaio anterior ainda fecha processos, merge e arquivos finais.
+run_finalizing = False
 # Flag da rotina de tara para evitar execucoes concorrentes.
 tara_running = False
 # Estado do modo de monitoramento (DLG sem ensaio ativo).
@@ -592,7 +595,43 @@ def _set_start_button_state():
     if "button_frame4_iniciar" not in globals():
         return
     try:
-        button_frame4_iniciar.config(state=("disabled" if monitor_mode_active else "normal"))
+        disabled = (
+            monitor_mode_active
+            or tara_running
+            or run_finalizing
+            or _is_running()
+            or _external_pipeline_ativo()
+        )
+        button_frame4_iniciar.config(state=("disabled" if disabled else "normal"))
+    except Exception:
+        pass
+
+
+def _set_run_finalizing(value):
+    """
+    Atualiza o bloqueio de inicio durante fechamento/merge do ensaio anterior.
+    """
+    global run_finalizing
+    run_finalizing = bool(value)
+    try:
+        _set_start_button_state()
+    except Exception:
+        pass
+
+
+def _set_tara_running(value):
+    """
+    Atualiza o bloqueio visual/logico enquanto uma tara esta em andamento.
+    """
+    global tara_running
+    tara_running = bool(value)
+    try:
+        if "button_frame7_zerar" in globals():
+            button_frame7_zerar.config(state=("disabled" if tara_running else "normal"))
+    except Exception:
+        pass
+    try:
+        _set_start_button_state()
     except Exception:
         pass
 
@@ -1103,8 +1142,8 @@ def _cleanup_run_folder_on_abort():
     Remove a pasta criada para o ensaio atual quando o inicio e cancelado.
     """
     global caminho_arquivo_1, caminho_arquivo_2, caminho_pasta
-    global caminho_dlg_csv, caminho_drive_csv, caminho_turn_dist_csv, caminho_turn_volta_csv, caminho_merge_csv, caminho_schedule_csv
-    global graph_events_log_path
+    global caminho_dlg_csv, caminho_drive_csv, caminho_turn_dist_csv, caminho_turn_volta_csv, caminho_merge_csv, caminho_schedule_csv, caminho_graficos_png
+    global graph_events_log_path, run_finalizing
     try:
         if caminho_pasta and os.path.exists(caminho_pasta):
             shutil.rmtree(caminho_pasta, ignore_errors=True)
@@ -1118,7 +1157,13 @@ def _cleanup_run_folder_on_abort():
     caminho_turn_volta_csv = ""
     caminho_merge_csv = ""
     caminho_schedule_csv = ""
+    caminho_graficos_png = ""
     graph_events_log_path = ""
+    run_finalizing = False
+    try:
+        _set_start_button_state()
+    except Exception:
+        pass
 
 
 def _run_auto_tara_before_start(repo_root, exe_info):
@@ -1130,6 +1175,10 @@ def _run_auto_tara_before_start(repo_root, exe_info):
     2) Captura tara (30 s) e ajusta intercept do CH1.
     3) Instrui operador a recolocar carga e preparar inicio do ensaio.
     """
+    if tara_running:
+        messagebox.showwarning("Tara em andamento", "Aguarde a tara atual terminar antes de iniciar outro ensaio.")
+        return False
+
     dlg_exe = exe_info.get("dlg_exe")
     if not dlg_exe:
         messagebox.showerror(
@@ -1149,6 +1198,7 @@ def _run_auto_tara_before_start(repo_root, exe_info):
 
     prev_text = label_ensaio_estado.cget("text")
     prev_fg = label_ensaio_estado.cget("fg")
+    _set_tara_running(True)
     label_ensaio_estado.config(text="Preparando tara automatica", fg="#0078D4")
     root.update_idletasks()
 
@@ -1162,6 +1212,7 @@ def _run_auto_tara_before_start(repo_root, exe_info):
         "Em condicoes de zerar",
     ):
         label_ensaio_estado.config(text=prev_text, fg=prev_fg)
+        _set_tara_running(False)
         return False
 
     log_report_path = os.path.join(caminho_pasta, "DadosDev", "zero_ensaio.csv")
@@ -1200,6 +1251,7 @@ def _run_auto_tara_before_start(repo_root, exe_info):
         report["error"] = str(e).replace("\n", " ").replace(";", ",")
         _write_zero_debug_csv(log_report_path, report)
         label_ensaio_estado.config(text=prev_text, fg=prev_fg)
+        _set_tara_running(False)
         messagebox.showerror("Calibracao obrigatoria", f"Falha no zeramento automatico.\n\n{e}")
         return False
 
@@ -1211,9 +1263,11 @@ def _run_auto_tara_before_start(repo_root, exe_info):
         "Em condicoes de iniciar ensaio",
     ):
         label_ensaio_estado.config(text=prev_text, fg=prev_fg)
+        _set_tara_running(False)
         return False
 
     label_ensaio_estado.config(text=prev_text, fg=prev_fg)
+    _set_tara_running(False)
     return True
 
 
@@ -1257,8 +1311,7 @@ def zerar_celula():
 
     prev_text = label_ensaio_estado.cget("text")
     prev_fg = label_ensaio_estado.cget("fg")
-    tara_running = True
-    button_frame7_zerar.config(state="disabled")
+    _set_tara_running(True)
     label_ensaio_estado.config(text="Coletando dados para tara", fg="#0078D4")
     log_msg("Tara CH1: iniciando coleta de 30 s.")
 
@@ -1314,9 +1367,7 @@ def zerar_celula():
             log_msg(f"Tara CH1: falha ({e}).")
 
         def _finish_ui():
-            global tara_running
-            tara_running = False
-            button_frame7_zerar.config(state="normal")
+            _set_tara_running(False)
             if not _is_running():
                 label_ensaio_estado.config(text=prev_text, fg=prev_fg)
             if ok:
@@ -1504,6 +1555,7 @@ caminho_turn_dist_csv = ""
 caminho_turn_volta_csv = ""
 caminho_merge_csv = ""
 caminho_schedule_csv = ""
+caminho_graficos_png = ""
 graph_events_log_path = ""
 graph_events_lock = threading.Lock()
 # Arbitro de fonte do grafico 3 em tempo real:
@@ -1525,6 +1577,7 @@ lista_entries_distancia = []
 lista_labels_voltas_cursos = []
 lista_labels_voltas_pin = []
 lista_labels_duracao = []
+lista_labels_velocidade_real = []
 # allSamps: buffer da versao anterior para escrita local.
 allSamps = [[] for _ in range(numChannels)] 
 # graSamps: buffer principal consumido por update1/update2/update3.
@@ -1892,15 +1945,89 @@ def fechar_janela():
 # - Bloqueia duplicidade pela combinacao data + nome + estudo + repeticao.
 #   Se a pasta existir, solicita confirmacao explicita para sobrescrever.
 # - Define nomes de saida para arquivos finais com padrao:
-#   <data>-<nome_ensaio>-<estudo>-<repeticao>_<sufixo>.csv
-#   sufixos: _I (info), _DP (processado por distancia), _VP (processado por volta), _T (resultado ensaio).
+#   <data>-<nome_ensaio>-<estudo>-<repeticao>_<sufixo>.csv/png
+#   sufixos: _I (info), _DP (processado por distancia), _VP (processado por volta),
+#   _T (resultado ensaio), _G (imagem dos 4 graficos).
 # - Durante o ensaio, dlg.csv/drive.csv ficam na pasta da execucao e ao final
 #   sao movidos para DadosDev.
 # - Inicializa arquivos vazios para evitar erro de append posterior.
+def _clear_output_paths(clear_folder=False):
+    """
+    Limpa caminhos pendentes quando a criacao/sobrescrita do ensaio e cancelada.
+    """
+    global caminho_arquivo_1, caminho_arquivo_2, caminho_pasta
+    global caminho_dlg_csv, caminho_drive_csv, caminho_turn_dist_csv, caminho_turn_volta_csv, caminho_merge_csv, caminho_schedule_csv, caminho_graficos_png
+    global graph_events_log_path
+    caminho_arquivo_1 = ""
+    caminho_arquivo_2 = ""
+    caminho_dlg_csv = ""
+    caminho_drive_csv = ""
+    caminho_turn_dist_csv = ""
+    caminho_turn_volta_csv = ""
+    caminho_merge_csv = ""
+    caminho_schedule_csv = ""
+    caminho_graficos_png = ""
+    graph_events_log_path = ""
+    if clear_folder:
+        caminho_pasta = ""
+
+
+def _remove_run_folder_for_overwrite(folder_path, base_path):
+    """
+    Remove a pasta de uma repeticao existente com retries e tratamento read-only.
+
+    Se algum arquivo estiver aberto por outro programa, o Windows pode bloquear a
+    remocao. Nesse caso, falha com mensagem acionavel em vez de continuar com
+    arquivos antigos misturados ao novo ensaio.
+    """
+    target = os.path.abspath(folder_path)
+    base = os.path.abspath(base_path)
+    try:
+        common = os.path.commonpath([target, base])
+    except Exception:
+        common = ""
+    if target == base or common != base:
+        raise RuntimeError("Caminho de sobrescrita invalido.")
+
+    last_err = None
+
+    def _retry_remove(func, path, exc_info):
+        nonlocal last_err
+        try:
+            os.chmod(path, 0o666)
+        except Exception:
+            pass
+        try:
+            func(path)
+        except Exception as e:
+            last_err = e
+
+    for _ in range(8):
+        if not os.path.exists(target):
+            return
+        try:
+            try:
+                shutil.rmtree(target, onexc=_retry_remove)
+            except TypeError:
+                shutil.rmtree(target, onerror=_retry_remove)
+        except Exception as e:
+            last_err = e
+        if not os.path.exists(target):
+            return
+        time.sleep(0.25)
+
+    detail = f" Detalhe: {last_err}" if last_err else ""
+    raise RuntimeError(
+        "Nao foi possivel remover a pasta existente. "
+        "Feche CSVs/imagens abertos no Excel, visualizadores ou Explorer e tente novamente."
+        + detail
+    )
+
+
 def salvar_arquivo():
     
     global caminho_arquivo_1, caminho_arquivo_2, caminho_pasta
-    global caminho_dlg_csv, caminho_drive_csv, caminho_turn_dist_csv, caminho_turn_volta_csv, caminho_merge_csv, caminho_schedule_csv
+    global caminho_dlg_csv, caminho_drive_csv, caminho_turn_dist_csv, caminho_turn_volta_csv, caminho_merge_csv, caminho_schedule_csv, caminho_graficos_png
     global graph_events_log_path
 
     # ---------------------------------------------------------------------------------
@@ -1940,9 +2067,7 @@ def salvar_arquivo():
             default="no",
         )
         if not deseja_sobrescrever:
-            caminho_arquivo_1 = ""
-            caminho_arquivo_2 = ""
-            graph_events_log_path = ""
+            _clear_output_paths(clear_folder=True)
             return
 
         confirma_apagar = messagebox.askyesno(
@@ -1953,24 +2078,17 @@ def salvar_arquivo():
             default="no",
         )
         if not confirma_apagar:
-            caminho_arquivo_1 = ""
-            caminho_arquivo_2 = ""
-            graph_events_log_path = ""
+            _clear_output_paths(clear_folder=True)
             return
 
         try:
-            # Guarda de seguranca: nunca permitir apagar a pasta base inteira.
-            if os.path.abspath(caminho_pasta) == os.path.abspath(REPO_BASE):
-                raise RuntimeError("Caminho de sobrescrita invalido.")
-            shutil.rmtree(caminho_pasta, ignore_errors=False)
+            _remove_run_folder_for_overwrite(caminho_pasta, REPO_BASE)
         except Exception as e:
             messagebox.showerror(
                 "Erro ao sobrescrever",
                 f"Nao foi possivel apagar a repeticao existente.\n\n{e}"
             )
-            caminho_arquivo_1 = ""
-            caminho_arquivo_2 = ""
-            graph_events_log_path = ""
+            _clear_output_paths(clear_folder=True)
             return
 
     os.makedirs(caminho_pasta, exist_ok=True)
@@ -1986,6 +2104,7 @@ def salvar_arquivo():
     caminho_turn_dist_csv = os.path.join(caminho_pasta, f"{prefixo_arquivo}_DP.csv")
     caminho_turn_volta_csv = os.path.join(caminho_pasta, f"{prefixo_arquivo}_VP.csv")
     caminho_merge_csv = os.path.join(caminho_pasta, f"{prefixo_arquivo}_T.csv")
+    caminho_graficos_png = os.path.join(caminho_pasta, f"{prefixo_arquivo}_G.png")
 
     # Arquivos tecnicos de aquisicao (movidos para DadosDev no fim).
     caminho_arquivo_2 = os.path.join(caminho_pasta, "dlg.csv")    # mantido para compatibilidade
@@ -2870,10 +2989,21 @@ def _rpm_motor_to_pin_speed_mm_s(rpm_arr, raio_mm, relacao_mecanica):
         return np.array([])
     if arr.size == 0:
         return np.array([])
-    if raio_mm <= 0:
+    vel0 = orch.pin_speed_mm_s_from_rpm(0.0, raio_mm, relacao_mecanica)
+    if vel0 is None:
         return np.full(arr.shape, np.nan, dtype=float)
-    i = float(relacao_mecanica) if relacao_mecanica and relacao_mecanica > 0 else 1.0
-    return np.abs(arr) * (2.0 * math.pi * float(raio_mm)) / (60.0 * i)
+    return np.abs(arr) * (2.0 * math.pi * float(raio_mm)) / (60.0 * float(relacao_mecanica))
+
+
+def _preview_real_pin_speed_mm_s(vel_mm_s, raio_mm):
+    """
+    Retorna (rpm_inteiro, velocidade_real_mm_s) para a tabela previa.
+    """
+    if raio_mm is None or raio_mm <= 0 or RELACAO_MECANICA <= 0:
+        return None, None
+    rpm = orch.rpm_from_mm_s(vel_mm_s, raio_mm, RELACAO_MECANICA)
+    vel_real = orch.pin_speed_mm_s_from_rpm(rpm, raio_mm, RELACAO_MECANICA)
+    return rpm, vel_real
 
 
 def _append_dist_point(dist_mm, atr_med, atr_min, atr_max, rpm_med):
@@ -3018,8 +3148,10 @@ def _tail_turn_csv_for_graph3(turn_csv_path, turn_proc=None):
     Faz tail de arquivo _P e alimenta o grafico 3 em tempo real.
 
     Formatos aceitos:
-      distancia_mm;atrito_med;atrito_min;atrito_max;rpm_medio_intervalo;...
-      volta_n;atrito_med;atrito_min;atrito_max;rpm_medio_volta;...
+      distancia_mm;t_s_inicio;atrito_med;atrito_min;atrito_max;rpm_medio_intervalo;...
+      volta_n;t_s_inicio;atrito_med;atrito_min;atrito_max;rpm_medio_volta;...
+      distancia_mm;atrito_med;atrito_min;atrito_max;rpm_medio_intervalo;... (legado)
+      volta_n;atrito_med;atrito_min;atrito_max;rpm_medio_volta;... (legado)
     """
     waited_s = 0.0
     while _is_running() and not os.path.exists(turn_csv_path):
@@ -3036,9 +3168,11 @@ def _tail_turn_csv_for_graph3(turn_csv_path, turn_proc=None):
             # Aceita cabecalhos antigos/novos sem depender de caixa.
             is_turn_file = ("volta_n" in header_l)
             is_dist_file = ("distancia_mm" in header_l) or (not is_turn_file)
+            has_t_start_col = ("t_s_inicio" in header_l)
             if header and (not is_turn_file and not is_dist_file):
                 f.seek(0)
                 is_dist_file = True
+                has_t_start_col = False
 
             first_logged = False
             n_rows = 0
@@ -3066,17 +3200,18 @@ def _tail_turn_csv_for_graph3(turn_csv_path, turn_proc=None):
                     time.sleep(0.05)
                     continue
                 parts = line.strip().split(";")
-                if len(parts) < 9:
+                value_offset = 1 if has_t_start_col else 0
+                if len(parts) < (5 + value_offset):
                     continue
                 try:
                     x_val = float(parts[0])
                 except Exception:
                     continue
 
-                atr_med = _num_or_nan(parts[1])
-                atr_min = _num_or_nan(parts[2])
-                atr_max = _num_or_nan(parts[3])
-                rpm_med = _num_or_nan(parts[4])
+                atr_med = _num_or_nan(parts[1 + value_offset])
+                atr_min = _num_or_nan(parts[2 + value_offset])
+                atr_max = _num_or_nan(parts[3 + value_offset])
+                rpm_med = _num_or_nan(parts[4 + value_offset])
 
                 n_rows += 1
                 appended = _append_turn_point(x_val, atr_med, atr_min, atr_max, rpm_med) if is_turn_file else _append_dist_point(x_val, atr_med, atr_min, atr_max, rpm_med)
@@ -3446,6 +3581,20 @@ def start_acquisition():
         )
         return
 
+    if tara_running:
+        messagebox.showwarning(
+            "Tara em andamento",
+            "Aguarde a coleta de tara terminar antes de iniciar um novo ensaio."
+        )
+        return
+
+    if run_finalizing or _external_pipeline_ativo():
+        messagebox.showwarning(
+            "Ensaio finalizando",
+            "Aguarde o fechamento dos processos e arquivos do ensaio anterior antes de iniciar outro."
+        )
+        return
+
     # Impede o funcionamento do botão iniciar duas vezes seguidas:
     if running == "true":
         messagebox.showwarning("Atenção", 
@@ -3488,14 +3637,6 @@ def start_acquisition():
                                     f"O campo '{nome_campo}' deve ser um número.")
                 return
             
-        if nome_campo == "Corpo de prova (bloco)":
-            try:
-                int(valor) # Tenta transformar o texto em número inteiro
-            except ValueError:
-                messagebox.showwarning("Valor Inválido", 
-                                    f"O campo '{nome_campo}' deve ser um número inteiro")
-                return
-
     ## Segunda tabela - lubrificado (Superior direita)
     if lubrificado_var.get():
         minimo_um_completo = False
@@ -3903,6 +4044,7 @@ def start_acquisition():
                 distance_interval_mm=DIST_INTERVAL_MM
             )
         except Exception as e:
+            _set_run_finalizing(False)
             # Limpa a pasta criada se o ensaio nao iniciar
             try:
                 if caminho_pasta and os.path.exists(caminho_pasta):
@@ -3920,6 +4062,7 @@ def start_acquisition():
         # Modo atual: grafico 3 em tempo real 100% no Python.
         _turn_rt_reset_state("fallback")
         running = "true"
+        _set_start_button_state()
         is_paused = False
         tempo_pause_inicio = 0
         graph_log(
@@ -3956,6 +4099,7 @@ def start_acquisition():
             finally:
                 # Atualiza estado visual ao final
                 global running, is_paused, external_run_state, tempo_pause_inicio, timer_started, graph_events_log_path
+                _set_run_finalizing(True)
                 # Apos o merge, os artefatos tecnicos vao para <pasta da execucao>\\DadosDev.
                 # Atualiza o destino do graph_log para evitar recriar graph_events.log na raiz da execucao.
                 try:
@@ -4015,9 +4159,18 @@ def start_acquisition():
                     except Exception:
                         pass
                 try:
-                    root.after(0, _clear_graphs)
+                    def _save_image_and_clear_graphs():
+                        try:
+                            _save_graficos_tab_image(caminho_graficos_png)
+                        finally:
+                            try:
+                                _clear_graphs()
+                            finally:
+                                _set_run_finalizing(False)
+
+                    root.after(0, _save_image_and_clear_graphs)
                 except Exception:
-                    _clear_graphs()
+                    _save_image_and_clear_graphs()
         threading.Thread(target=_wait_and_merge, daemon=True).start()
 
         # Thread para alimentar graficos em tempo real a partir do dlg.csv
@@ -4201,6 +4354,7 @@ def stop_acquisition():
             if USE_EXTERNAL_RUNNER and external_run_state is not None:
                 state_snapshot = external_run_state
                 external_run_state = None
+                _set_run_finalizing(True)
                 def _stop_external():
                     try:
                         # stop_run(state) tenta parada graciosa por IPC ("STOP"),
@@ -4272,6 +4426,10 @@ def stop_acquisition():
 # - Renderiza grafico 1 (temperatura) usando CH2 do DLG.
 # - Aplica escala X compartilhada (automatico por duracao total ou manual ciclico).
 # - Respeita configuracao de eixo Y automatico/manual.
+def _should_plot_graph_series():
+    return _is_running() or monitor_mode_active or bool(globals().get("graph_snapshot_rendering", False))
+
+
 def update1(frame):
     # Acessa a lista de tempos reais
     global sampsTimestamp 
@@ -4314,7 +4472,7 @@ def update1(frame):
                         else:
                             ax1.plot(tempo, dados, label=label)
 
-        if (_is_running() or monitor_mode_active) and graSamps and c2:
+        if _should_plot_graph_series() and graSamps and c2:
             # CH2 (temperatura) = index 1 na lista graSamps.
             plotar_canal(1, None, 'Channel 2')
 
@@ -4352,7 +4510,7 @@ def update2(frame):
         passo = 5
 
         # Canal 1 (CoF)
-        if (_is_running() or monitor_mode_active) and graSamps and c1 == 1 and len(graSamps) > 0:
+        if _should_plot_graph_series() and graSamps and c1 == 1 and len(graSamps) > 0:
             # Pega a lista bruta de CH1 (forca) para converter em CoF.
             raw_dados = graSamps[0]
             tam = min(len(sampsTimestamp), len(raw_dados))
@@ -4577,7 +4735,7 @@ def _plot_temp_axis_view(ax):
     limite_tela_min = _current_x_window_min()
     passo = 5
 
-    if (_is_running() or monitor_mode_active) and graSamps and c2 and len(graSamps) > 1:
+    if _should_plot_graph_series() and graSamps and c2 and len(graSamps) > 1:
         raw_dados = graSamps[1]
         tam = min(len(sampsTimestamp), len(raw_dados))
         if tam > 0:
@@ -4613,7 +4771,7 @@ def _plot_cof_axis_view(ax):
     limite_tela_min = _current_x_window_min()
     passo = 5
 
-    if (_is_running() or monitor_mode_active) and graSamps and c1 == 1 and len(graSamps) > 0:
+    if _should_plot_graph_series() and graSamps and c1 == 1 and len(graSamps) > 0:
         raw_dados = graSamps[0]
         tam = min(len(sampsTimestamp), len(raw_dados))
         if tam > 0:
@@ -4823,6 +4981,45 @@ def update_graficos_tab(frame):
         _plot_g3_mode_axis_view(axg_dist, "dist", axg_dist_twin)
     except Exception as e:
         log_msg(f"Aba graficos: erro de atualizacao ({e}).")
+
+
+def _save_graficos_tab_image(path=None):
+    """
+    Salva uma imagem PNG da figura 2x2 da aba "graficos".
+    Usa a propria figura Matplotlib para nao depender do foco da janela.
+    """
+    global graph_snapshot_rendering
+
+    target = path or globals().get("caminho_graficos_png", "")
+    if not target:
+        base_dir = os.path.dirname(caminho_merge_csv) if caminho_merge_csv else caminho_pasta
+        if not base_dir:
+            return False
+        target = os.path.join(base_dir, "graficos.png")
+
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+    except Exception:
+        pass
+
+    previous_snapshot_state = graph_snapshot_rendering
+    graph_snapshot_rendering = True
+    try:
+        update_graficos_tab(None)
+        try:
+            canvas_graficos.draw()
+        except Exception:
+            pass
+        fig_graficos.savefig(target, dpi=150)
+        log_msg(f"Imagem dos graficos salva: {target}")
+        graph_log(f"GRAPH image saved: {target}")
+        return True
+    except Exception as e:
+        log_msg(f"Aviso: nao foi possivel salvar imagem dos graficos ({e}).")
+        graph_log(f"GRAPH image save failed: {e}")
+        return False
+    finally:
+        graph_snapshot_rendering = previous_snapshot_state
 
 
 
@@ -5741,6 +5938,7 @@ def calcular_voltas_cursos_duracao(event=None):
         if not vel_txt and not dist_txt:
             lista_labels_voltas_cursos[i].config(text="xxxx")
             lista_labels_voltas_pin[i].config(text="xxxx")
+            lista_labels_velocidade_real[i].config(text="xxxx")
             lista_labels_duracao[i].config(text="xxxx")
             continue
 
@@ -5750,8 +5948,18 @@ def calcular_voltas_cursos_duracao(event=None):
         except Exception:
             lista_labels_voltas_cursos[i].config(text="Erro")
             lista_labels_voltas_pin[i].config(text="Erro")
+            lista_labels_velocidade_real[i].config(text="Erro")
             lista_labels_duracao[i].config(text="Erro")
             continue
+
+        if vel is not None and vel > 0:
+            _, vel_real = _preview_real_pin_speed_mm_s(vel, raio)
+            if vel_real is not None:
+                lista_labels_velocidade_real[i].config(text=f"{vel_real:.3f}")
+            else:
+                lista_labels_velocidade_real[i].config(text="Erro")
+        else:
+            lista_labels_velocidade_real[i].config(text="Erro")
 
         # Duracao [min]
         if vel is None or dist is None or vel <= 0:
@@ -5805,8 +6013,8 @@ labelframe2_baixo.grid_columnconfigure(0, weight=1)
 labelframe2_baixo.grid_columnconfigure(1, weight=1)
 labelframe2_baixo.grid_columnconfigure(2, weight=1)
 labelframe2_baixo.grid_columnconfigure(3, weight=1)
-labelframe2_baixo.grid_columnconfigure(4, weight=5)
-labelframe2_baixo.grid_columnconfigure(5, weight=3)
+labelframe2_baixo.grid_columnconfigure(4, weight=2)
+labelframe2_baixo.grid_columnconfigure(5, weight=4)
 
 labelframe3_baixo = tkinter.LabelFrame(labelframe1_2_baixo)
 labelframe3_baixo.grid(sticky="news", row=0, column=1)
@@ -5841,6 +6049,8 @@ lbl_header_voltas_pin = tkinter.Label(labelframe2_baixo, text="Voltas_pin", font
 lbl_header_voltas_pin.grid(row=0, column=3, padx=5, pady=5)
 
 tkinter.Label(labelframe2_baixo, text="Duração [min]", font=("Arial", 9, "bold")) \
+    .grid(row=0, column=5, padx=5, pady=5)
+tkinter.Label(labelframe2_baixo, text="Velocidade real [mm/s]", font=("Arial", 9, "bold")) \
     .grid(row=0, column=4, padx=5, pady=5)
 tkinter.Label(labelframe3_baixo, text="Estado", font=("Arial", 10, "bold")).grid(row=0, column=0, padx=5, pady=5)
 label_ensaio_estado = tkinter.Label(labelframe3_baixo, text="Aguardando novo ensaio", font=("Arial", 10, "bold"), fg="black")
@@ -5873,8 +6083,12 @@ for i in range(11):
     voltas_pin_lbl.grid(row=1 + i, column=3, sticky="news", padx=5)
     lista_labels_voltas_pin.append(voltas_pin_lbl)
 
+    vel_real_lbl = tkinter.Label(labelframe2_baixo, text="xxxx")
+    vel_real_lbl.grid(row=1 + i, column=4, sticky="news", padx=5)
+    lista_labels_velocidade_real.append(vel_real_lbl)
+
     duracao_lbl = tkinter.Label(labelframe2_baixo, text="xxxx")
-    duracao_lbl.grid(row=1 + i, column=4, sticky="news", padx=5)
+    duracao_lbl.grid(row=1 + i, column=5, sticky="news", padx=5)
     lista_labels_duracao.append(duracao_lbl)
 
 
@@ -6195,6 +6409,7 @@ graph_force_render = True
 graph_last_main_revision = None
 graph_last_tab_revision = None
 graph_switch_quiet_until = 0.0
+graph_snapshot_rendering = False
 
 
 def _selected_tab_is_graficos():

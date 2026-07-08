@@ -76,8 +76,10 @@ CalibraDLG_UI (WinForms):
 SupervisÃ³rio (Python/Tk):
 - novo_tribometro.py is the main UI; novo_tribometro.exe is the packaged app.
 - orchestrator_runtime.py launches dlg_logger_ipc + a5_speed_logger in background and merges logs with merge_logs.
+- Campo "Corpo de prova (bloco)" aceita texto alfanumerico; manter apenas obrigatoriedade de preenchimento.
 - conversao mm/s->rpm no orchestrator usa modulo (abs) para enviar setpoint sempre positivo no modo velocidade.
 - UI mostra "Velocidade alvo atual" (mm/s) e "RPM Alvo atual" (setpoint enviado ao Drive).
+- Tabela previa das etapas mostra "Velocidade real [mm/s]", calculada pela volta inversa do RPM inteiro enviado ao Drive: `v = |rpm| * (2*pi*raio) / (60*i)`.
 - A aba principal inclui bit "Monitoramento": ativa leitura DLG (CH1/CH2) sem ensaio, com janela fixa de 1 minuto nos graficos 1/2.
 - Com monitoramento ativo, o botao Iniciar fica desabilitado; nao e permitido ativar monitoramento durante ensaio/tara.
 - A UI nao usa mais aba de log; mensagens seguem para console e status visuais.
@@ -118,6 +120,7 @@ SupervisÃ³rio (Python/Tk):
 - Move de dlg.csv/drive.csv para DadosDev e feito em duas passadas (wait_and_merge + finalize_pos-run) para evitar copia sem recorte quando houver lock temporario no Windows.
 - Duplicidade de pasta e bloqueio de inicio consideram data + estudo + nome + repeticao na pasta unica da execucao.
 - Se a pasta da execucao ja existir, o supervisÃ³rio pergunta se deve sobrescrever; ao confirmar duas vezes, apaga a pasta existente e reutiliza a mesma repeticao.
+- Sobrescrita de repeticao usa remocao com retries/read-only; se houver arquivo aberto por Excel/visualizador, cancela com erro acionavel para evitar misturar arquivos antigos e novos.
 - abrir_configurar_canais resolves CalibraDLG_UI.exe automatically via orchestrator runtime helpers.
 - Check status: DLG uses UDP ACQSTOP/SETCH/SETUP/START (8 canais) and waits for ACQDATA (no ICMP ping).
 - Supervisorio (start_external_run + check status) usa COM5 como porta padrao atual do Drive.
@@ -130,6 +133,7 @@ SupervisÃ³rio (Python/Tk):
 - Botao "Zerar celula" no supervisÃ³rio: coleta CH1 por 30 s (DLG em repouso), calcula media valida e ajusta `fit.intercept` do `calib_CH1.json` para tara (`novo = antigo - media`); durante a coleta o estado mostra "Coletando dados para tara".
 - Tara no supervisÃ³rio preserva `fit.slope` (nao altera inclinacao) e ajusta somente `fit.intercept`; grava debug com slope/intercept antes/depois.
 - Inicio de ensaio executa tara automatica obrigatoria com dois popups de confirmacao operacional (sem carga para zerar, depois pronto para iniciar).
+- Inicio de novo ensaio fica bloqueado enquanto tara, processos externos, merge/finalizacao ou salvamento dos arquivos finais do ensaio anterior ainda estiverem em andamento.
 - Log da tara automatica fica em `<pasta do ensaio>\\DadosDev\\zero_ensaio.csv`; tara manual (botao "Zerar celula") grava em `<REPO_BASE>\\ZeroAvulso\\zero_avulso_<timestamp>.csv`.
 - Busca do arquivo de calibracao CH1 prioriza `calib_CH1.json`/`out\\calib_CH1.json`; arquivos genericos (`calib.json`/`calib`) so sao aceitos quando o payload indicar CH1.
 - novo_tribometro captures run state snapshot to avoid race with global external_run_state.
@@ -200,10 +204,12 @@ CSV conventions
 - Fixed headers and units. Use "NULL" rows only for real losses.
 - `resultado_ensaio.csv` and o arquivo _P por distancia use `;` as column delimiter.
 - Arquivos finais do grafico 3: _DP.csv (distancia) e _VP.csv (volta), ambos com `;` como delimitador.
+- _DP.csv e _VP.csv incluem `t_s_inicio`: tempo da primeira linha alinhada DLG+Drive que entrou naquele intervalo/volta, para correlacionar os dois processamentos.
+- Ao finalizar o ensaio, o supervisor salva _G.png com a figura 2x2 da aba "graficos".
 - o arquivo _P por distancia inclui `velocidade_media_mm_s` por intervalo, derivada de `rpm_medio_intervalo` com `v = |rpm| * (2*pi*raio) / (60*i)`.
 - Write outputs into out/ subfolders (gitignored) when creating artifacts.
 - Supervisor (novo_tribometro.py) grava em: Desktop\\Repositorio\\<AAAA-MM-DD - PoD - NomeEnsaio_Estudo-Repeticao>.
-  Arquivos finais: <data>-<nome_ensaio>-<estudo>-<repeticao>_I.csv, _P.csv, _T.csv.
+  Arquivos finais: <data>-<nome_ensaio>-<estudo>-<repeticao>_I.csv, _DP.csv, _VP.csv, _T.csv, _G.png.
   Pasta tecnica: DadosDev\\ com <arquivo_t>.merge_source, dlg.csv, drive.csv, schedule.csv, graph_events.log, dlg_logger_events.log e a5_speed_events.log.
 
 Roadmap (short)

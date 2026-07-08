@@ -185,6 +185,27 @@ def rpm_from_mm_s(vel_mm_s: float, raio_mm: float, relacao: float = 1.0) -> int:
     return int(rpm + 0.5 if rpm >= 0 else rpm - 0.5)
 
 
+def pin_speed_mm_s_from_rpm(rpm_motor: float, raio_mm: float, relacao: float = 1.0) -> Optional[float]:
+    """
+    Converte RPM do motor para velocidade linear real no pino (mm/s).
+
+    Formula inversa de rpm_from_mm_s:
+        v_pino = |rpm_motor| * (2*pi*raio_pino) / (60*i)
+    onde i = D2 / D1.
+
+    Retorna None quando parametros geometricos forem invalidos.
+    """
+    try:
+        rpm = float(rpm_motor)
+        raio = float(raio_mm)
+        i = float(relacao)
+    except Exception:
+        return None
+    if raio <= 0 or i <= 0:
+        return None
+    return abs(rpm) * (2.0 * 3.141592653589793 * raio) / (60.0 * i)
+
+
 def find_exe(candidates: List[str], fallback_name: Optional[str] = None) -> Optional[str]:
     """
     Procura um executavel em uma lista de caminhos candidatos.
@@ -707,6 +728,7 @@ def _rebuild_turn_csv_from_logs(state: RunState) -> None:
             "n_total": 0,
             "n_fail": 0,
             "n_valid": 0,
+            "t_start_s": None,
             "atr_sum": 0.0,
             "atr_min": None,
             "atr_max": None,
@@ -718,11 +740,11 @@ def _rebuild_turn_csv_from_logs(state: RunState) -> None:
         pct_loss = (100.0 * acc["n_fail"] / acc["n_total"]) if acc["n_total"] > 0 else 0.0
         atr_med = (acc["atr_sum"] / acc["n_valid"]) if acc["n_valid"] > 0 else None
         rpm_med = (acc["rpm_sum"] / acc["rpm_cnt"]) if acc["rpm_cnt"] > 0 else None
-        vel_med_mm_s = None
-        if rpm_med is not None and raio_mm > 0.0 and relacao > 0.0:
-            vel_med_mm_s = abs(rpm_med) * (2.0 * 3.141592653589793 * raio_mm) / (60.0 * relacao)
+        vel_med_mm_s = pin_speed_mm_s_from_rpm(rpm_med, raio_mm, relacao) if rpm_med is not None else None
+        t_start_s = acc.get("t_start_s")
         writer.writerow([
             x_value,
+            f"{t_start_s:.6f}" if t_start_s is not None else "NULL",
             f"{atr_med:.6f}" if atr_med is not None else "NULL",
             f"{acc['atr_min']:.6f}" if acc["atr_min"] is not None else "NULL",
             f"{acc['atr_max']:.6f}" if acc["atr_max"] is not None else "NULL",
@@ -737,11 +759,11 @@ def _rebuild_turn_csv_from_logs(state: RunState) -> None:
         wt = csv.writer(fturn, delimiter=";", lineterminator="\n")
 
         wd.writerow([
-            "distancia_mm", "atrito_med", "atrito_min", "atrito_max", "rpm_medio_intervalo", "velocidade_media_mm_s",
+            "distancia_mm", "t_s_inicio", "atrito_med", "atrito_min", "atrito_max", "rpm_medio_intervalo", "velocidade_media_mm_s",
             "n_total_pontos", "n_falhas", "n_validas", "pct_perda"
         ])
         wt.writerow([
-            "volta_n", "atrito_med", "atrito_min", "atrito_max", "rpm_medio_volta", "velocidade_media_mm_s",
+            "volta_n", "t_s_inicio", "atrito_med", "atrito_min", "atrito_max", "rpm_medio_volta", "velocidade_media_mm_s",
             "n_total_pontos", "n_falhas", "n_validas", "pct_perda"
         ])
 
@@ -811,7 +833,9 @@ def _rebuild_turn_csv_from_logs(state: RunState) -> None:
                     atr = ch1 / state.force_normal_n
                 atr_ok = (dlg_err == 0 and atr is not None)
 
+                t_s_dlg = _to_float(drow[2] if drow and len(drow) > 2 else None, None)
                 t_s_drv = _to_float(rrow[2] if rrow and len(rrow) > 2 else None, None)
+                t_s_group = t_s_drv if t_s_drv is not None else t_s_dlg
                 pos_err = _to_int(rrow[5] if rrow and len(rrow) > 5 else None, 1)
                 rpm_err = _to_int(rrow[6] if rrow and len(rrow) > 6 else None, 1)
                 pos = _to_float(rrow[3] if rrow and len(rrow) > 3 else None, None)
@@ -825,6 +849,10 @@ def _rebuild_turn_csv_from_logs(state: RunState) -> None:
 
                 acc_dist["n_total"] += 1
                 acc_turn["n_total"] += 1
+                if acc_dist["t_start_s"] is None:
+                    acc_dist["t_start_s"] = t_s_group
+                if acc_turn["t_start_s"] is None:
+                    acc_turn["t_start_s"] = t_s_group
                 if atr_ok and pos_ok:
                     acc_dist["n_valid"] += 1
                     acc_turn["n_valid"] += 1
@@ -886,11 +914,15 @@ def _rebuild_turn_csv_from_logs(state: RunState) -> None:
                         cum_dist_mm += dist_inc_mm
 
                     while cum_dist_mm >= next_boundary_mm:
+                        if acc_dist["t_start_s"] is None:
+                            acc_dist["t_start_s"] = t_s_group
                         _emit_row(wd, f"{next_boundary_mm:.6f}", acc_dist)
                         next_boundary_mm += distance_interval_mm
                         acc_dist = _acc_reset()
 
                     while cum_turn >= next_boundary_turn:
+                        if acc_turn["t_start_s"] is None:
+                            acc_turn["t_start_s"] = t_s_group
                         _emit_row(wt, f"{next_boundary_turn:.6f}", acc_turn)
                         next_boundary_turn += 1.0
                         acc_turn = _acc_reset()
