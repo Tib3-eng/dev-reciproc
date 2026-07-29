@@ -21,7 +21,7 @@ Saidas de ensaio:
 - Desktop\\Repositorio\\<AAAA-MM-DD - PoD - NomeEnsaio_Estudo-Repeticao>\\
   <data>-<nome_ensaio>-<estudo>-<repeticao>_I.csv,
   <data>-<nome_ensaio>-<estudo>-<repeticao>_DP.csv,
-  <data>-<nome_ensaio>-<estudo>-<repeticao>_VP.csv,
+  <data>-<nome_ensaio>-<estudo>-<repeticao>_VP.csv ou _M.csv no reciprocante,
   <data>-<nome_ensaio>-<estudo>-<repeticao>_T.csv,
   <data>-<nome_ensaio>-<estudo>-<repeticao>_G.png.
 - Desktop\\Repositorio\\<AAAA-MM-DD - PoD - NomeEnsaio_Estudo-Repeticao>\\DadosDev\\
@@ -135,6 +135,10 @@ DEFAULT_REPO_BASE = os.path.join(os.path.expanduser("~"), "Desktop", "Repositori
 DEFAULT_RELACAO = 1.0
 # Tamanho padrao do intervalo de agregacao do grafico 3 (mm).
 DEFAULT_INTERVALO_DIST_MM = 10.0
+# Tolerancia padrao da faixa de parada do modo reciprocante, em counts de encoder.
+DEFAULT_RECIP_STOP_TOL_COUNTS = 500
+# Percentual removido de cada borda do stroke nos calculos do arquivo _M.
+DEFAULT_RECIP_EDGE_FILTER_PCT = 0.0
 APP_SETTINGS_DIR = os.path.join(
     os.getenv("LOCALAPPDATA") or os.path.expanduser("~"),
     "LATRIB"
@@ -213,6 +217,24 @@ except Exception:
     DIST_INTERVAL_MM = DEFAULT_INTERVALO_DIST_MM
 if DIST_INTERVAL_MM <= 0:
     DIST_INTERVAL_MM = DEFAULT_INTERVALO_DIST_MM
+
+# Tolerancia da faixa de parada no modo reciprocante, em counts do encoder.
+try:
+    RECIP_STOP_TOL_COUNTS = int(APP_SETTINGS.get("recip_stop_tol_counts", DEFAULT_RECIP_STOP_TOL_COUNTS))
+except Exception:
+    RECIP_STOP_TOL_COUNTS = DEFAULT_RECIP_STOP_TOL_COUNTS
+if RECIP_STOP_TOL_COUNTS <= 0:
+    RECIP_STOP_TOL_COUNTS = DEFAULT_RECIP_STOP_TOL_COUNTS
+
+# Filtro de borda do arquivo _M: 1% remove 1% do inicio e 1% do fim do stroke.
+try:
+    RECIP_EDGE_FILTER_PCT = float(APP_SETTINGS.get("recip_edge_filter_pct", DEFAULT_RECIP_EDGE_FILTER_PCT))
+except Exception:
+    RECIP_EDGE_FILTER_PCT = DEFAULT_RECIP_EDGE_FILTER_PCT
+if RECIP_EDGE_FILTER_PCT < 0.0:
+    RECIP_EDGE_FILTER_PCT = 0.0
+if RECIP_EDGE_FILTER_PCT > 100.0:
+    RECIP_EDGE_FILTER_PCT = 100.0
 
 
 def _resource_path(name):
@@ -318,6 +340,70 @@ def _set_dist_interval_mm(valor):
     return saved_ok
 
 
+def _extract_a5_failure_message(run_folder):
+    """
+    Le o log tecnico do Drive e retorna a ultima falha fatal encontrada.
+    """
+    candidates = [
+        os.path.join(run_folder, "a5_speed_events.log"),
+        os.path.join(run_folder, "DadosDev", "a5_speed_events.log"),
+    ]
+    for path in candidates:
+        try:
+            if not os.path.exists(path):
+                continue
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+            for line in reversed(lines):
+                txt = line.strip()
+                if "FATAL " in txt:
+                    return txt.split("FATAL ", 1)[1].strip()
+                if (
+                    "RECIP_OUT_OF_BAND" in txt
+                    or "RECIP_OVERSHOOT" in txt
+                    or "RECIP_POSITION_LOSS" in txt
+                    or "RECIP_DISTANCE_NOT_REACHED" in txt
+                ):
+                    return txt
+        except Exception:
+            continue
+    return ""
+
+
+def _set_recip_stop_tol_counts(valor):
+    """
+    Atualiza a tolerancia de parada do modo reciprocante, em counts do encoder.
+    """
+    global RECIP_STOP_TOL_COUNTS, APP_SETTINGS
+    RECIP_STOP_TOL_COUNTS = int(valor)
+    APP_SETTINGS["recip_stop_tol_counts"] = RECIP_STOP_TOL_COUNTS
+    saved_ok = _save_app_settings(APP_SETTINGS)
+    if "recip_tol_var" in globals():
+        recip_tol_var.set(str(RECIP_STOP_TOL_COUNTS))
+    log_msg(f"Tolerancia reciprocante definida para: {RECIP_STOP_TOL_COUNTS} counts")
+    return saved_ok
+
+
+def _set_recip_edge_filter_pct(valor):
+    """
+    Atualiza o filtro de borda do arquivo _M.
+
+    Um valor de 1 remove 1% do inicio e 1% do fim de cada stroke.
+    """
+    global RECIP_EDGE_FILTER_PCT, APP_SETTINGS
+    RECIP_EDGE_FILTER_PCT = float(valor)
+    if RECIP_EDGE_FILTER_PCT < 0.0:
+        RECIP_EDGE_FILTER_PCT = 0.0
+    if RECIP_EDGE_FILTER_PCT > 100.0:
+        RECIP_EDGE_FILTER_PCT = 100.0
+    APP_SETTINGS["recip_edge_filter_pct"] = RECIP_EDGE_FILTER_PCT
+    saved_ok = _save_app_settings(APP_SETTINGS)
+    if "recip_edge_filter_var" in globals():
+        recip_edge_filter_var.set(f"{RECIP_EDGE_FILTER_PCT:.6g}")
+    log_msg(f"Filtro de borda reciprocante definido para: {RECIP_EDGE_FILTER_PCT:.6g}% por borda")
+    return saved_ok
+
+
 def salvar_relacao_mecanica():
     """
     Handler da UI para validar e salvar o campo de relacao mecanica.
@@ -378,6 +464,62 @@ def salvar_intervalo_distancia():
         messagebox.showwarning(
             "Intervalo",
             "Intervalo aplicado em memoria, mas houve falha ao salvar configuracao local."
+        )
+
+
+def salvar_tolerancia_reciprocante():
+    """
+    Handler da UI para validar e salvar a tolerancia de parada reciprocante.
+    """
+    txt = recip_tol_var.get().strip().replace(",", ".")
+    if not txt:
+        messagebox.showwarning("Reciprocante", "Informe a tolerancia de parada.")
+        return
+    try:
+        valor_float = float(txt)
+        valor = int(valor_float)
+    except Exception:
+        messagebox.showwarning("Reciprocante", "Tolerancia invalida. Use inteiro maior que zero.")
+        return
+    if valor <= 0 or abs(valor_float - float(valor)) > 0.000001:
+        messagebox.showwarning("Reciprocante", "Tolerancia deve ser um inteiro maior que zero.")
+        return
+    saved_ok = _set_recip_stop_tol_counts(valor)
+    if saved_ok:
+        messagebox.showinfo("Reciprocante", f"Tolerancia salva: {valor} counts")
+    else:
+        messagebox.showwarning(
+            "Reciprocante",
+            "Tolerancia aplicada em memoria, mas houve falha ao salvar configuracao local."
+        )
+
+
+def salvar_filtro_borda_reciprocante():
+    """
+    Handler da UI para validar e salvar o filtro de borda dos strokes.
+    """
+    txt = recip_edge_filter_var.get().strip().replace(",", ".")
+    if not txt:
+        messagebox.showwarning("Reciprocante", "Informe o filtro de borda.")
+        return
+    try:
+        valor = float(txt)
+    except Exception:
+        messagebox.showwarning("Reciprocante", "Filtro invalido. Use numero de 0 a 100.")
+        return
+    if valor < 0.0 or valor > 100.0:
+        messagebox.showwarning("Reciprocante", "Filtro deve ficar entre 0 e 100%.")
+        return
+    saved_ok = _set_recip_edge_filter_pct(valor)
+    if saved_ok:
+        messagebox.showinfo(
+            "Reciprocante",
+            f"Filtro salvo: {valor:.6g}% em cada borda do stroke"
+        )
+    else:
+        messagebox.showwarning(
+            "Reciprocante",
+            "Filtro aplicado em memoria, mas houve falha ao salvar configuracao local."
         )
 
 
@@ -1946,7 +2088,8 @@ def fechar_janela():
 #   Se a pasta existir, solicita confirmacao explicita para sobrescrever.
 # - Define nomes de saida para arquivos finais com padrao:
 #   <data>-<nome_ensaio>-<estudo>-<repeticao>_<sufixo>.csv/png
-#   sufixos: _I (info), _DP (processado por distancia), _VP (processado por volta),
+#   sufixos: _I (info), _DP (processado por distancia), _VP (processado por volta)
+#   ou _M (processado por stroke no reciprocante),
 #   _T (resultado ensaio), _G (imagem dos 4 graficos).
 # - Durante o ensaio, dlg.csv/drive.csv ficam na pasta da execucao e ao final
 #   sao movidos para DadosDev.
@@ -2102,7 +2245,8 @@ def salvar_arquivo():
     # Arquivos finais visiveis ao usuario.
     caminho_arquivo_1 = os.path.join(caminho_pasta, f"{prefixo_arquivo}_I.csv")   # metadados do ensaio
     caminho_turn_dist_csv = os.path.join(caminho_pasta, f"{prefixo_arquivo}_DP.csv")
-    caminho_turn_volta_csv = os.path.join(caminho_pasta, f"{prefixo_arquivo}_VP.csv")
+    sufixo_movimento = "_M.csv" if ("reciprocante_var" in globals() and reciprocante_var.get()) else "_VP.csv"
+    caminho_turn_volta_csv = os.path.join(caminho_pasta, f"{prefixo_arquivo}{sufixo_movimento}")
     caminho_merge_csv = os.path.join(caminho_pasta, f"{prefixo_arquivo}_T.csv")
     caminho_graficos_png = os.path.join(caminho_pasta, f"{prefixo_arquivo}_G.png")
 
@@ -3827,7 +3971,10 @@ def start_acquisition():
         return
 
     # Antes de iniciar cada ensaio, executa tara automatica obrigatoria.
-    if not _run_auto_tara_before_start(repo_root, exe_info):
+    # No modo reciprocante experimental, a tara e bypassada para testes de movimento.
+    if reciprocante_var.get():
+        log_msg("Modo reciprocante: tara automatica bypassada para teste de movimento.")
+    elif not _run_auto_tara_before_start(repo_root, exe_info):
         _cleanup_run_folder_on_abort()
         log_msg("Inicio cancelado: tara automatica nao concluida.")
         return
@@ -3882,7 +4029,9 @@ def start_acquisition():
 
             # Reciprocating e Curso
             f.write(f"Reciprocating,{'sim' if reciprocante_var.get() else 'não'},\n")
-            if not entry_curso.get().strip() or not reciprocante_var:
+            f.write(f"Tolerancia reciprocante [counts],{RECIP_STOP_TOL_COUNTS},\n")
+            f.write(f"Filtro borda stroke [%],{RECIP_EDGE_FILTER_PCT},\n")
+            if not entry_curso.get().strip() or not reciprocante_var.get():
                 f.write(f"Curso [mm],0.00,\n")
             else:
                 coluna_curso = float(entry_curso.get().strip().replace(',','.'))
@@ -3906,11 +4055,13 @@ def start_acquisition():
     ########## PREENCHER AS LISTAS COM AS VELOCIDADES E DURACAO OBTIDAS
     lista_velocidades_digitadas = []
     lista_duracao = []
+    lista_distancias_digitadas = []
     # Percorre os 11 itens da interface
     for i in range(11):
         
         # --- PARTE DA VELOCIDADE (Vem de um Entry -> usa .get()) ---
         texto_vel = lista_entries_velocidade[i].get().strip()
+        texto_dist = lista_entries_distancia[i].get().strip()
         
         # --- PARTE DA DURACAO (Vem de um Label -> usa .cget("text")) ---
         texto_dur = lista_labels_duracao[i].cget("text").strip()
@@ -3927,6 +4078,7 @@ def start_acquisition():
                 # Adiciona nas novas listas
                 lista_velocidades_digitadas.append(valor_vel)
                 lista_duracao.append(valor_dur)
+                lista_distancias_digitadas.append(float(texto_dist.replace(',', '.')))
                 
             except ValueError:
                 pass # Ignora linhas com letras ou erros
@@ -3956,6 +4108,19 @@ def start_acquisition():
         except Exception:
             messagebox.showwarning("Valor Inválido", "Força normal inválida para calcular atrito.")
             return
+        reciprocating_enabled = bool(reciprocante_var.get())
+        recip_course_mm = 0.0
+        recip_total_mm = 0.0
+        if reciprocating_enabled:
+            try:
+                recip_course_mm = float(entry_curso.get().strip().replace(',', '.'))
+                recip_total_mm = float(sum(lista_distancias_digitadas))
+            except Exception:
+                messagebox.showwarning("Valor Inválido", "Curso/distância inválidos para modo reciprocante.")
+                return
+            if recip_course_mm <= 0.0 or recip_total_mm <= 0.0:
+                messagebox.showwarning("Valor Inválido", "Curso e distância total devem ser maiores que zero no modo reciprocante.")
+                return
 
         # Monta schedule (rpm, duracao_s)
         schedule = []
@@ -4041,7 +4206,12 @@ def start_acquisition():
                 # i = D2 / D1 (D1=motor, D2=disco), mesma definicao do supervisório.
                 relacao=RELACAO_MECANICA,
                 raio_mm=raio_mm,
-                distance_interval_mm=DIST_INTERVAL_MM
+                distance_interval_mm=DIST_INTERVAL_MM,
+                reciprocating=reciprocating_enabled,
+                reciprocating_course_mm=recip_course_mm,
+                reciprocating_total_mm=recip_total_mm,
+                reciprocating_tolerance_counts=RECIP_STOP_TOL_COUNTS,
+                reciprocating_edge_filter_pct=RECIP_EDGE_FILTER_PCT
             )
         except Exception as e:
             _set_run_finalizing(False)
@@ -4066,8 +4236,9 @@ def start_acquisition():
         is_paused = False
         tempo_pause_inicio = 0
         graph_log(
-            "RUN start token={0} rate_hz={1} dur_total_s={2:.3f} relacao={3:.6f} dist_target_mm={4:.6f} turn_target={5:.6f} interval_mm={6:.6f}".format(
-                run_token, rate_hz, dur_total, RELACAO_MECANICA, p_dist_target_mm, p_turn_target, DIST_INTERVAL_MM
+            "RUN start token={0} rate_hz={1} dur_total_s={2:.3f} relacao={3:.6f} dist_target_mm={4:.6f} turn_target={5:.6f} interval_mm={6:.6f} reciprocating={7} course_mm={8:.6f} recip_tol_counts={9} recip_edge_pct={10:.6f}".format(
+                run_token, rate_hz, dur_total, RELACAO_MECANICA, p_dist_target_mm, p_turn_target, DIST_INTERVAL_MM,
+                reciprocating_enabled, recip_course_mm, RECIP_STOP_TOL_COUNTS, RECIP_EDGE_FILTER_PCT
             )
         )
         try:
@@ -4088,13 +4259,20 @@ def start_acquisition():
         # encerrarem, e depois gera resultado_ensaio.csv.
         state_snapshot = external_run_state
         def _wait_and_merge():
+            failure_rc = 0
+            failure_msg = ""
             try:
                 merge_rc = orch.wait_and_merge(state_snapshot)
+                if merge_rc != 0:
+                    failure_rc = merge_rc
+                    failure_msg = _extract_a5_failure_message(caminho_pasta)
                 if os.path.exists(caminho_merge_csv):
                     log_msg(f"Merge gerado: {caminho_merge_csv} (rc={merge_rc})")
                 else:
                     log_msg("Merge nao foi gerado.")
             except Exception as e:
+                failure_rc = -1
+                failure_msg = str(e)
                 log_msg(f"Erro no merge final: {e}")
             finally:
                 # Atualiza estado visual ao final
@@ -4121,9 +4299,12 @@ def start_acquisition():
                     orch.finalize_dev_artifacts_after_run(state_snapshot)
                 except Exception as e:
                     log_msg(f"Aviso: nao foi possivel finalizar move de CSVs tecnicos ({e}).")
-                graph_log("RUN end token={0}".format(run_token))
+                graph_log("RUN end token={0} failure_rc={1} failure_msg={2}".format(run_token, failure_rc, failure_msg))
                 try:
-                    label_ensaio_estado.config(text="Finalizado", fg="green")
+                    if failure_rc:
+                        label_ensaio_estado.config(text="Falha Drive", fg="red")
+                    else:
+                        label_ensaio_estado.config(text="Finalizado", fg="green")
                     _set_targets_stopped()
                 except Exception:
                     pass
@@ -4162,6 +4343,9 @@ def start_acquisition():
                     def _save_image_and_clear_graphs():
                         try:
                             _save_graficos_tab_image(caminho_graficos_png)
+                            if failure_rc:
+                                msg = failure_msg or f"Logger do Drive encerrou com rc={failure_rc}."
+                                messagebox.showerror("Falha no ensaio", msg)
                         finally:
                             try:
                                 _clear_graphs()
@@ -5686,19 +5870,59 @@ tkinter.Label(
 
 tkinter.Label(
     cfg_frame,
-    text="Calibracao de canais",
+    text="Tolerancia parada reciprocante [counts]",
     font=("Arial", 10, "bold")
 ).grid(row=9, column=0, sticky="w", padx=6, pady=(8, 4), columnspan=3)
 
+recip_tol_var = tkinter.StringVar(value=str(RECIP_STOP_TOL_COUNTS))
+entry_recip_tol = tkinter.Entry(cfg_frame, textvariable=recip_tol_var)
+entry_recip_tol.grid(row=10, column=0, sticky="ew", padx=6, pady=(2, 4))
+
+btn_salvar_recip_tol = tkinter.Button(cfg_frame, text="Salvar tolerancia", command=salvar_tolerancia_reciprocante)
+btn_salvar_recip_tol.grid(row=10, column=1, sticky="w", padx=6, pady=(2, 4))
+
+tkinter.Label(
+    cfg_frame,
+    text="Faixa usada para inverter sentido; aborta se parar fora dela.",
+    anchor="w",
+    justify="left"
+).grid(row=11, column=0, columnspan=3, sticky="w", padx=6, pady=(2, 10))
+
+tkinter.Label(
+    cfg_frame,
+    text="Filtro borda stroke [%]",
+    font=("Arial", 10, "bold")
+).grid(row=12, column=0, sticky="w", padx=6, pady=(8, 4), columnspan=3)
+
+recip_edge_filter_var = tkinter.StringVar(value=f"{RECIP_EDGE_FILTER_PCT:.6g}")
+entry_recip_edge_filter = tkinter.Entry(cfg_frame, textvariable=recip_edge_filter_var)
+entry_recip_edge_filter.grid(row=13, column=0, sticky="ew", padx=6, pady=(2, 4))
+
+btn_salvar_recip_edge = tkinter.Button(cfg_frame, text="Salvar filtro", command=salvar_filtro_borda_reciprocante)
+btn_salvar_recip_edge.grid(row=13, column=1, sticky="w", padx=6, pady=(2, 4))
+
+tkinter.Label(
+    cfg_frame,
+    text="No _M: 1% remove 1% do inicio e 1% do fim de cada stroke.",
+    anchor="w",
+    justify="left"
+).grid(row=14, column=0, columnspan=3, sticky="w", padx=6, pady=(2, 10))
+
+tkinter.Label(
+    cfg_frame,
+    text="Calibracao de canais",
+    font=("Arial", 10, "bold")
+).grid(row=15, column=0, sticky="w", padx=6, pady=(8, 4), columnspan=3)
+
 btn_cfg_canais = tkinter.Button(cfg_frame, text="Configurar canais", command=abrir_configurar_canais)
-btn_cfg_canais.grid(row=10, column=0, sticky="w", padx=6, pady=(2, 6))
+btn_cfg_canais.grid(row=16, column=0, sticky="w", padx=6, pady=(2, 6))
 
 tkinter.Label(
     cfg_frame,
     text="Recomendado: sem ensaio ativo e sem processos de aquisicao em segundo plano.",
     anchor="w",
     justify="left"
-).grid(row=11, column=0, columnspan=3, sticky="w", padx=6, pady=(2, 8))
+).grid(row=17, column=0, columnspan=3, sticky="w", padx=6, pady=(2, 8))
 
 #'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 

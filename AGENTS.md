@@ -49,6 +49,13 @@ DLG4000 (UDP/WinSock2):
 - dlg_logger_ipc espera 3 amostras validas (DATA_OK) antes de iniciar o tempo; o supervisÃ³rio so inicia o Drive depois disso.
 - dlg_logger_ipc --ipc agora aceita PAUSE/RESUME/STOP. Em pause ele drena e descarta pacotes, congela o tempo local e retoma sem criar slots de catch-up.
 - dlg_logger_ipc escreve `dlg_logger_events.log` ao lado do `dlg.csv` com startup, READY/START, DATA_OK/TIMEOUT, pause/resume, progresso e encerramento.
+- dlg_encoder_test: teste do encoder BRT25-A0M16bit-RT1-X3 no CH3. O preset usa tSensor=1, iGain=1 (x3), iLPF=0, iSensPwr=1 (2.5 V), balanco desligado, fInputDCImp=1 e fInputACImp=0; x10 foi abandonado porque a captura real saturou o A/D em raw=-32768. O handshake e faseado: STOP/drain -> SETCHCFG/espera -> GETCHCFG isolado -> SETUP/espera -> START -> 3 ACQDATA na taxa solicitada e com frames distintos/crescentes. Readback explicito divergente ou SET rejeitado bloqueiam; se GETCHCFG nao responder em duas tentativas, usa fluxo compativel SET/SETUP/START, ainda exige os 3 ACQDATA antes do motor e registra mode=FALLBACK. Apos DRIVE_STARTED, drena backlog DLG pre-movimento e reancora a captura. Calibracoes com qualquer preset diferente de x3/LPF0 sao rejeitadas.
+- A autocalibracao motorizada do dlg_encoder_test usa 4 wraps para delimitar 3 revolucoes completas. Alinha DLG 200 Hz e P0B-09 10 Hz por QPC; no modo de calibracao, t_qpc valido do Drive e o ponto medio da transacao Modbus. NULL/pos_err sao ignorados sem forward-fill, gaps de ate 0.5 s usam interpolacao temporal, saltos numericos fisicamente impossiveis e recuos acima da banda de jitter sao rejeitados. Respeita pos_mod, exclui 5 graus das bordas, agrupa em bins de 1 grau com pelo menos 8 amostras e exige 320 bins por volta. Duas voltas treinam fit robusto raw->graus; a terceira e holdout. Depois de aprovar, refaz o modelo operacional com as 3 voltas. O JSON marca readback verdadeiro apenas no modo estrito; fallback fica identificado como FALLBACK_ACQDATA. O monitor usa apenas CH3 + mediana causal de 9; P0B-09 nao participa da posicao operacional.
+- Limites provisorios do fit angular: RMSE <=0.5 grau, P95 <=1 grau, max <=2 graus, erro da relacao por volta <=1% e nenhuma saturacao em raw <=-32760 ou >=32760. Aplica os limites tanto aos bins do holdout quanto as amostras com a mediana causal de 9 usada pelo monitor. Reprova preserva o JSON anterior e mantem CSVs/logs.
+- A autocalibracao motorizada carrega `relacao` de `%LOCALAPPDATA%\LATRIB\supervisorio_settings.json`, usa alvo de 1 RPM no encoder e envia `rpm_motor=round(i*rpm_encoder)` ao a5_speed_logger em COM5. Valor persistido observado: i=4. Fluxo: Drive READY parado -> preset/readback DLG -> Drive START -> 4 wraps -> Drive STOPPED -> ACQSTOP -> fit/holdout. Timeout motorizado 300 s.
+- O JSON motorizado usa purpose=encoder_ch3_angle_deg e unit=deg; o nome historico encoder_CH3_mA.json e mantido por compatibilidade. O monitor aplica raw->graus diretamente, normaliza em [0,360), usa mediana 9 e atualiza uma linha no maximo 2 vezes/s quando muda 0.01 grau. O mA exibido nesse modo e identificado como nominal. Zero eletrico nao define zero mecanico.
+- dlg_encoder_test grava `<calib>_autocal_events.log`, CSV DLG com t_qpc e `<calib>_autocal_drive/drive.csv`. Registra DLG_HANDSHAKE por tentativa (envios, ACK, GET/match e valores reais, SETUP/START, taxa/frames ACQDATA, socket/rejeicao), DLG_RESYNC, ANGULAR_FIT, metricas de treino/holdout, relacao, saturacao e falhas. Replay: `--replay-autocal CSV --rate HZ --ratio I`; sem --ratio tenta carregar o supervisorio. Capturas antigas com 3 wraps nao podem aprovar o holdout novo.
+- A opcao manual por wraps permanece apenas como diagnostico/normalizacao nominal 4-20 mA; a calibracao manual com referencia continua separada. Ligacao CH3 nos pinos DB9 8/1; a polaridade 8=I+ e 1=I- e inferencia a validar com calibrador limitado/Lynx. Use fonte externa 12-24 V; excitacao 2.5 V do canal nao alimenta o encoder.
 
 CalibraDLG (UDP/WinSock2):
 - Modes: interactive console (default) or --ipc (JSON lines over STDIN/STDOUT).
@@ -133,6 +140,7 @@ SupervisÃ³rio (Python/Tk):
 - Botao "Zerar celula" no supervisÃ³rio: coleta CH1 por 30 s (DLG em repouso), calcula media valida e ajusta `fit.intercept` do `calib_CH1.json` para tara (`novo = antigo - media`); durante a coleta o estado mostra "Coletando dados para tara".
 - Tara no supervisÃ³rio preserva `fit.slope` (nao altera inclinacao) e ajusta somente `fit.intercept`; grava debug com slope/intercept antes/depois.
 - Inicio de ensaio executa tara automatica obrigatoria com dois popups de confirmacao operacional (sem carga para zerar, depois pronto para iniciar).
+- Excecao temporaria: modo reciprocante experimental bypassa a tara automatica para testes de movimento.
 - Inicio de novo ensaio fica bloqueado enquanto tara, processos externos, merge/finalizacao ou salvamento dos arquivos finais do ensaio anterior ainda estiverem em andamento.
 - Log da tara automatica fica em `<pasta do ensaio>\\DadosDev\\zero_ensaio.csv`; tara manual (botao "Zerar celula") grava em `<REPO_BASE>\\ZeroAvulso\\zero_avulso_<timestamp>.csv`.
 - Busca do arquivo de calibracao CH1 prioriza `calib_CH1.json`/`out\\calib_CH1.json`; arquivos genericos (`calib.json`/`calib`) so sao aceitos quando o payload indicar CH1.
@@ -164,7 +172,13 @@ DriveA5 (Modbus RTU / libmodbus):
 - a5_speed_logger cacheia modo de leitura de P0B-09 (FC03/FC04) para reduzir latencia de fallback em cada amostra.
 - a5_speed_logger --ipc: aceita STOP via stdin para encerramento antecipado com a mesma rotina de parada.
 - a5_speed_logger --ipc: aceita PAUSE/RESUME. Em pause aplica rampa ate 0 rpm e para; em resume volta com rampa de setpoint e desloca deadlines (sem contar tempo pausado).
+- a5_speed_logger `--encoder-calibration` exige `--ipc` e `--setup`, para antes/depois do setup e exige escrita + readback dos 7 parametros do modo velocidade antes de READY. Cada WRITE/READBACK do setup e preservado em a5_speed_events.log, mesmo quando o pai suprime as confirmacoes OK no console. Depois exige 3 leituras P0B-09 validas e le somente posicao durante a captura. STARTED e emitido depois de aceitar zero+RUN e iniciar rampa de 3 s; perda de P0B-09 por 2 s aborta. Emite `STATUS_DRIVE` 1 vez/s com comunicacao, comando, P0B-09, contagem desenrolada/voltas, erros e idade da leitura. PAUSE equivale a STOP nesse modo. STOP/EOF/Ctrl+C convergem para rampa e parada reforcada; STOPPED so e emitido se RPM=0, CTRL RDY e P31-00 tiverem ao menos um comando aceito. O parser IPC consome comandos ja bufferizados antes de consultar novos bytes.
+- a5_speed_logger `--self-test` valida a fila IPC sem abrir COM. O CMake copia modbus-5.dll por configuracao; Release deve receber a DLL de `x64-windows/bin`, nunca a de `debug/bin`.
 - a5_speed_logger aplica rampa linear de setpoint (3 s) entre trocas de segmento, pause/resume e stop de ensaio para reduzir tranco no motor.
+- a5_speed_logger tem modo reciprocante experimental em velocidade: usa RPM com sinal, P0B-09 desenrolado por direcao, curso em mm convertido por raio+relacao+P05-02/65536, e inverte em faixa `target +/- tolerancia_counts`.
+- No modo reciprocante, o curso e uma ida ou volta; o ensaio para o motor por distancia acumulada do encoder. Overshoot, perda prolongada de posicao, fim de tempo sem distancia alvo, ou parada fora da faixa retornam falha.
+- Reciprocante inicial usa paradas secas sem rampa. Tolerancia de parada fica persistida no supervisorio em "configuracoes adicionais".
+- Alternativa registrada caso a conversao geometrica do curso nao funcione em bancada: calibrar empiricamente com volta lenta, lendo arquivo com tempo/RPM/posicao e usando a posicao real de parada como alvo final.
 - a5_speed_logger escreve `a5_speed_events.log` ao lado do `drive.csv` com startup, START, pause/resume, progresso por segundo, erros de leitura e encerramento.
 - merge_logs: junta dlg.csv + drive.csv por indice de linha e gera CSV de resultado com colunas: idx,t_s,ch1..ch8,atrito,pos,rpm,dlg_err,drive_pos_err,drive_rpm_err.
 - Atrito por distancia (tempo real e final) e processado em Python no supervisorio com alinhamento por idx entre `dlg.csv` e `drive.csv`.
@@ -204,12 +218,14 @@ CSV conventions
 - Fixed headers and units. Use "NULL" rows only for real losses.
 - `resultado_ensaio.csv` and o arquivo _P por distancia use `;` as column delimiter.
 - Arquivos finais do grafico 3: _DP.csv (distancia) e _VP.csv (volta), ambos com `;` como delimitador.
-- _DP.csv e _VP.csv incluem `t_s_inicio`: tempo da primeira linha alinhada DLG+Drive que entrou naquele intervalo/volta, para correlacionar os dois processamentos.
+- No modo reciprocante, _VP.csv e substituido por _M.csv, processado por stroke. _M.csv usa `TEMPO_(min);STROKE;ATRITO_EFETIVO;ATRITO_MEDIO;ATRITO_MAX;POS_MAX;ATRITO_MIN;POS_MIN;LINHAS;VELOCIDADE`.
+- No _M.csv, o filtro de borda e configuravel no supervisorio em percentual por borda: 1% remove 1% do inicio e 1% do fim de cada stroke. O filtro se aplica a RMS, media, maximo e minimo; POS_MAX/POS_MIN sao em mm dentro do stroke.
+- _DP.csv e _VP.csv incluem `t_s_inicio`: tempo da primeira linha alinhada DLG+Drive que entrou naquele intervalo/volta, para correlacionar os dois processamentos; _M.csv usa `TEMPO_(min)` no inicio do stroke.
 - Ao finalizar o ensaio, o supervisor salva _G.png com a figura 2x2 da aba "graficos".
 - o arquivo _P por distancia inclui `velocidade_media_mm_s` por intervalo, derivada de `rpm_medio_intervalo` com `v = |rpm| * (2*pi*raio) / (60*i)`.
 - Write outputs into out/ subfolders (gitignored) when creating artifacts.
 - Supervisor (novo_tribometro.py) grava em: Desktop\\Repositorio\\<AAAA-MM-DD - PoD - NomeEnsaio_Estudo-Repeticao>.
-  Arquivos finais: <data>-<nome_ensaio>-<estudo>-<repeticao>_I.csv, _DP.csv, _VP.csv, _T.csv, _G.png.
+  Arquivos finais: <data>-<nome_ensaio>-<estudo>-<repeticao>_I.csv, _DP.csv, _VP.csv (continuo) ou _M.csv (reciprocante), _T.csv, _G.png.
   Pasta tecnica: DadosDev\\ com <arquivo_t>.merge_source, dlg.csv, drive.csv, schedule.csv, graph_events.log, dlg_logger_events.log e a5_speed_events.log.
 
 Roadmap (short)
@@ -231,4 +247,4 @@ Multi-exe orchestration
 - Executables should exchange data via files: e.g., calibration tool writes a file that the main DLG logger reads.
 
 - Grafico 3 tem switch de visualizacao: Distancia (processamento por intervalo em mm) ou Volta (processamento por volta do pino).
-- O ensaio gera dois arquivos finais do grafico 3: _DP.csv (distancia) e _VP.csv (volta).
+- O ensaio gera dois arquivos finais do grafico 3: _DP.csv (distancia) e _VP.csv (volta) no continuo; no reciprocante gera _DP.csv e _M.csv (stroke).

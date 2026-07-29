@@ -74,6 +74,11 @@ class RunState:
     relacao: float
     raio_mm: float = 0.0
     distance_interval_mm: float = 10.0
+    reciprocating: bool = False
+    reciprocating_course_mm: float = 0.0
+    reciprocating_total_mm: float = 0.0
+    reciprocating_tolerance_counts: int = 0
+    reciprocating_edge_filter_pct: float = 0.0
     # Estado logico de pausa observado pelo orquestrador.
     paused: bool = False
 
@@ -284,11 +289,13 @@ def check_executables(repo_root: str) -> dict:
     ], "dlg_logger_ipc.exe")
 
     drive_exe = find_exe([
+        os.path.join(repo_root, "DriveA5", "build_vs2022", "Release", "a5_speed_logger.exe"),
         os.path.join(repo_root, "DriveA5", "build", "Release", "a5_speed_logger.exe"),
         os.path.join(repo_root, "DriveA5", "build", "a5_speed_logger.exe"),
     ], "a5_speed_logger.exe")
 
     merge_exe = find_exe([
+        os.path.join(repo_root, "DriveA5", "build_vs2022", "Release", "merge_logs.exe"),
         os.path.join(repo_root, "DriveA5", "build", "Release", "merge_logs.exe"),
         os.path.join(repo_root, "DriveA5", "build", "merge_logs.exe"),
     ], "merge_logs.exe")
@@ -348,6 +355,11 @@ def start_external_run(
     relacao: float = 1.0,
     raio_mm: float = 0.0,
     distance_interval_mm: float = 10.0,
+    reciprocating: bool = False,
+    reciprocating_course_mm: float = 0.0,
+    reciprocating_total_mm: float = 0.0,
+    reciprocating_tolerance_counts: int = 0,
+    reciprocating_edge_filter_pct: float = 0.0,
 ) -> RunState:
     """
     Inicia o ensaio em modo externo (executaveis C sem interface).
@@ -392,10 +404,20 @@ def start_external_run(
     if "turn_vp_csv" not in out_paths or not out_paths.get("turn_vp_csv"):
         base_folder = os.path.dirname(out_paths.get("merge_csv", "")) or os.getcwd()
         dist_name = os.path.basename(out_paths.get("turn_dist_csv", "")) or ""
+        movement_suffix = "_M.csv" if reciprocating else "_VP.csv"
         if dist_name.endswith("_DP.csv"):
-            out_paths["turn_vp_csv"] = os.path.join(base_folder, dist_name.replace("_DP.csv", "_VP.csv"))
+            out_paths["turn_vp_csv"] = os.path.join(base_folder, dist_name.replace("_DP.csv", movement_suffix))
         else:
-            out_paths["turn_vp_csv"] = os.path.join(base_folder, "atrito_por_volta.csv")
+            fallback_name = "atrito_por_stroke.csv" if reciprocating else "atrito_por_volta.csv"
+            out_paths["turn_vp_csv"] = os.path.join(base_folder, fallback_name)
+    if reciprocating:
+        current_motion = out_paths.get("turn_vp_csv", "")
+        base_folder = os.path.dirname(current_motion) or os.path.dirname(out_paths.get("merge_csv", "")) or os.getcwd()
+        current_name = os.path.basename(current_motion)
+        if current_name.endswith("_VP.csv"):
+            out_paths["turn_vp_csv"] = os.path.join(base_folder, current_name.replace("_VP.csv", "_M.csv"))
+        elif current_name == "atrito_por_volta.csv":
+            out_paths["turn_vp_csv"] = os.path.join(base_folder, "atrito_por_stroke.csv")
 
     write_schedule_csv(out_paths["schedule_csv"], schedule)
 
@@ -451,6 +473,15 @@ def start_external_run(
         "--setup",
         "--ipc",
     ]
+    if reciprocating:
+        drive_cmd.extend([
+            "--reciprocating",
+            "--recip-course-mm", f"{reciprocating_course_mm:.6f}",
+            "--recip-total-mm", f"{reciprocating_total_mm:.6f}",
+            "--recip-radius-mm", f"{raio_mm:.6f}",
+            "--recip-ratio", f"{relacao:.6f}",
+            "--recip-tol-counts", str(int(reciprocating_tolerance_counts)),
+        ])
     drive_proc = subprocess.Popen(
         drive_cmd,
         stdin=subprocess.PIPE,
@@ -513,6 +544,11 @@ def start_external_run(
         relacao=relacao,
         raio_mm=raio_mm,
         distance_interval_mm=distance_interval_mm,
+        reciprocating=bool(reciprocating),
+        reciprocating_course_mm=reciprocating_course_mm,
+        reciprocating_total_mm=reciprocating_total_mm,
+        reciprocating_tolerance_counts=int(reciprocating_tolerance_counts),
+        reciprocating_edge_filter_pct=float(reciprocating_edge_filter_pct),
     )
 
 
@@ -535,6 +571,8 @@ def wait_and_merge(state: RunState) -> int:
     """
     state.dlg_proc.wait()
     state.drive_proc.wait()
+    dlg_rc = state.dlg_proc.returncode
+    drive_rc = state.drive_proc.returncode
 
     # Reprocessa sempre no final para garantir consistencia do arquivo final
     # com os CSVs completos (independente de glitch no tempo real).
@@ -556,9 +594,17 @@ def wait_and_merge(state: RunState) -> int:
     if merge_rc != 0 or not os.path.exists(state.merge_csv):
         _merge_csv_fallback(state.dlg_csv, state.drive_csv, state.merge_csv)
         _move_dev_artifacts(state)
+        if drive_rc not in (None, 0):
+            return int(drive_rc)
+        if dlg_rc not in (None, 0):
+            return int(dlg_rc)
         return 0
 
     _move_dev_artifacts(state)
+    if drive_rc not in (None, 0):
+        return int(drive_rc)
+    if dlg_rc not in (None, 0):
+        return int(dlg_rc)
     return merge_rc
 
 
@@ -670,12 +716,370 @@ def finalize_dev_artifacts_after_run(state: RunState, retries: int = 20, sleep_s
         time.sleep(max(0.01, float(sleep_s)))
 
 
+def _rebuild_reciprocating_csv_from_logs(state: RunState, relacao: float, raio_mm: float, distance_interval_mm: float) -> None:
+    """
+    Regera _DP e _M para modo reciprocante usando deslocamento absoluto do encoder.
+
+    O _M usa strokes delimitados pelos eventos RECIP_REVERSE/RECIP_DONE do
+    a5_speed_events.log. Isso evita depender do RPM para decidir sentido nas
+    inversoes, onde a telemetria pode ficar nula ou atrasada.
+    """
+    def _to_int(txt, default=None):
+        try:
+            if txt is None:
+                return default
+            t = str(txt).strip()
+            if not t or t.upper() == "NULL":
+                return default
+            return int(t)
+        except Exception:
+            return default
+
+    def _to_float(txt, default=None):
+        try:
+            if txt is None:
+                return default
+            t = str(txt).strip()
+            if not t or t.upper() == "NULL":
+                return default
+            return float(t)
+        except Exception:
+            return default
+
+    def _fmt(value, digits=6):
+        if value is None:
+            return "NULL"
+        try:
+            return f"{float(value):.{digits}f}"
+        except Exception:
+            return "NULL"
+
+    def _event_kv(line):
+        out = {}
+        for part in str(line).replace(",", " ").split():
+            if "=" not in part:
+                continue
+            k, v = part.split("=", 1)
+            out[k.strip()] = v.strip()
+        return out
+
+    def _parse_recip_events(path):
+        info = {
+            "pos_mod": 65536.0,
+            "reverses": [],
+            "done": None,
+        }
+        if not path or not os.path.exists(path):
+            return info
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if "RECIP_INIT " in line:
+                        kv = _event_kv(line)
+                        pos_mod = _to_float(kv.get("pos_mod"), None)
+                        if pos_mod is not None and pos_mod > 1.0:
+                            info["pos_mod"] = pos_mod
+                    elif "RECIP_REVERSE " in line:
+                        kv = _event_kv(line)
+                        idx = _to_int(kv.get("idx"), None)
+                        if idx is not None:
+                            info["reverses"].append(idx)
+                    elif "RECIP_DONE " in line:
+                        kv = _event_kv(line)
+                        idx = _to_int(kv.get("idx"), None)
+                        if idx is not None:
+                            info["done"] = idx
+        except Exception:
+            return info
+        info["reverses"] = sorted(set(info["reverses"]))
+        return info
+
+    def _read_aligned_samples():
+        samples = []
+        with open(state.dlg_csv, "r", newline="", encoding="utf-8") as fdlg, \
+             open(state.drive_csv, "r", newline="", encoding="utf-8") as fdrv:
+            rd_d = csv.reader(fdlg)
+            rd_r = csv.reader(fdrv)
+            next(rd_d, None)
+            next(rd_r, None)
+
+            drow = None
+            rrow = None
+            have_d = False
+            have_r = False
+            while True:
+                if not have_d:
+                    try:
+                        drow = next(rd_d)
+                        have_d = True
+                    except StopIteration:
+                        break
+                if not have_r:
+                    try:
+                        rrow = next(rd_r)
+                        have_r = True
+                    except StopIteration:
+                        break
+
+                idx_d = _to_int(drow[0] if drow and len(drow) > 0 else None, None)
+                idx_r = _to_int(rrow[0] if rrow and len(rrow) > 0 else None, None)
+                if idx_d is None:
+                    have_d = False
+                    continue
+                if idx_r is None:
+                    have_r = False
+                    continue
+                if idx_d < idx_r:
+                    have_d = False
+                    continue
+                if idx_r < idx_d:
+                    have_r = False
+                    continue
+
+                have_d = False
+                have_r = False
+
+                dlg_err = _to_int(drow[-1] if drow else None, 1)
+                ch1 = _to_float(drow[3] if drow and len(drow) > 3 else None, None)
+                atr = _to_float(drow[11] if drow and len(drow) > 11 else None, None)
+                if state.force_normal_n and state.force_normal_n > 0 and ch1 is not None:
+                    atr = ch1 / state.force_normal_n
+                atr_ok = (dlg_err == 0 and atr is not None)
+
+                t_s_dlg = _to_float(drow[2] if drow and len(drow) > 2 else None, None)
+                t_s_drv = _to_float(rrow[2] if rrow and len(rrow) > 2 else None, None)
+                t_s = t_s_drv if t_s_drv is not None else t_s_dlg
+
+                pos_err = _to_int(rrow[5] if rrow and len(rrow) > 5 else None, 1)
+                rpm_err = _to_int(rrow[6] if rrow and len(rrow) > 6 else None, 1)
+                pos = _to_float(rrow[3] if rrow and len(rrow) > 3 else None, None)
+                rpm = _to_float(rrow[4] if rrow and len(rrow) > 4 else None, None)
+                pos_mod = _to_float(rrow[7] if rrow and len(rrow) > 7 else None, None)
+                if pos_mod is None or pos_mod <= 1.0:
+                    pos_mod = None
+
+                samples.append({
+                    "idx": idx_d,
+                    "t": t_s,
+                    "atr": atr,
+                    "atr_ok": atr_ok,
+                    "pos": pos,
+                    "pos_ok": (pos_err == 0 and pos is not None),
+                    "rpm": rpm,
+                    "rpm_ok": (rpm_err == 0 and rpm is not None),
+                    "pos_mod": pos_mod,
+                })
+        return samples
+
+    def _delta_mm(prev_s, cur_s, fallback_mod):
+        if not prev_s or not cur_s:
+            return 0.0
+        mod = cur_s.get("pos_mod") or prev_s.get("pos_mod") or fallback_mod
+        if mod is None or mod <= 1.0 or relacao <= 0.0 or raio_mm <= 0.0:
+            return 0.0
+        raw = abs(float(cur_s["pos"]) - float(prev_s["pos"]))
+        if raw > (0.5 * mod):
+            raw = mod - raw
+        if raw < 0.0:
+            raw = 0.0
+        return raw * (2.0 * 3.141592653589793 * raio_mm) / (relacao * mod)
+
+    def _dp_acc_reset():
+        return {
+            "n_total": 0,
+            "n_fail": 0,
+            "n_valid": 0,
+            "t_start_s": None,
+            "t_end_s": None,
+            "atr_sum": 0.0,
+            "atr_min": None,
+            "atr_max": None,
+            "rpm_sum": 0.0,
+            "rpm_cnt": 0,
+        }
+
+    def _dp_add(acc, s):
+        acc["n_total"] += 1
+        if acc["t_start_s"] is None:
+            acc["t_start_s"] = s.get("t")
+        if s.get("t") is not None:
+            acc["t_end_s"] = s.get("t")
+        if s.get("atr_ok") and s.get("pos_ok"):
+            atr = s["atr"]
+            acc["n_valid"] += 1
+            acc["atr_sum"] += atr
+            acc["atr_min"] = atr if acc["atr_min"] is None else min(acc["atr_min"], atr)
+            acc["atr_max"] = atr if acc["atr_max"] is None else max(acc["atr_max"], atr)
+            if s.get("rpm_ok"):
+                acc["rpm_sum"] += abs(s["rpm"])
+                acc["rpm_cnt"] += 1
+        else:
+            acc["n_fail"] += 1
+
+    def _emit_dp(writer, boundary_mm, acc):
+        pct_loss = (100.0 * acc["n_fail"] / acc["n_total"]) if acc["n_total"] > 0 else 0.0
+        atr_med = (acc["atr_sum"] / acc["n_valid"]) if acc["n_valid"] > 0 else None
+        rpm_med = (acc["rpm_sum"] / acc["rpm_cnt"]) if acc["rpm_cnt"] > 0 else None
+        vel_med = None
+        if acc["t_start_s"] is not None and acc["t_end_s"] is not None:
+            dt = acc["t_end_s"] - acc["t_start_s"]
+            if dt > 0.0:
+                vel_med = distance_interval_mm / dt
+        writer.writerow([
+            _fmt(boundary_mm),
+            _fmt(acc["t_start_s"]),
+            _fmt(atr_med),
+            _fmt(acc["atr_min"]),
+            _fmt(acc["atr_max"]),
+            _fmt(rpm_med),
+            _fmt(vel_med),
+            acc["n_total"], acc["n_fail"], acc["n_valid"], f"{pct_loss:.3f}"
+        ])
+
+    def _emit_motion(writer, stroke_n, stroke_samples, edge_pct, fallback_mod):
+        first_t = None
+        last_t = None
+        prev_pos_sample = None
+        stroke_len_mm = 0.0
+        values = []
+
+        for s in stroke_samples:
+            if first_t is None and s.get("t") is not None:
+                first_t = s.get("t")
+            if s.get("t") is not None:
+                last_t = s.get("t")
+            if not s.get("pos_ok"):
+                continue
+            if prev_pos_sample is not None:
+                stroke_len_mm += _delta_mm(prev_pos_sample, s, fallback_mod)
+            if s.get("atr_ok"):
+                values.append((stroke_len_mm, s["atr"]))
+            prev_pos_sample = s
+
+        edge_mm = (stroke_len_mm * edge_pct / 100.0) if edge_pct > 0.0 else 0.0
+        if edge_pct <= 0.0:
+            filtered = values
+        else:
+            filtered = [
+                item for item in values
+                if item[0] >= edge_mm and item[0] <= (stroke_len_mm - edge_mm)
+            ]
+
+        atr_rms = None
+        atr_med = None
+        atr_max = None
+        atr_min = None
+        pos_max = None
+        pos_min = None
+        if filtered:
+            atr_values = [item[1] for item in filtered]
+            atr_rms = (sum(v * v for v in atr_values) / float(len(atr_values))) ** 0.5
+            atr_med = sum(atr_values) / float(len(atr_values))
+            max_item = max(filtered, key=lambda item: item[1])
+            min_item = min(filtered, key=lambda item: item[1])
+            atr_max = max_item[1]
+            pos_max = max_item[0]
+            atr_min = min_item[1]
+            pos_min = min_item[0]
+
+        vel_mm_s = None
+        if first_t is not None and last_t is not None:
+            dt = last_t - first_t
+            if dt > 0.0:
+                vel_mm_s = stroke_len_mm / dt
+
+        tempo_min = (first_t / 60.0) if first_t is not None else None
+        writer.writerow([
+            _fmt(tempo_min),
+            stroke_n,
+            _fmt(atr_rms),
+            _fmt(atr_med),
+            _fmt(atr_max),
+            _fmt(pos_max),
+            _fmt(atr_min),
+            _fmt(pos_min),
+            len(filtered),
+            _fmt(vel_mm_s),
+        ])
+
+    if relacao <= 0.0 or raio_mm <= 0.0:
+        return
+    try:
+        edge_pct = float(getattr(state, "reciprocating_edge_filter_pct", 0.0))
+    except Exception:
+        edge_pct = 0.0
+    if edge_pct < 0.0:
+        edge_pct = 0.0
+    if edge_pct > 100.0:
+        edge_pct = 100.0
+    if distance_interval_mm <= 0.0:
+        distance_interval_mm = 10.0
+
+    events_path = os.path.join(os.path.dirname(state.drive_csv), "a5_speed_events.log")
+    events = _parse_recip_events(events_path)
+    samples = _read_aligned_samples()
+    fallback_mod = events.get("pos_mod") or 65536.0
+
+    with open(state.turn_dist_csv, "w", newline="", encoding="utf-8") as fdist, \
+         open(state.turn_vp_csv, "w", newline="", encoding="utf-8") as fmotion:
+        wd = csv.writer(fdist, delimiter=";", lineterminator="\n")
+        wm = csv.writer(fmotion, delimiter=";", lineterminator="\n")
+        wd.writerow([
+            "distancia_mm", "t_s_inicio", "atrito_med", "atrito_min", "atrito_max", "rpm_medio_intervalo", "velocidade_media_mm_s",
+            "n_total_pontos", "n_falhas", "n_validas", "pct_perda"
+        ])
+        wm.writerow([
+            "TEMPO_(min)", "STROKE", "ATRITO_EFETIVO", "ATRITO_MEDIO", "ATRITO_MAX", "POS_MAX", "ATRITO_MIN", "POS_MIN", "LINHAS", "VELOCIDADE"
+        ])
+        if not samples:
+            return
+
+        acc = _dp_acc_reset()
+        prev_pos_sample = None
+        cum_dist_mm = 0.0
+        next_boundary_mm = distance_interval_mm
+        for s in samples:
+            _dp_add(acc, s)
+            if s.get("pos_ok") and prev_pos_sample is not None:
+                cum_dist_mm += _delta_mm(prev_pos_sample, s, fallback_mod)
+                while cum_dist_mm >= next_boundary_mm:
+                    _emit_dp(wd, next_boundary_mm, acc)
+                    next_boundary_mm += distance_interval_mm
+                    acc = _dp_acc_reset()
+            if s.get("pos_ok"):
+                prev_pos_sample = s
+
+        boundaries = list(events.get("reverses") or [])
+        done_idx = events.get("done")
+        if done_idx is not None and (not boundaries or done_idx > boundaries[-1]):
+            boundaries.append(done_idx)
+        if not boundaries:
+            boundaries.append(samples[-1]["idx"])
+
+        stroke_n = 1
+        start_idx = samples[0]["idx"]
+        cursor = 0
+        for boundary_idx in boundaries:
+            if boundary_idx < start_idx:
+                continue
+            while cursor < len(samples) and samples[cursor]["idx"] < start_idx:
+                cursor += 1
+            start_cursor = cursor
+            while cursor < len(samples) and samples[cursor]["idx"] <= boundary_idx:
+                cursor += 1
+            stroke_samples = samples[start_cursor:cursor]
+            if stroke_samples:
+                _emit_motion(wm, stroke_n, stroke_samples, edge_pct, fallback_mod)
+                stroke_n += 1
+            start_idx = boundary_idx + 1
+
+
 def _rebuild_turn_csv_from_logs(state: RunState) -> None:
     """
-    Regera arquivos _DP e _VP em modo offline (sem IPC) usando logs finais.
+    Regera arquivos _DP e _VP/_M em modo offline (sem IPC) usando logs finais.
 
     Esse passo roda ao final do ensaio para garantir consistencia dos dados
-    por distancia e por volta, mesmo se o processamento em tempo real atrasar.
+    por distancia, volta ou stroke, mesmo se o processamento em tempo real atrasar.
     """
     if not state:
         return
@@ -695,6 +1099,9 @@ def _rebuild_turn_csv_from_logs(state: RunState) -> None:
         distance_interval_mm = float(state.distance_interval_mm) if state.distance_interval_mm > 0 else 10.0
     except Exception:
         distance_interval_mm = 10.0
+    if bool(getattr(state, "reciprocating", False)):
+        _rebuild_reciprocating_csv_from_logs(state, relacao, raio_mm, distance_interval_mm)
+        return
     cycles_per_motor_rev = 1.0
     rpm_dir_deadband = 5.0
 
