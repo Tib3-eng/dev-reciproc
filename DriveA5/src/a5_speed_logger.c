@@ -124,6 +124,7 @@ typedef struct {
     int32_t last_mod_pos;
     int64_t start_pos;
     int64_t end_pos;
+    int64_t stroke_start_pos;
     int64_t pos_unwrapped;
     int64_t stroke_counts;
     int64_t total_counts;
@@ -131,6 +132,9 @@ typedef struct {
     double accum_counts;
     char abort_msg[192];
 } recip_state_t;
+
+static int recip_target_reached(const recip_state_t *r, int64_t pos, int64_t target);
+static int recip_stroke_limit_reached(const recip_state_t *r, int64_t pos);
 
 static FILE *g_ev = NULL;
 static volatile LONG g_console_stop_requested = 0;
@@ -881,8 +885,29 @@ static int run_internal_self_test(void){
         return 0;
     }
 
+    recip_state_t recip_test = {0};
+    recip_test.stroke_counts = 1000;
+    recip_test.stroke_start_pos = 0;
+    recip_test.direction = 1;
+    if(recip_target_reached(&recip_test, 999, 1000) ||
+       !recip_target_reached(&recip_test, 1000, 1000) ||
+       recip_stroke_limit_reached(&recip_test, 1999) ||
+       !recip_stroke_limit_reached(&recip_test, 2000)){
+        puts("SELF-TEST FALHOU: limites reciprocantes positivos.");
+        return 0;
+    }
+    recip_test.stroke_start_pos = 5000;
+    recip_test.direction = -1;
+    if(recip_target_reached(&recip_test, 4001, 4000) ||
+       !recip_target_reached(&recip_test, 4000, 4000) ||
+       recip_stroke_limit_reached(&recip_test, 3001) ||
+       !recip_stroke_limit_reached(&recip_test, 3000)){
+        puts("SELF-TEST FALHOU: limites reciprocantes negativos.");
+        return 0;
+    }
+
     puts(
-        "SELF-TEST OK: parser IPC e unwrap P0B-09."
+        "SELF-TEST OK: parser IPC, unwrap P0B-09 e limites reciprocantes."
     );
     return 1;
 }
@@ -1055,6 +1080,16 @@ static int recip_in_band(const recip_state_t *r, int64_t pos, int64_t target){
     return i64_abs_local(pos - target) <= (int64_t)r->tol_counts;
 }
 
+static int recip_target_reached(const recip_state_t *r, int64_t pos, int64_t target){
+    if(!r) return 0;
+    return (r->direction >= 0) ? (pos >= target) : (pos <= target);
+}
+
+static int recip_stroke_limit_reached(const recip_state_t *r, int64_t pos){
+    if(!r || r->stroke_counts <= 0) return 0;
+    return i64_abs_local(pos - r->stroke_start_pos) >= (r->stroke_counts * 2);
+}
+
 static int64_t recip_counts_from_mm(double mm, double relacao, double raio_mm, uint32_t pos_mod){
     const double pi = 3.14159265358979323846;
     if(mm <= 0.0 || relacao <= 0.0 || raio_mm <= 0.0 || pos_mod == 0) return 0;
@@ -1081,12 +1116,6 @@ static int recip_init(
         snprintf(r->abort_msg, sizeof(r->abort_msg), "tolerancia reciprocante invalida: %d", r->tol_counts);
         return -1;
     }
-    if((int64_t)r->tol_counts * 2 >= r->stroke_counts){
-        snprintf(r->abort_msg, sizeof(r->abort_msg), "faixas inicio/fim sobrepostas: stroke=%lld tol=%d",
-                 (long long)r->stroke_counts, r->tol_counts);
-        return -1;
-    }
-
     r->initialized = 1;
     r->direction = 1;
     r->stop_pending = 0;
@@ -1098,6 +1127,7 @@ static int recip_init(
     r->last_mod_pos = initial_pos;
     r->start_pos = (int64_t)initial_pos;
     r->end_pos = r->start_pos + r->stroke_counts;
+    r->stroke_start_pos = r->start_pos;
     r->pos_unwrapped = r->start_pos;
     r->stop_target = r->end_pos;
     r->accum_counts = 0.0;
@@ -1640,6 +1670,7 @@ int main(int argc, char **argv){
     }
 
     int seg_idx = 0;
+    int schedule_idx = 0;
     int total_samples = (int)(duration_s * rate_hz + 0.5);
     int64_t qpc_freq = qpc_freq_ticks();
     int64_t dt_ticks = (int64_t)((double)qpc_freq / rate_hz + 0.5);
@@ -1652,6 +1683,8 @@ int main(int argc, char **argv){
     int paused = 0;
     int64_t pause_start_ticks = 0;
     int64_t hard_stop_ticks = start_ticks + (int64_t)(duration_s * (double)qpc_freq);
+    int64_t recip_done_ticks = 0;
+    int64_t recip_postroll_limit_ticks = (int64_t)(2.0 * (double)qpc_freq + 0.5);
     int current_cmd_rpm = 0;
     int desired_seg_rpm = recip.enabled ? recip_target_rpm(&recip, segs, 0) : segs[0].rpm;
     rpm_ramp_t rpm_ramp = {0, 0, 0, start_ticks, start_ticks};
@@ -1997,19 +2030,62 @@ int main(int argc, char **argv){
                 recip.miss_count = 0;
                 (void)recip_update_unwrapped(&recip, sampled_pos);
 
-                if(recip.accum_counts >= (double)recip.total_counts){
-                    stop_drive_now(ctx, &current_cmd_rpm, 0);
-                    current_cmd_rpm = 0;
-                    stop_sent = 1;
-                    recip.done = 1;
-                    ev_logf("RECIP_DONE idx=%d accum_counts=%.0f total_counts=%lld pos=%lld",
-                            idx, recip.accum_counts, (long long)recip.total_counts,
-                            (long long)recip.pos_unwrapped);
+                int64_t stroke_travel_counts = i64_abs_local(
+                    recip.pos_unwrapped - recip.stroke_start_pos
+                );
+                if(recip_stroke_limit_reached(&recip, recip.pos_unwrapped)){
+                    char msg[192];
+                    snprintf(msg, sizeof(msg),
+                             "RECIP_STROKE_LIMIT idx=%d travel_counts=%lld limit_counts=%lld pos=%lld start=%lld",
+                             idx,
+                             (long long)stroke_travel_counts,
+                             (long long)(recip.stroke_counts * 2),
+                             (long long)recip.pos_unwrapped,
+                             (long long)recip.stroke_start_pos);
+                    recip_abort(&recip, msg);
                 }else if(recip.stop_pending){
-                    if(recip_in_band(&recip, recip.pos_unwrapped, recip.stop_target)){
-                        int old_dir = recip.direction;
-                        recip.stop_pending = 0;
+                    int old_dir = recip.direction;
+                    int completed_seg_idx = seg_idx;
+                    int64_t completed_start = recip.stroke_start_pos;
+                    int64_t completed_counts = i64_abs_local(
+                        recip.pos_unwrapped - completed_start
+                    );
+                    int64_t error_counts = completed_counts - recip.stroke_counts;
+                    int64_t endpoint_error = recip.pos_unwrapped - recip.stop_target;
+                    int within_tol = recip_in_band(
+                        &recip, recip.pos_unwrapped, recip.stop_target
+                    );
+                    recip.stop_pending = 0;
+                    if(recip.accum_counts >= (double)recip.total_counts){
+                        stop_drive_now(ctx, &current_cmd_rpm, 0);
+                        current_cmd_rpm = 0;
+                        stop_sent = 1;
+                        recip.done = 1;
+                        recip_done_ticks = now;
+                        ev_logf("RECIP_DONE idx=%d accum_counts=%.0f total_counts=%lld pos=%lld target=%lld stroke_start=%lld stroke_counts_actual=%lld error_counts=%lld endpoint_error=%lld within_tol=%d tol=%d completed_segment=%d target_rpm_abs=%d postroll_max_s=2.000",
+                                idx,
+                                recip.accum_counts,
+                                (long long)recip.total_counts,
+                                (long long)recip.pos_unwrapped,
+                                (long long)recip.stop_target,
+                                (long long)completed_start,
+                                (long long)completed_counts,
+                                (long long)error_counts,
+                                (long long)endpoint_error,
+                                within_tol,
+                                recip.tol_counts,
+                                completed_seg_idx,
+                                rpm_abs_safe(segs[completed_seg_idx].rpm));
+                        puts("RECIP_MOTION_DONE");
+                        fflush(stdout);
+                    }else{
+                        recip.stroke_start_pos = recip.pos_unwrapped;
                         recip.direction = -recip.direction;
+                        if(schedule_idx != seg_idx){
+                            ev_logf("RECIP_SEGMENT_APPLY idx=%d previous=%d next=%d boundary=stroke",
+                                    idx, seg_idx, schedule_idx);
+                            seg_idx = schedule_idx;
+                        }
                         desired_seg_rpm = recip_target_rpm(&recip, segs, seg_idx);
                         if(cmd_run(ctx) != 0){
                             ev_logf("WARN RECIP cmd_run failed before reverse.");
@@ -2017,54 +2093,41 @@ int main(int argc, char **argv){
                         if(cmd_rpm(ctx, desired_seg_rpm) == 0){
                             current_cmd_rpm = desired_seg_rpm;
                         }
-                        ev_logf("RECIP_REVERSE idx=%d old_dir=%d new_dir=%d pos=%lld target=%lld rpm=%d accum_counts=%.0f",
+                        ev_logf("RECIP_REVERSE idx=%d old_dir=%d new_dir=%d pos=%lld target=%lld rpm=%d accum_counts=%.0f stroke_start=%lld stroke_counts_actual=%lld error_counts=%lld endpoint_error=%lld within_tol=%d tol=%d completed_segment=%d next_segment=%d target_rpm_abs=%d",
                                 idx, old_dir, recip.direction,
                                 (long long)recip.pos_unwrapped,
                                 (long long)recip.stop_target,
                                 desired_seg_rpm,
-                                recip.accum_counts);
-                    }else{
-                        char msg[192];
-                        snprintf(msg, sizeof(msg),
-                                 "RECIP_OUT_OF_BAND idx=%d pos=%lld target=%lld tol=%d",
-                                 idx,
-                                 (long long)recip.pos_unwrapped,
-                                 (long long)recip.stop_target,
-                                 recip.tol_counts);
-                        recip_abort(&recip, msg);
+                                recip.accum_counts,
+                                (long long)completed_start,
+                                (long long)completed_counts,
+                                (long long)error_counts,
+                                (long long)endpoint_error,
+                                within_tol,
+                                recip.tol_counts,
+                                completed_seg_idx,
+                                seg_idx,
+                                rpm_abs_safe(segs[completed_seg_idx].rpm));
                     }
                 }else{
                     int64_t target = (recip.direction >= 0) ? recip.end_pos : recip.start_pos;
-                    int passed_target = 0;
-                    if(recip.direction >= 0 && recip.pos_unwrapped > target + (int64_t)recip.tol_counts){
-                        passed_target = 1;
-                    }else if(recip.direction < 0 && recip.pos_unwrapped < target - (int64_t)recip.tol_counts){
-                        passed_target = 1;
-                    }
+                    int reached_target = recip_target_reached(
+                        &recip, recip.pos_unwrapped, target
+                    );
 
-                    if(recip_in_band(&recip, recip.pos_unwrapped, target)){
+                    if(reached_target){
                         if(cmd_rpm(ctx, 0) == 0){
                             current_cmd_rpm = 0;
                         }
                         recip.stop_pending = 1;
                         recip.stop_target = target;
-                        ev_logf("RECIP_STOP_TRIGGER idx=%d dir=%d pos=%lld target=%lld tol=%d accum_counts=%.0f",
+                        ev_logf("RECIP_STOP_TRIGGER idx=%d dir=%d pos=%lld target=%lld endpoint_error=%lld accum_counts=%.0f",
                                 idx,
                                 recip.direction,
                                 (long long)recip.pos_unwrapped,
                                 (long long)target,
-                                recip.tol_counts,
+                                (long long)(recip.pos_unwrapped - target),
                                 recip.accum_counts);
-                    }else if(passed_target){
-                        char msg[192];
-                        snprintf(msg, sizeof(msg),
-                                 "RECIP_OVERSHOOT idx=%d dir=%d pos=%lld target=%lld tol=%d",
-                                 idx,
-                                 recip.direction,
-                                 (long long)recip.pos_unwrapped,
-                                 (long long)target,
-                                 recip.tol_counts);
-                        recip_abort(&recip, msg);
                     }
                 }
             }else{
@@ -2093,11 +2156,13 @@ int main(int argc, char **argv){
             double t_s = (double)idx / rate_hz;
             int64_t t_qpc = start_ticks + (int64_t)idx * dt_ticks;
 
-            while(seg_idx + 1 < seg_count && t_s >= segs[seg_idx].t_end){
-                seg_idx++;
+            while(schedule_idx + 1 < seg_count && t_s >= segs[schedule_idx].t_end){
+                schedule_idx++;
             }
             {
-                int next_desired = recip.enabled ? recip_target_rpm(&recip, segs, seg_idx) : segs[seg_idx].rpm;
+                int next_desired;
+                if(!recip.enabled) seg_idx = schedule_idx;
+                next_desired = recip.enabled ? recip_target_rpm(&recip, segs, seg_idx) : segs[seg_idx].rpm;
                 if(!stop_sent && next_desired != desired_seg_rpm){
                     desired_seg_rpm = next_desired;
                     if(recip.enabled){
@@ -2129,11 +2194,13 @@ int main(int argc, char **argv){
                     ? sampled_pos_qpc
                     : nominal_qpc;
 
-            while(seg_idx + 1 < seg_count && t_s >= segs[seg_idx].t_end){
-                seg_idx++;
+            while(schedule_idx + 1 < seg_count && t_s >= segs[schedule_idx].t_end){
+                schedule_idx++;
             }
             {
-                int next_desired = recip.enabled ? recip_target_rpm(&recip, segs, seg_idx) : segs[seg_idx].rpm;
+                int next_desired;
+                if(!recip.enabled) seg_idx = schedule_idx;
+                next_desired = recip.enabled ? recip_target_rpm(&recip, segs, seg_idx) : segs[seg_idx].rpm;
                 if(!stop_sent && next_desired != desired_seg_rpm){
                     desired_seg_rpm = next_desired;
                     if(recip.enabled){
@@ -2166,6 +2233,12 @@ int main(int argc, char **argv){
                         idx, total_samples, seg_idx, current_cmd_rpm, stop_sent, paused, n_pos_err, n_rpm_err);
                 next_progress_log_ms = now_ms + 1000;
             }
+        }
+        if(recip.enabled && recip.done && recip_done_ticks > 0 &&
+           (now - recip_done_ticks) >= recip_postroll_limit_ticks){
+            ev_logf("RECIP_POSTROLL_TIMEOUT idx=%d elapsed_s=%.3f",
+                    idx, (double)(now - recip_done_ticks) / (double)qpc_freq);
+            break;
         }
     }
 

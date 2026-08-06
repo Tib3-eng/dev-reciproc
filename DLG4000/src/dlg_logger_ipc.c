@@ -53,6 +53,7 @@ Resumo de funcoes:
 #include <stddef.h>
 #include <share.h>
 #include <stdarg.h>
+#include <math.h>
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -73,6 +74,14 @@ static const uint16_t DLG_PORT_DEFAULT = 41401;
 #define DEFAULT_ILPF        0
 #define DEFAULT_IGAIN_IDX   5
 #define DEFAULT_SENSPWR_IDX 2
+#define DEFAULT_INPUT_DC    0
+#define DEFAULT_INPUT_AC    0
+#define DEFAULT_USE_BALANCE 0
+#define ENCODER_CHANNEL     3
+#define ENCODER_SCHEMA_VERSION 1
+#define ENCODER_COMPLETE_REVOLUTIONS 10
+#define ENCODER_CALIB_SUBPATH \
+    "LATRIB\\calibrations\\encoder_external_ch3.json"
 
 /* Gain / excitation tables (same as DLGlogger reference) */
 static const int gain_values[] = { 1, 3, 10, 30, 100, 300, 1000, 3000 };
@@ -399,8 +408,76 @@ static int get_exe_dir(char *out, size_t out_sz){
     return 0;
 }
 
+static int get_encoder_calib_path(char *out, size_t out_sz){
+    char *local_appdata = NULL;
+    size_t local_appdata_len = 0;
+    int written;
+    if(!out || out_sz == 0 ||
+       _dupenv_s(&local_appdata, &local_appdata_len, "LOCALAPPDATA") != 0 ||
+       !local_appdata || !*local_appdata){
+        free(local_appdata);
+        return 0;
+    }
+    written = _snprintf_s(out, out_sz, _TRUNCATE, "%s\\%s",
+                          local_appdata, ENCODER_CALIB_SUBPATH);
+    free(local_appdata);
+    return written > 0 && written < (int)out_sz;
+}
+
+static int load_encoder_angle_calibration(
+    double* slope, double* intercept,
+    int* tSensor, int* iLPF, int* iGainIdx, int* iSensPwr,
+    int* inputDC, int* inputAC, int* useBalance)
+{
+    char path[MAX_PATH];
+    char *buf;
+    double s = 0.0, b = 0.0;
+    int schema = 0, complete_revolutions = 0;
+    int ts = 0, lpf = 0, gain = 0, power = 0;
+    int dc = 0, ac = 0;
+
+    if(!get_encoder_calib_path(path, sizeof(path))) return 0;
+    buf = read_text_file(path, NULL);
+    if(!buf) return 0;
+    if(!strstr(buf, "\"purpose\": \"encoder_ch3_angle_deg\"") ||
+       !strstr(buf, "\"unit\": \"deg\"") ||
+       !strstr(buf, "\"accepted\": true") ||
+       !channel_in_header(buf, ENCODER_CHANNEL) ||
+       !parse_int_value(buf, "\"schema_version\"", &schema) ||
+       schema != ENCODER_SCHEMA_VERSION ||
+       !parse_int_value(buf, "\"complete_revolutions\"", &complete_revolutions) ||
+       complete_revolutions != ENCODER_COMPLETE_REVOLUTIONS ||
+       !parse_fit_value(buf, "\"slope\"", &s) ||
+       !parse_fit_value(buf, "\"intercept\"", &b) ||
+       !parse_int_value(buf, "\"tSensor\"", &ts) ||
+       !parse_int_value(buf, "\"iLPF\"", &lpf) ||
+       !parse_int_value(buf, "\"iGain\"", &gain) ||
+       !parse_int_value(buf, "\"iSensPwr\"", &power) ||
+       !parse_int_value(buf, "\"fInputDCImp\"", &dc) ||
+       !parse_int_value(buf, "\"fInputACImp\"", &ac) ||
+       !isfinite(s) || !isfinite(b) || s == 0.0){
+        free(buf);
+        return 0;
+    }
+    free(buf);
+    *slope = s;
+    *intercept = b;
+    if(tSensor) *tSensor = ts;
+    if(iLPF) *iLPF = lpf;
+    if(iGainIdx) *iGainIdx = gain;
+    if(iSensPwr) *iSensPwr = power;
+    if(inputDC) *inputDC = dc;
+    if(inputAC) *inputAC = ac;
+    if(useBalance) *useBalance = 0;
+    ev_logf("ENCODER_CALIB loaded path=%s slope=%.15g intercept=%.15g filter=none",
+            path, s, b);
+    return 1;
+}
+
 static int load_calib_for_channel(int ch, double* slope, double* intercept,
-                                  int* tSensor, int* iLPF, int* iGainIdx, int* iSensPwr){
+                                  int* tSensor, int* iLPF, int* iGainIdx, int* iSensPwr,
+                                  int* inputDC, int* inputAC, int* useBalance,
+                                  int* normalizeDegrees){
     char path_ch[64];
     char path_out_ch[80];
     char exe_dir[MAX_PATH];
@@ -410,6 +487,14 @@ static int load_calib_for_channel(int ch, double* slope, double* intercept,
     char path_exe_out_ch[256];
     const char* paths[8];
     int npaths = 0;
+
+    if(ch == ENCODER_CHANNEL){
+        int loaded = load_encoder_angle_calibration(
+            slope, intercept, tSensor, iLPF, iGainIdx, iSensPwr,
+            inputDC, inputAC, useBalance);
+        if(normalizeDegrees) *normalizeDegrees = loaded ? 1 : 0;
+        return loaded;
+    }
 
     _snprintf(path_ch, sizeof(path_ch), "calib_CH%d.json", ch);
     _snprintf(path_out_ch, sizeof(path_out_ch), "out\\calib_CH%d.json", ch);
@@ -471,6 +556,10 @@ static int load_calib_for_channel(int ch, double* slope, double* intercept,
     if(iLPF) *iLPF = lpf;
     if(iGainIdx) *iGainIdx = gain_idx;
     if(iSensPwr) *iSensPwr = senspwr_idx;
+    if(inputDC) *inputDC = DEFAULT_INPUT_DC;
+    if(inputAC) *inputAC = DEFAULT_INPUT_AC;
+    if(useBalance) *useBalance = DEFAULT_USE_BALANCE;
+    if(normalizeDegrees) *normalizeDegrees = 0;
     return 1;
 }
 
@@ -549,7 +638,8 @@ static void stop_acq(SOCKET s, const struct sockaddr_in *addr){
 }
 
 static void configure_channel(SOCKET s, const struct sockaddr_in *addr,
-                              int ch, int tSensor, int iLPF, int iGainIdx, int iSensPwr){
+                              int ch, int tSensor, int iLPF, int iGainIdx, int iSensPwr,
+                              int inputDC, int inputAC, int useBalance){
     PktSetCh cfg; memset(&cfg, 0, sizeof(cfg));
     cfg.code = OP_SETCHCFG;
     cfg.ch = (int16_t)ch;
@@ -557,6 +647,9 @@ static void configure_channel(SOCKET s, const struct sockaddr_in *addr,
     cfg.iGain = (int16_t)iGainIdx;
     cfg.iLPF = (int16_t)iLPF;
     cfg.iSensPwr = (int16_t)iSensPwr;
+    cfg.fDC = (uint16_t)inputDC;
+    cfg.fAC = (uint16_t)inputAC;
+    cfg.fUseBal = (uint16_t)useBalance;
     send_cmd(s, &cfg, sizeof(cfg), addr);
 }
 
@@ -863,6 +956,10 @@ int main(int argc, char **argv){
     int iLPF[DEFAULT_CHANNELS];
     int iGainIdx[DEFAULT_CHANNELS];
     int iSensPwr[DEFAULT_CHANNELS];
+    int inputDC[DEFAULT_CHANNELS];
+    int inputAC[DEFAULT_CHANNELS];
+    int useBalance[DEFAULT_CHANNELS];
+    int normalizeDegrees[DEFAULT_CHANNELS];
     int has_calib[DEFAULT_CHANNELS];
     for(int ch = 0; ch < DEFAULT_CHANNELS; ++ch){
         slope[ch] = 1.0;
@@ -871,17 +968,28 @@ int main(int argc, char **argv){
         iLPF[ch] = DEFAULT_ILPF;
         iGainIdx[ch] = DEFAULT_IGAIN_IDX;
         iSensPwr[ch] = DEFAULT_SENSPWR_IDX;
+        inputDC[ch] = DEFAULT_INPUT_DC;
+        inputAC[ch] = DEFAULT_INPUT_AC;
+        useBalance[ch] = DEFAULT_USE_BALANCE;
+        normalizeDegrees[ch] = 0;
         has_calib[ch] = 0;
 
         double s = 0.0, b = 0.0;
         int ts = DEFAULT_TSENSOR, lpf = DEFAULT_ILPF, g = DEFAULT_IGAIN_IDX, pwr = DEFAULT_SENSPWR_IDX;
-        if(load_calib_for_channel(ch + 1, &s, &b, &ts, &lpf, &g, &pwr)){
+        int dc = DEFAULT_INPUT_DC, ac = DEFAULT_INPUT_AC;
+        int use_bal = DEFAULT_USE_BALANCE, normalize_deg = 0;
+        if(load_calib_for_channel(ch + 1, &s, &b, &ts, &lpf, &g, &pwr,
+                                  &dc, &ac, &use_bal, &normalize_deg)){
             slope[ch] = s;
             intercept[ch] = b;
             tSensor[ch] = ts;
             iLPF[ch] = lpf;
             iGainIdx[ch] = g;
             iSensPwr[ch] = pwr;
+            inputDC[ch] = dc;
+            inputAC[ch] = ac;
+            useBalance[ch] = use_bal;
+            normalizeDegrees[ch] = normalize_deg;
             has_calib[ch] = 1;
         }
     }
@@ -891,7 +999,8 @@ int main(int argc, char **argv){
     for(int ch = 1; ch <= DEFAULT_CHANNELS; ++ch){
         int idx = ch - 1;
         configure_channel(s, &addr, ch,
-                          tSensor[idx], iLPF[idx], iGainIdx[idx], iSensPwr[idx]);
+                          tSensor[idx], iLPF[idx], iGainIdx[idx], iSensPwr[idx],
+                          inputDC[idx], inputAC[idx], useBalance[idx]);
     }
     acq_setup_multi(s, &addr, (float)rate_hz, DEFAULT_CHANNELS);
     acq_start(s, &addr);
@@ -1006,6 +1115,10 @@ int main(int argc, char **argv){
                 for(int ch = 0; ch < DEFAULT_CHANNELS; ++ch){
                     if(has_calib[ch]){
                         double v = slope[ch] * (double)sm.ch[ch] + intercept[ch];
+                        if(normalizeDegrees[ch]){
+                            v = fmod(v, 360.0);
+                            if(v < 0.0) v += 360.0;
+                        }
                         _snprintf(ch_buf[ch], sizeof(ch_buf[ch]), "%.6f", v);
                         if(ch == 0){
                             ch0_value = v;

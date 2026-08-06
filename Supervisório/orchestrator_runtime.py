@@ -28,6 +28,7 @@ Fora de escopo:
 """
 
 import csv
+import math
 import os
 import shutil
 import subprocess
@@ -47,6 +48,12 @@ DEFAULT_DLG_IP = "192.168.1.100"
 DEFAULT_DLG_PORT = 41401
 DEFAULT_BIND_IP = ""
 DEFAULT_BIND_PORT = 41402
+
+# Filtro operacional do encoder externo. O CH3 ja chega convertido para graus;
+# estes limites atuam somente sobre transicoes fisicamente incompativeis.
+ENCODER_TRANSITION_MIN_GATE_DEG = 3.0
+ENCODER_TRANSITION_CONFIRM_SAMPLES = 5
+ENCODER_TRANSITION_VELOCITY_HISTORY = 15
 
 
 @dataclass
@@ -79,6 +86,13 @@ class RunState:
     reciprocating_total_mm: float = 0.0
     reciprocating_tolerance_counts: int = 0
     reciprocating_edge_filter_pct: float = 0.0
+    target_speed_schedule: Optional[List[Tuple[float, float]]] = None
+    reciprocating_final_encoder_idx: Optional[int] = None
+    reciprocating_postroll_status: str = "nao_aplicavel"
+    encoder_quarantine_samples: int = 0
+    encoder_quarantine_fraction: float = 0.0
+    # Correcao aditiva de CH1 calculada na fase preliminar reciprocante.
+    dynamic_offset_n: float = 0.0
     # Estado logico de pausa observado pelo orquestrador.
     paused: bool = False
 
@@ -360,6 +374,8 @@ def start_external_run(
     reciprocating_total_mm: float = 0.0,
     reciprocating_tolerance_counts: int = 0,
     reciprocating_edge_filter_pct: float = 0.0,
+    dynamic_offset_n: float = 0.0,
+    target_speed_schedule: Optional[List[Tuple[float, float]]] = None,
 ) -> RunState:
     """
     Inicia o ensaio em modo externo (executaveis C sem interface).
@@ -549,7 +565,250 @@ def start_external_run(
         reciprocating_total_mm=reciprocating_total_mm,
         reciprocating_tolerance_counts=int(reciprocating_tolerance_counts),
         reciprocating_edge_filter_pct=float(reciprocating_edge_filter_pct),
+        dynamic_offset_n=float(dynamic_offset_n),
+        target_speed_schedule=list(target_speed_schedule or []),
     )
+
+
+def run_reciprocating_offset_capture(
+    repo_root: str,
+    run_folder: str,
+    course_mm: float,
+    cycles: int,
+    relacao: float,
+    raio_mm: float,
+    tolerance_counts: int,
+    rate_hz: float = DEFAULT_RATE_HZ,
+    max_loss_pct: float = 5.0,
+    progress_cb=None,
+) -> dict:
+    """Executa a fase preliminar reciprocante e calcula a media assinada de CH1."""
+    if course_mm <= 0.0 or cycles <= 0 or relacao <= 0.0 or raio_mm <= 0.0:
+        raise ValueError("Parametros invalidos para a correcao dinamica reciprocante.")
+
+    useful_cycles = int(cycles)
+    warmup_cycles = 1
+    executed_cycles = useful_cycles + warmup_cycles
+    useful_strokes = useful_cycles * 2
+    target_strokes = executed_cycles * 2
+    movement_mm = float(target_strokes) * float(course_mm)
+    # O orquestrador encerra exatamente no numero de strokes desejado.
+    # O limite enviado ao C fica acima disso para RECIP_DONE nao cortar o
+    # ultimo ciclo no meio quando houver pequeno erro positivo de curso.
+    controller_total_mm = float(target_strokes) * 2.0 * float(course_mm)
+    rpm_disk_target = 1.0
+    rpm_drive = max(1, int(round(float(relacao) * rpm_disk_target)))
+    rpm_disk_effective = float(rpm_drive) / float(relacao)
+    pin_speed_mm_s = rpm_disk_effective * (2.0 * 3.141592653589793 * float(raio_mm)) / 60.0
+    theoretical_s = movement_mm / pin_speed_mm_s
+    watchdog_s = max(theoretical_s * 1.5, theoretical_s + 30.0)
+    dev_dir = os.path.join(run_folder, "DadosDev")
+    work_dir = os.path.join(dev_dir, "recip_offset_work")
+    os.makedirs(work_dir, exist_ok=True)
+    paths = {
+        "dlg_csv": os.path.join(work_dir, "dlg.csv"),
+        "drive_csv": os.path.join(work_dir, "drive.csv"),
+        "turn_dist_csv": os.path.join(work_dir, "unused_DP.csv"),
+        "turn_vp_csv": os.path.join(work_dir, "unused_M.csv"),
+        "merge_csv": os.path.join(work_dir, "unused_T.csv"),
+        "schedule_csv": os.path.join(work_dir, "schedule.csv"),
+    }
+    state = start_external_run(
+        repo_root=repo_root,
+        out_paths=paths,
+        schedule=[(rpm_drive, watchdog_s)],
+        duration_s=watchdog_s,
+        rate_hz=rate_hz,
+        bind_port=DEFAULT_BIND_PORT,
+        com_port="COM5",
+        force_normal_n=0.0,
+        relacao=relacao,
+        raio_mm=raio_mm,
+        reciprocating=True,
+        reciprocating_course_mm=course_mm,
+        reciprocating_total_mm=controller_total_mm,
+        reciprocating_tolerance_counts=tolerance_counts,
+    )
+
+    event_path = os.path.join(work_dir, "a5_speed_events.log")
+
+    def _read_recip_events():
+        reverse_indices = []
+        done_idx = None
+        if not os.path.exists(event_path):
+            return reverse_indices, done_idx
+        try:
+            with open(event_path, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    if "RECIP_REVERSE " in line:
+                        for part in line.replace(",", " ").split():
+                            if part.startswith("idx="):
+                                reverse_indices.append(int(part.split("=", 1)[1]))
+                                break
+                    if "RECIP_DONE " in line:
+                        for part in line.replace(",", " ").split():
+                            if part.startswith("idx="):
+                                done_idx = int(part.split("=", 1)[1])
+                                break
+        except Exception:
+            pass
+        return reverse_indices, done_idx
+
+    started = time.time()
+    target_seen = False
+    try:
+        while state.drive_proc.poll() is None:
+            if progress_cb:
+                progress_cb(time.time() - started, theoretical_s)
+            live_reverses, _ = _read_recip_events()
+            if len(live_reverses) >= target_strokes:
+                target_seen = True
+                # O ultimo RECIP_REVERSE confirma um stroke completo. Encerra
+                # imediatamente, sem aguardar o restante do watchdog.
+                stop_run(state)
+                break
+            time.sleep(0.2)
+        if not target_seen:
+            _send_ipc(state.dlg_proc, "STOP")
+        try:
+            state.dlg_proc.wait(timeout=5.0)
+        except Exception:
+            if state.dlg_proc.poll() is None:
+                state.dlg_proc.terminate()
+                state.dlg_proc.wait(timeout=3.0)
+    finally:
+        if state.drive_proc.poll() is None or state.dlg_proc.poll() is None:
+            stop_run(state)
+
+    drive_rc = state.drive_proc.returncode
+    dlg_rc = state.dlg_proc.returncode
+    reverse_indices, done_idx = _read_recip_events()
+    reverse_indices = sorted(set(reverse_indices))
+    capture_complete = len(reverse_indices) >= target_strokes
+    capture_end_idx = reverse_indices[target_strokes - 1] if capture_complete else None
+    retained_start_idx = reverse_indices[1] + 1 if len(reverse_indices) >= 2 else None
+
+    rows = []
+    valid_by_idx = {}
+    total_rows = 0
+    if os.path.exists(paths["dlg_csv"]):
+        with open(paths["dlg_csv"], "r", newline="", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            next(reader, None)
+            for row in reader:
+                if not row:
+                    continue
+                try:
+                    row_idx = int(row[0])
+                except Exception:
+                    row_idx = None
+                in_retained_window = (
+                    row_idx is not None and retained_start_idx is not None
+                    and capture_end_idx is not None
+                    and retained_start_idx <= row_idx <= capture_end_idx
+                )
+                if in_retained_window:
+                    total_rows += 1
+                sample_valid = False
+                value = None
+                try:
+                    sample_valid = (
+                        len(row) >= 12 and row[-1].strip() == "0"
+                        and row[3].strip().upper() != "NULL" and row_idx is not None
+                    )
+                    if sample_valid:
+                        value = float(row[3])
+                        valid_by_idx[row_idx] = value
+                except Exception:
+                    sample_valid = False
+                rows.append((
+                    row[0] if row else "", row[2] if len(row) > 2 else "",
+                    value, sample_valid, in_retained_window,
+                ))
+
+    stroke_means = []
+    if capture_complete and retained_start_idx is not None:
+        stroke_start_idx = retained_start_idx
+        for boundary_idx in reverse_indices[2:target_strokes]:
+            stroke_values = [
+                value for idx, value in valid_by_idx.items()
+                if stroke_start_idx <= idx <= boundary_idx
+            ]
+            stroke_means.append(
+                (sum(stroke_values) / len(stroke_values)) if stroke_values else None
+            )
+            stroke_start_idx = boundary_idx + 1
+
+    cycle_means = []
+    if len(stroke_means) == useful_strokes:
+        for i in range(0, useful_strokes, 2):
+            if stroke_means[i] is None or stroke_means[i + 1] is None:
+                cycle_means.append(None)
+            else:
+                cycle_means.append((stroke_means[i] + stroke_means[i + 1]) / 2.0)
+
+    valid_count = sum(
+        1 for idx in valid_by_idx
+        if retained_start_idx is not None and capture_end_idx is not None
+        and retained_start_idx <= idx <= capture_end_idx
+    )
+    loss_pct = 100.0 * (total_rows - valid_count) / total_rows if total_rows else 100.0
+    valid_cycle_means = [value for value in cycle_means if value is not None]
+    offset_n = (
+        sum(valid_cycle_means) / len(valid_cycle_means)
+        if len(valid_cycle_means) == useful_cycles else 0.0
+    )
+    reasons = []
+    if drive_rc not in (None, 0):
+        reasons.append(f"Drive encerrou com codigo {drive_rc}")
+    if dlg_rc not in (None, 0):
+        reasons.append(f"DLG encerrou com codigo {dlg_rc}")
+    if not capture_complete:
+        reasons.append(f"ciclos incompletos ({len(reverse_indices)}/{target_strokes} strokes)")
+    if len(valid_cycle_means) != useful_cycles:
+        reasons.append(
+            f"ciclos sem CH1 valido ({len(valid_cycle_means)}/{useful_cycles})"
+        )
+    if not valid_count:
+        reasons.append("nenhuma amostra CH1 valida")
+    if loss_pct > max_loss_pct:
+        reasons.append(f"perda DLG {loss_pct:.3f}% acima de {max_loss_pct:.3f}%")
+
+    capture_csv = os.path.join(dev_dir, "recip_dynamic_offset.csv")
+    with open(capture_csv, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f, delimiter=";", lineterminator="\n")
+        writer.writerow(["idx", "t_s", "ch1_raw_N", "valida", "usada_offset"])
+        for idx, t_s, value, sample_valid, in_retained_window in rows:
+            writer.writerow([
+                idx, t_s, f"{value:.10g}" if value is not None else "NULL",
+                1 if sample_valid else 0,
+                1 if sample_valid and in_retained_window else 0,
+            ])
+
+    for name in ("a5_speed_events.log", "dlg_logger_events.log", "drive.csv", "schedule.csv"):
+        src = os.path.join(work_dir, name)
+        if os.path.exists(src):
+            shutil.copy2(src, os.path.join(dev_dir, f"recip_offset_{name}"))
+    shutil.rmtree(work_dir, ignore_errors=True)
+    return {
+        "valid": not reasons,
+        "reason": "; ".join(reasons) if reasons else "aprovada",
+        "offset_n": offset_n,
+        "cycles": useful_cycles,
+        "warmup_cycles": warmup_cycles,
+        "executed_cycles": executed_cycles,
+        "strokes": useful_strokes,
+        "strokes_executed": target_strokes,
+        "cycle_means": cycle_means,
+        "rpm_drive": rpm_drive,
+        "rpm_disk_target": rpm_disk_target,
+        "rpm_disk_effective": rpm_disk_effective,
+        "valid_samples": valid_count,
+        "total_samples": total_rows,
+        "loss_pct": loss_pct,
+        "theoretical_s": theoretical_s,
+        "capture_csv": capture_csv,
+    }
 
 
 def wait_and_merge(state: RunState) -> int:
@@ -569,8 +828,102 @@ def wait_and_merge(state: RunState) -> int:
         Codigo de retorno do merge.
         - Quando alternativa Python e usado com sucesso, retorna 0.
     """
-    state.dlg_proc.wait()
-    state.drive_proc.wait()
+    if state.reciprocating:
+        # A distancia encerra o movimento, mas o Drive permanece parado e os
+        # dois loggers continuam por uma curta pos-captura. Isso permite que a
+        # cauda atrasada do DLG (CH1 + CH3) chegue antes do fechamento.
+        event_path = os.path.join(os.path.dirname(state.drive_csv), "a5_speed_events.log")
+        event_pos = 0
+        motion_done_at = None
+        dlg_pos = 0
+        angle_last = None
+        angle_unwrapped = None
+        post_angles = []
+        stop_sent_after_settle = False
+        while state.dlg_proc.poll() is None and state.drive_proc.poll() is None:
+            if os.path.exists(event_path):
+                try:
+                    with open(event_path, "r", encoding="ascii", errors="replace") as fev:
+                        fev.seek(event_pos)
+                        chunk = fev.read()
+                        event_pos = fev.tell()
+                    if motion_done_at is None and "RECIP_DONE " in chunk:
+                        motion_done_at = time.monotonic()
+                        if os.path.exists(state.dlg_csv):
+                            with open(state.dlg_csv, "r", encoding="ascii", errors="replace") as fdlg:
+                                existing = fdlg.readlines()
+                                dlg_pos = fdlg.tell()
+                            for line in reversed(existing):
+                                cols = line.strip().split(",")
+                                if len(cols) > 5 and cols[5].strip().upper() != "NULL":
+                                    try:
+                                        angle_last = float(cols[5])
+                                        angle_unwrapped = angle_last
+                                    except Exception:
+                                        pass
+                                    break
+                except Exception:
+                    pass
+
+            if motion_done_at is not None and os.path.exists(state.dlg_csv):
+                try:
+                    with open(state.dlg_csv, "r", encoding="ascii", errors="replace") as fdlg:
+                        fdlg.seek(dlg_pos)
+                        lines = fdlg.readlines()
+                        dlg_pos = fdlg.tell()
+                    for line in lines:
+                        cols = line.strip().split(",")
+                        if len(cols) <= 5 or cols[5].strip().upper() == "NULL":
+                            continue
+                        angle = float(cols[5])
+                        if angle_last is None:
+                            angle_unwrapped = angle
+                        else:
+                            delta = angle - angle_last
+                            if delta > 180.0:
+                                delta -= 360.0
+                            elif delta < -180.0:
+                                delta += 360.0
+                            angle_unwrapped += delta
+                        angle_last = angle
+                        try:
+                            sample_idx = int(cols[0])
+                        except Exception:
+                            sample_idx = None
+                        post_angles.append((sample_idx, angle_unwrapped))
+                except Exception:
+                    pass
+
+                elapsed = time.monotonic() - motion_done_at
+                recent = [item[1] for item in post_angles[-10:]]
+                all_angles = [item[1] for item in post_angles]
+                excursion = (max(all_angles) - min(all_angles)) if len(all_angles) >= 2 else 0.0
+                stable = len(recent) >= 10 and (max(recent) - min(recent)) <= 0.25
+                if elapsed >= 0.45 and excursion >= 0.5 and stable:
+                    direction = 1 if recent[-1] >= all_angles[0] else -1
+                    endpoint = max(post_angles, key=lambda item: item[1]) if direction > 0 else min(post_angles, key=lambda item: item[1])
+                    state.reciprocating_final_encoder_idx = endpoint[0]
+                    state.reciprocating_postroll_status = "encoder_estavel"
+                    _send_ipc(state.dlg_proc, "STOP")
+                    _send_ipc(state.drive_proc, "STOP")
+                    stop_sent_after_settle = True
+                    break
+                if elapsed >= 1.8:
+                    state.reciprocating_postroll_status = "timeout"
+                    _send_ipc(state.dlg_proc, "STOP")
+                    _send_ipc(state.drive_proc, "STOP")
+                    stop_sent_after_settle = True
+                    break
+            time.sleep(0.05)
+        if not stop_sent_after_settle and state.drive_proc.poll() is not None and state.dlg_proc.poll() is None:
+            _send_ipc(state.dlg_proc, "STOP")
+        elif not stop_sent_after_settle and state.dlg_proc.poll() is not None and state.drive_proc.poll() is None:
+            _send_ipc(state.drive_proc, "STOP")
+        state.dlg_proc.wait()
+        state.drive_proc.wait()
+    else:
+        state.dlg_proc.wait()
+        state.drive_proc.wait()
     dlg_rc = state.dlg_proc.returncode
     drive_rc = state.drive_proc.returncode
 
@@ -593,6 +946,9 @@ def wait_and_merge(state: RunState) -> int:
     # Rede de seguranca: se merge em C falhar, gera resultado em Python.
     if merge_rc != 0 or not os.path.exists(state.merge_csv):
         _merge_csv_fallback(state.dlg_csv, state.drive_csv, state.merge_csv)
+        _append_external_encoder_position(state)
+        _apply_dynamic_offset_to_merge(state)
+        _crop_reciprocating_merge_at_encoder_endpoint(state)
         _move_dev_artifacts(state)
         if drive_rc not in (None, 0):
             return int(drive_rc)
@@ -600,12 +956,274 @@ def wait_and_merge(state: RunState) -> int:
             return int(dlg_rc)
         return 0
 
+    _append_external_encoder_position(state)
+    _apply_dynamic_offset_to_merge(state)
+    _crop_reciprocating_merge_at_encoder_endpoint(state)
     _move_dev_artifacts(state)
     if drive_rc not in (None, 0):
         return int(drive_rc)
     if dlg_rc not in (None, 0):
         return int(dlg_rc)
     return merge_rc
+
+
+def _nearest_unwrapped_angle(angle_deg: float, reference_deg: float) -> float:
+    """Retorna a representacao de angle_deg mais proxima da referencia."""
+    return angle_deg + 360.0 * round((reference_deg - angle_deg) / 360.0)
+
+
+def _median(values: List[float]) -> float:
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return 0.5 * (ordered[middle - 1] + ordered[middle])
+
+
+def _filter_external_encoder_angles(
+    raw_angles: List[Optional[float]],
+    nominal_step_deg: float,
+) -> Tuple[List[Optional[float]], List[int]]:
+    """Rastreador angular com innovation gate, histerese e quarentena.
+
+    Amostras coerentes passam sem suavizacao. Quando a inovacao excede o
+    limite dinamico, o rastreador entra em quarentena e exige uma sequencia
+    novamente coerente antes de liberar o sinal. O trecho isolado e
+    reconstruido linearmente entre as duas ancoras confiaveis.
+    """
+    count = len(raw_angles)
+    output: List[Optional[float]] = [None] * count
+    quarantine = [0] * count
+    nominal_step = max(0.0, float(nominal_step_deg))
+    local_gate = max(
+        ENCODER_TRANSITION_MIN_GATE_DEG,
+        nominal_step * 3.0 + 0.75,
+    )
+
+    last_angle: Optional[float] = None
+    last_idx: Optional[int] = None
+    velocity = 0.0
+    velocity_history: List[float] = []
+    in_quarantine = False
+    buffered: List[Tuple[int, float]] = []
+    stable_chain: List[Tuple[int, float]] = []
+
+    def remember_step(step: float) -> None:
+        nonlocal velocity, velocity_history
+        velocity_history.append(step)
+        velocity_history = velocity_history[-ENCODER_TRANSITION_VELOCITY_HISTORY:]
+        velocity = _median(velocity_history)
+
+    def close_quarantine(endpoint_idx: int, endpoint_angle: float) -> None:
+        nonlocal last_angle, last_idx, buffered, stable_chain, in_quarantine
+        if last_angle is None or last_idx is None:
+            return
+        span = max(1, endpoint_idx - last_idx)
+        for sample_idx, _raw in buffered:
+            fraction = (sample_idx - last_idx) / span
+            output[sample_idx] = last_angle + (endpoint_angle - last_angle) * fraction
+            quarantine[sample_idx] = 1
+        remember_step((endpoint_angle - last_angle) / span)
+        last_angle = endpoint_angle
+        last_idx = endpoint_idx
+        buffered = []
+        stable_chain = []
+        in_quarantine = False
+
+    for idx, raw_angle in enumerate(raw_angles):
+        if raw_angle is None or not math.isfinite(raw_angle):
+            if in_quarantine:
+                quarantine[idx] = 1
+            continue
+        normalized = raw_angle % 360.0
+        if last_angle is None or last_idx is None:
+            output[idx] = normalized
+            last_angle = normalized
+            last_idx = idx
+            continue
+
+        elapsed = max(1, idx - last_idx)
+        prediction = last_angle + velocity * elapsed
+        if not in_quarantine:
+            candidate = _nearest_unwrapped_angle(normalized, prediction)
+            innovation_gate = max(local_gate, abs(velocity) * 3.0 + 0.75)
+            if abs(candidate - prediction) <= innovation_gate:
+                output[idx] = candidate
+                remember_step((candidate - last_angle) / elapsed)
+                last_angle = candidate
+                last_idx = idx
+                continue
+            in_quarantine = True
+            buffered = [(idx, normalized)]
+            stable_chain = [(idx, candidate)]
+            quarantine[idx] = 1
+            continue
+
+        buffered.append((idx, normalized))
+        quarantine[idx] = 1
+        previous_reference = stable_chain[-1][1] if stable_chain else prediction
+        candidate = _nearest_unwrapped_angle(normalized, previous_reference)
+        if abs(candidate - previous_reference) <= local_gate:
+            stable_chain.append((idx, candidate))
+        else:
+            stable_chain = [(idx, _nearest_unwrapped_angle(normalized, prediction))]
+
+        if len(stable_chain) >= ENCODER_TRANSITION_CONFIRM_SAMPLES:
+            endpoint_idx, endpoint_angle = stable_chain[-1]
+            elapsed = max(1, endpoint_idx - last_idx)
+            prediction = last_angle + velocity * elapsed
+            recovery_gate = max(
+                8.0,
+                local_gate + elapsed * max(abs(velocity), nominal_step) * 1.5,
+            )
+            if abs(endpoint_angle - prediction) <= recovery_gate:
+                close_quarantine(endpoint_idx, endpoint_angle)
+
+    # Se a captura terminar durante uma transicao, mantem a previsao causal e
+    # marca todo o trecho como quarentena; nunca publica o valor bruto instavel.
+    if in_quarantine and last_angle is not None and last_idx is not None:
+        for sample_idx, _raw in buffered:
+            output[sample_idx] = last_angle + velocity * (sample_idx - last_idx)
+            quarantine[sample_idx] = 1
+
+    normalized_output = [
+        None if angle is None else angle % 360.0
+        for angle in output
+    ]
+    return normalized_output, quarantine
+
+
+def _encoder_nominal_step_deg(state: RunState) -> float:
+    """Maior passo angular esperado por amostra, a partir do ensaio."""
+    rate_hz = float(getattr(state, "rate_hz", DEFAULT_RATE_HZ) or DEFAULT_RATE_HZ)
+    radius_mm = float(getattr(state, "raio_mm", 0.0) or 0.0)
+    schedule = getattr(state, "target_speed_schedule", None) or []
+    speeds = [abs(float(item[0])) for item in schedule if item]
+    if rate_hz > 0.0 and radius_mm > 0.0 and speeds:
+        return max(speeds) * 180.0 / (math.pi * radius_mm * rate_hz)
+    return 1.0
+
+
+def _append_external_encoder_position(state: RunState) -> None:
+    """Acrescenta PosEncExt filtrada e sua marca de quarentena."""
+    if not os.path.exists(state.merge_csv):
+        return
+    tmp_path = state.merge_csv + ".encoder_tmp"
+    with open(state.merge_csv, "r", newline="", encoding="utf-8") as src, \
+         open(tmp_path, "w", newline="", encoding="utf-8") as dst:
+        reader = csv.reader(src, delimiter=";")
+        writer = csv.writer(dst, delimiter=";", lineterminator="\n")
+        header = next(reader, None)
+        if not header:
+            writer.writerow([])
+        else:
+            names = {name.strip().lower(): i for i, name in enumerate(header)}
+            if "posencext" in names and "posencext_quarentena" in names:
+                writer.writerow(header)
+                writer.writerows(reader)
+            else:
+                rows = list(reader)
+                ch3_i = names.get("ch3")
+                raw_angles: List[Optional[float]] = []
+                for row in rows:
+                    angle: Optional[float] = None
+                    if ch3_i is not None and ch3_i < len(row):
+                        text_value = row[ch3_i].strip()
+                        if text_value and text_value.upper() != "NULL":
+                            try:
+                                angle = float(text_value) % 360.0
+                            except Exception:
+                                angle = None
+                    raw_angles.append(angle)
+                filtered, quarantine = _filter_external_encoder_angles(
+                    raw_angles,
+                    _encoder_nominal_step_deg(state),
+                )
+                state.encoder_quarantine_samples = sum(quarantine)
+                state.encoder_quarantine_fraction = (
+                    state.encoder_quarantine_samples / len(quarantine)
+                    if quarantine else 0.0
+                )
+                base_header = [
+                    name for name in header
+                    if name.strip().lower() not in ("posencext", "posencext_quarentena")
+                ]
+                writer.writerow([*base_header, "PosEncExt", "PosEncExt_Quarentena"])
+                old_pos_i = names.get("posencext")
+                old_quarantine_i = names.get("posencext_quarentena")
+                remove_indices = {i for i in (old_pos_i, old_quarantine_i) if i is not None}
+                for row, angle, isolated in zip(rows, filtered, quarantine):
+                    base_row = [value for i, value in enumerate(row) if i not in remove_indices]
+                    value = "NULL" if angle is None else f"{angle:.10g}"
+                    writer.writerow([*base_row, value, str(int(isolated))])
+    os.replace(tmp_path, state.merge_csv)
+
+
+def _crop_reciprocating_merge_at_encoder_endpoint(state: RunState) -> None:
+    """Remove apenas a cauda estatica final; DadosDev preserva a pos-captura completa."""
+    if not state.reciprocating or not os.path.isfile(state.merge_csv):
+        return
+    endpoint_idx = getattr(state, "reciprocating_final_encoder_idx", None)
+    if endpoint_idx is None:
+        return
+    tmp_path = state.merge_csv + ".recip_crop_tmp"
+    try:
+        with open(state.merge_csv, "r", newline="", encoding="utf-8") as src, \
+             open(tmp_path, "w", newline="", encoding="utf-8") as dst:
+            reader = csv.reader(src, delimiter=";")
+            writer = csv.writer(dst, delimiter=";", lineterminator="\n")
+            header = next(reader, None)
+            if header:
+                writer.writerow(header)
+            for row in reader:
+                try:
+                    idx = int(row[0])
+                except Exception:
+                    continue
+                if idx > int(endpoint_idx):
+                    break
+                writer.writerow(row)
+        os.replace(tmp_path, state.merge_csv)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+
+def _apply_dynamic_offset_to_merge(state: RunState) -> None:
+    """Corrige CH1 e atrito no _T final, preservando o dlg.csv tecnico bruto."""
+    offset = float(getattr(state, "dynamic_offset_n", 0.0) or 0.0)
+    if not state.reciprocating or not os.path.exists(state.merge_csv):
+        return
+    tmp_path = state.merge_csv + ".offset_tmp"
+    with open(state.merge_csv, "r", newline="", encoding="utf-8") as src, \
+         open(tmp_path, "w", newline="", encoding="utf-8") as dst:
+        reader = csv.reader(src, delimiter=";")
+        writer = csv.writer(dst, delimiter=";", lineterminator="\n")
+        header = next(reader, None)
+        if not header:
+            writer.writerow([])
+        else:
+            writer.writerow(header)
+            names = {name.strip().lower(): i for i, name in enumerate(header)}
+            ch1_i = names.get("ch1", 2)
+            atr_i = names.get("atrito", 10)
+            for row in reader:
+                try:
+                    if ch1_i < len(row) and row[ch1_i].strip().upper() != "NULL":
+                        corrected = float(row[ch1_i]) - offset
+                        row[ch1_i] = f"{corrected:.10g}"
+                        if atr_i < len(row):
+                            if state.force_normal_n > 0.0:
+                                row[atr_i] = f"{corrected / state.force_normal_n:.10g}"
+                            else:
+                                row[atr_i] = "NULL"
+                except Exception:
+                    pass
+                writer.writerow(row)
+    os.replace(tmp_path, state.merge_csv)
 
 
 def _move_dev_artifacts(state: RunState) -> None:
@@ -767,7 +1385,10 @@ def _rebuild_reciprocating_csv_from_logs(state: RunState, relacao: float, raio_m
         info = {
             "pos_mod": 65536.0,
             "reverses": [],
+            "reverse_error_counts": {},
+            "boundary_segments": {},
             "done": None,
+            "done_error_counts": None,
         }
         if not path or not os.path.exists(path):
             return info
@@ -784,11 +1405,23 @@ def _rebuild_reciprocating_csv_from_logs(state: RunState, relacao: float, raio_m
                         idx = _to_int(kv.get("idx"), None)
                         if idx is not None:
                             info["reverses"].append(idx)
+                            error_counts = _to_float(kv.get("error_counts"), None)
+                            if error_counts is not None:
+                                info["reverse_error_counts"][idx] = error_counts
+                            segment = _to_int(kv.get("completed_segment"), None)
+                            if segment is not None:
+                                info["boundary_segments"][idx] = segment
                     elif "RECIP_DONE " in line:
                         kv = _event_kv(line)
                         idx = _to_int(kv.get("idx"), None)
                         if idx is not None:
                             info["done"] = idx
+                            info["done_error_counts"] = _to_float(
+                                kv.get("error_counts"), None
+                            )
+                            segment = _to_int(kv.get("completed_segment"), None)
+                            if segment is not None:
+                                info["boundary_segments"][idx] = segment
         except Exception:
             return info
         info["reverses"] = sorted(set(info["reverses"]))
@@ -842,6 +1475,8 @@ def _rebuild_reciprocating_csv_from_logs(state: RunState, relacao: float, raio_m
                 dlg_err = _to_int(drow[-1] if drow else None, 1)
                 ch1 = _to_float(drow[3] if drow and len(drow) > 3 else None, None)
                 atr = _to_float(drow[11] if drow and len(drow) > 11 else None, None)
+                if ch1 is not None:
+                    ch1 -= float(getattr(state, "dynamic_offset_n", 0.0) or 0.0)
                 if state.force_normal_n and state.force_normal_n > 0 and ch1 is not None:
                     atr = ch1 / state.force_normal_n
                 atr_ok = (dlg_err == 0 and atr is not None)
@@ -936,7 +1571,8 @@ def _rebuild_reciprocating_csv_from_logs(state: RunState, relacao: float, raio_m
             acc["n_total"], acc["n_fail"], acc["n_valid"], f"{pct_loss:.3f}"
         ])
 
-    def _emit_motion(writer, stroke_n, stroke_samples, edge_pct, fallback_mod):
+    def _emit_motion(writer, stroke_n, stroke_samples, edge_pct, fallback_mod,
+                     event_error_mm=None, target_speed_mm_s=None):
         first_t = None
         last_t = None
         prev_pos_sample = None
@@ -974,7 +1610,7 @@ def _rebuild_reciprocating_csv_from_logs(state: RunState, relacao: float, raio_m
         if filtered:
             atr_values = [item[1] for item in filtered]
             atr_rms = (sum(v * v for v in atr_values) / float(len(atr_values))) ** 0.5
-            atr_med = sum(atr_values) / float(len(atr_values))
+            atr_med = sum(abs(v) for v in atr_values) / float(len(atr_values))
             max_item = max(filtered, key=lambda item: item[1])
             min_item = min(filtered, key=lambda item: item[1])
             atr_max = max_item[1]
@@ -989,6 +1625,9 @@ def _rebuild_reciprocating_csv_from_logs(state: RunState, relacao: float, raio_m
                 vel_mm_s = stroke_len_mm / dt
 
         tempo_min = (first_t / 60.0) if first_t is not None else None
+        course_error_mm = event_error_mm
+        if course_error_mm is None:
+            course_error_mm = stroke_len_mm - float(state.reciprocating_course_mm)
         writer.writerow([
             _fmt(tempo_min),
             stroke_n,
@@ -1000,6 +1639,8 @@ def _rebuild_reciprocating_csv_from_logs(state: RunState, relacao: float, raio_m
             _fmt(pos_min),
             len(filtered),
             _fmt(vel_mm_s),
+            _fmt(target_speed_mm_s),
+            _fmt(course_error_mm),
         ])
 
     if relacao <= 0.0 or raio_mm <= 0.0:
@@ -1029,7 +1670,7 @@ def _rebuild_reciprocating_csv_from_logs(state: RunState, relacao: float, raio_m
             "n_total_pontos", "n_falhas", "n_validas", "pct_perda"
         ])
         wm.writerow([
-            "TEMPO_(min)", "STROKE", "ATRITO_EFETIVO", "ATRITO_MEDIO", "ATRITO_MAX", "POS_MAX", "ATRITO_MIN", "POS_MIN", "LINHAS", "VELOCIDADE"
+            "TEMPO_(min)", "STROKE", "ATRITO_EFETIVO", "ATRITO_MEDIO", "ATRITO_MAX", "POS_MAX", "ATRITO_MIN", "POS_MIN", "LINHAS", "VELOCIDADE_MEDIA", "VELOCIDADE_ALVO", "ERRO_CURSO_MM"
         ])
         if not samples:
             return
@@ -1069,7 +1710,28 @@ def _rebuild_reciprocating_csv_from_logs(state: RunState, relacao: float, raio_m
                 cursor += 1
             stroke_samples = samples[start_cursor:cursor]
             if stroke_samples:
-                _emit_motion(wm, stroke_n, stroke_samples, edge_pct, fallback_mod)
+                error_counts = events.get("reverse_error_counts", {}).get(boundary_idx)
+                if error_counts is None and done_idx == boundary_idx:
+                    error_counts = events.get("done_error_counts")
+                event_error_mm = None
+                if error_counts is not None and fallback_mod > 1.0:
+                    event_error_mm = (
+                        error_counts * (2.0 * 3.141592653589793 * raio_mm)
+                        / (relacao * fallback_mod)
+                    )
+                target_speed = None
+                segment = events.get("boundary_segments", {}).get(boundary_idx)
+                target_schedule = list(getattr(state, "target_speed_schedule", None) or [])
+                if segment is not None and 0 <= segment < len(target_schedule):
+                    try:
+                        target_speed = float(target_schedule[segment][0])
+                    except Exception:
+                        target_speed = None
+                _emit_motion(
+                    wm, stroke_n, stroke_samples, edge_pct, fallback_mod,
+                    event_error_mm=event_error_mm,
+                    target_speed_mm_s=target_speed,
+                )
                 stroke_n += 1
             start_idx = boundary_idx + 1
 
@@ -1236,6 +1898,8 @@ def _rebuild_turn_csv_from_logs(state: RunState) -> None:
                 dlg_err = _to_int(drow[-1] if drow else None, 1)
                 ch1 = _to_float(drow[3] if drow and len(drow) > 3 else None, None)
                 atr = _to_float(drow[11] if drow and len(drow) > 11 else None, None)
+                if ch1 is not None:
+                    ch1 -= float(getattr(state, "dynamic_offset_n", 0.0) or 0.0)
                 if state.force_normal_n and state.force_normal_n > 0 and ch1 is not None:
                     atr = ch1 / state.force_normal_n
                 atr_ok = (dlg_err == 0 and atr is not None)

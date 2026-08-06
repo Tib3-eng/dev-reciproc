@@ -51,6 +51,7 @@ Resumo de funcoes chave:
 # - tempfile: arquivos temporarios para checks rapidos.
 # - shutil: operacoes de alto nivel em arquivos/pastas (ex.: rmtree).
 import os
+import csv
 import json
 import time
 import sys
@@ -60,6 +61,7 @@ import threading
 import subprocess
 import tempfile
 import shutil
+import hashlib
 
 # UI (Tkinter):
 # - tkinter: widgets base e janela principal.
@@ -139,6 +141,8 @@ DEFAULT_INTERVALO_DIST_MM = 10.0
 DEFAULT_RECIP_STOP_TOL_COUNTS = 500
 # Percentual removido de cada borda do stroke nos calculos do arquivo _M.
 DEFAULT_RECIP_EDGE_FILTER_PCT = 0.0
+# Ciclos da fase preliminar de correcao dinamica (1 ciclo = ida + volta).
+DEFAULT_RECIP_OFFSET_CYCLES = 5
 APP_SETTINGS_DIR = os.path.join(
     os.getenv("LOCALAPPDATA") or os.path.expanduser("~"),
     "LATRIB"
@@ -235,6 +239,16 @@ if RECIP_EDGE_FILTER_PCT < 0.0:
     RECIP_EDGE_FILTER_PCT = 0.0
 if RECIP_EDGE_FILTER_PCT > 100.0:
     RECIP_EDGE_FILTER_PCT = 100.0
+
+try:
+    RECIP_OFFSET_CYCLES = int(APP_SETTINGS.get("recip_offset_cycles", DEFAULT_RECIP_OFFSET_CYCLES))
+except Exception:
+    RECIP_OFFSET_CYCLES = DEFAULT_RECIP_OFFSET_CYCLES
+if RECIP_OFFSET_CYCLES <= 0:
+    RECIP_OFFSET_CYCLES = DEFAULT_RECIP_OFFSET_CYCLES
+
+# Valor por ensaio; nunca e persistido nem escrito na calibracao CH1.
+recip_dynamic_offset_n = 0.0
 
 
 def _resource_path(name):
@@ -361,6 +375,7 @@ def _extract_a5_failure_message(run_folder):
                 if (
                     "RECIP_OUT_OF_BAND" in txt
                     or "RECIP_OVERSHOOT" in txt
+                    or "RECIP_STROKE_LIMIT" in txt
                     or "RECIP_POSITION_LOSS" in txt
                     or "RECIP_DISTANCE_NOT_REACHED" in txt
                 ):
@@ -401,6 +416,18 @@ def _set_recip_edge_filter_pct(valor):
     if "recip_edge_filter_var" in globals():
         recip_edge_filter_var.set(f"{RECIP_EDGE_FILTER_PCT:.6g}")
     log_msg(f"Filtro de borda reciprocante definido para: {RECIP_EDGE_FILTER_PCT:.6g}% por borda")
+    return saved_ok
+
+
+def _set_recip_offset_cycles(valor):
+    """Persiste a quantidade de ciclos da fase preliminar reciprocante."""
+    global RECIP_OFFSET_CYCLES, APP_SETTINGS
+    RECIP_OFFSET_CYCLES = int(valor)
+    APP_SETTINGS["recip_offset_cycles"] = RECIP_OFFSET_CYCLES
+    saved_ok = _save_app_settings(APP_SETTINGS)
+    if "recip_offset_cycles_var" in globals():
+        recip_offset_cycles_var.set(str(RECIP_OFFSET_CYCLES))
+    log_msg(f"Ciclos da correcao dinamica definidos para: {RECIP_OFFSET_CYCLES}")
     return saved_ok
 
 
@@ -521,6 +548,24 @@ def salvar_filtro_borda_reciprocante():
             "Reciprocante",
             "Filtro aplicado em memoria, mas houve falha ao salvar configuracao local."
         )
+
+
+def salvar_ciclos_correcao_reciprocante():
+    """Valida e salva ciclos completos; cada ciclo corresponde a dois strokes."""
+    txt = recip_offset_cycles_var.get().strip()
+    try:
+        valor = int(txt)
+    except Exception:
+        messagebox.showwarning("Reciprocante", "Informe uma quantidade inteira de ciclos maior que zero.")
+        return
+    if valor <= 0:
+        messagebox.showwarning("Reciprocante", "A quantidade de ciclos deve ser maior que zero.")
+        return
+    saved_ok = _set_recip_offset_cycles(valor)
+    if saved_ok:
+        messagebox.showinfo("Reciprocante", f"Correcao dinamica: {valor} ciclos completos salvos.")
+    else:
+        messagebox.showwarning("Reciprocante", "Valor aplicado, mas houve falha ao salvar a configuracao local.")
 
 
 def selecionar_repo_base():
@@ -894,6 +939,110 @@ def _dlg_check_once(dlg_exe, dlg_ip, dlg_port, bind_port):
         pass
 
     return ok, detail
+
+
+def _encoder_calibration_path():
+    local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
+    if not local_appdata:
+        raise RuntimeError("A variavel LOCALAPPDATA nao esta disponivel.")
+    return os.path.join(
+        local_appdata,
+        "LATRIB",
+        "calibrations",
+        "encoder_external_ch3.json",
+    )
+
+
+def _load_required_encoder_calibration():
+    """Carrega e valida a calibracao angular obrigatoria do encoder externo."""
+    path = _encoder_calibration_path()
+    if not os.path.isfile(path):
+        raise RuntimeError(
+            "Calibracao do encoder externo nao encontrada.\n\n"
+            f"Arquivo esperado:\n{path}\n\n"
+            "Execute a autocalibracao angular antes de iniciar o ensaio."
+        )
+    try:
+        with open(path, "rb") as f:
+            payload_bytes = f.read()
+        payload = json.loads(payload_bytes.decode("utf-8-sig"))
+    except Exception as exc:
+        raise RuntimeError(f"Arquivo de calibracao invalido: {exc}") from exc
+
+    fit = payload.get("fit") if isinstance(payload, dict) else None
+    quality = payload.get("quality") if isinstance(payload, dict) else None
+    acquisition = payload.get("acquisition") if isinstance(payload, dict) else None
+    reference = payload.get("reference") if isinstance(payload, dict) else None
+    if not all(isinstance(item, dict) for item in (fit, quality, acquisition, reference)):
+        raise RuntimeError("Calibracao sem os blocos fit, quality, acquisition ou reference.")
+
+    checks = [
+        (payload.get("schema_version") == 1, "schema_version deve ser 1"),
+        (payload.get("purpose") == "encoder_ch3_angle_deg", "finalidade angular CH3 ausente"),
+        (payload.get("unit") == "deg", "unidade deve ser deg"),
+        (payload.get("channel") == "CH3" or 3 in payload.get("channels", []), "canal deve ser CH3"),
+        (payload.get("tSensor") == 1, "tSensor deve indicar corrente"),
+        (payload.get("iGain") == 1, "ganho deve ser x3 (indice 1)"),
+        (payload.get("iLPF") == 0, "LPF do DLG deve ser 0"),
+        (payload.get("fInputDCImp") == 1, "entrada DC deve estar conectada"),
+        (payload.get("fInputACImp") == 0, "entrada AC deve estar desconectada"),
+        (quality.get("accepted") is True, "calibracao nao foi aprovada"),
+        (int(acquisition.get("complete_revolutions", 0)) == 10, "calibracao deve conter 10 voltas completas"),
+        (int(acquisition.get("training_revolutions", 0)) == 7, "calibracao deve conter 7 voltas de treino"),
+        (int(acquisition.get("holdout_revolutions", 0)) == 3, "calibracao deve conter 3 voltas de holdout"),
+        (int(quality.get("adc_saturation_samples", -1)) == 0, "calibracao apresenta saturacao do A/D"),
+    ]
+    for ok, reason in checks:
+        if not ok:
+            raise RuntimeError(f"Calibracao do encoder incompatível: {reason}.")
+
+    try:
+        slope = float(fit["slope"])
+        intercept = float(fit["intercept"])
+        modulo = float(fit["normalize_modulo_deg"])
+    except Exception as exc:
+        raise RuntimeError("Fit angular incompleto.") from exc
+    if not (math.isfinite(slope) and math.isfinite(intercept) and slope != 0.0):
+        raise RuntimeError("Slope/intercept angular invalido.")
+    if not math.isclose(modulo, 360.0, rel_tol=0.0, abs_tol=1.0e-9):
+        raise RuntimeError("Normalizacao angular deve ser 360 graus.")
+
+    return {
+        "status": "carregada e aprovada",
+        "path": path,
+        "sha256": hashlib.sha256(payload_bytes).hexdigest(),
+        "schema_version": int(payload["schema_version"]),
+        "generator_build": payload.get("generator_build", "NULL"),
+        "calibrated_at_utc": payload.get("calibrated_at_utc", "NULL"),
+        "channel": "CH3",
+        "unit": "graus",
+        "slope": slope,
+        "intercept": intercept,
+        "modulo": modulo,
+        "zero_reference": payload.get("zero_reference", "NULL"),
+        "tSensor": int(payload["tSensor"]),
+        "iGain": int(payload["iGain"]),
+        "iLPF": int(payload["iLPF"]),
+        "iSensPwr": int(payload["iSensPwr"]),
+        "fInputDCImp": int(payload["fInputDCImp"]),
+        "fInputACImp": int(payload["fInputACImp"]),
+        "filter": "nenhum",
+        "sample_rate_hz": float(payload.get("sample_rate_hz", 0.0)),
+        "reference_source": reference.get("source", "NULL"),
+        "ratio_configured": reference.get("mechanical_ratio_i_D2_D1_configured", "NULL"),
+        "ratio_measured": reference.get("mechanical_ratio_measured_mean", "NULL"),
+        "training_revolutions": int(acquisition["training_revolutions"]),
+        "holdout_revolutions": int(acquisition["holdout_revolutions"]),
+        "complete_revolutions": int(acquisition["complete_revolutions"]),
+        "rmse_deg": quality.get("holdout_bin_rmse_deg", "NULL"),
+        "p95_deg": quality.get("holdout_bin_p95_deg", "NULL"),
+        "max_error_deg": quality.get("holdout_bin_max_error_deg", "NULL"),
+        "r2": quality.get("holdout_r_squared_linear", "NULL"),
+        "received_samples": quality.get("received_samples", "NULL"),
+        "loss_fraction": quality.get("loss_fraction", "NULL"),
+        "saturation_samples": quality.get("adc_saturation_samples", "NULL"),
+        "accepted": True,
+    }
 
 
 def _resolve_ch1_calib_path(repo_root, dlg_exe):
@@ -1308,6 +1457,25 @@ def _cleanup_run_folder_on_abort():
         pass
 
 
+def _write_recip_offset_abort_info(reason, result=None):
+    """Preserva no _I o diagnostico quando a fase preliminar bloqueia o ensaio."""
+    data = result or {}
+    try:
+        with open(caminho_arquivo_1, "w", encoding="utf-8") as f:
+            f.write("campo,valor,valor2\n")
+            f.write("Reciprocating,sim,\n")
+            f.write(f"Offset dinamico CH1 [N],{float(data.get('offset_n', 0.0)):.10g},\n")
+            f.write(f"Ciclos correcao dinamica,{data.get('cycles', RECIP_OFFSET_CYCLES)},\n")
+            f.write(f"Ciclos estabilizacao correcao dinamica,{data.get('warmup_cycles', 1)},\n")
+            f.write(f"RPM disco correcao dinamica,{data.get('rpm_disk_target', 1)},\n")
+            f.write(f"RPM Drive correcao dinamica,{data.get('rpm_drive', max(1, int(round(RELACAO_MECANICA))))},\n")
+            f.write(f"Amostras validas correcao dinamica,{data.get('valid_samples', 0)},\n")
+            f.write(f"Perda correcao dinamica [%],{float(data.get('loss_pct', 100.0)):.6f},\n")
+            f.write(f"Validacao correcao dinamica,REPROVADA: {str(reason).replace(',', ';')},\n")
+    except Exception as e:
+        log_msg(f"Falha preservando diagnostico da correcao dinamica no _I: {e}")
+
+
 def _run_auto_tara_before_start(repo_root, exe_info):
     """
     Executa fluxo guiado de tara antes de iniciar cada ensaio.
@@ -1399,10 +1567,18 @@ def _run_auto_tara_before_start(repo_root, exe_info):
 
     label_ensaio_estado.config(text="Aguardando condicao para iniciar ensaio", fg="#0078D4")
     root.update_idletasks()
+    final_body = "Coloque a carga e posicione o pino sobre o disco."
+    final_button = "Em condicoes de iniciar ensaio"
+    if "reciprocante_var" in globals() and reciprocante_var.get():
+        final_body += (
+            "\n\nNo modo reciprocante, o proximo passo e a correcao dinamica "
+            "no mesmo curso, sempre a 1 RPM no disco. O ensaio oficial vem depois."
+        )
+        final_button = "Em condicoes para a correcao"
     if not _ask_ready_step_dialog(
         "Preparacao final",
-        "Coloque a carga e posicione o pino sobre o disco.",
-        "Em condicoes de iniciar ensaio",
+        final_body,
+        final_button,
     ):
         label_ensaio_estado.config(text=prev_text, fg=prev_fg)
         _set_tara_running(False)
@@ -1756,6 +1932,7 @@ x_auto_total_min = 0.83
 # - x3_auto=False -> eixo X usa janela manual em milimetros e reinicia por ciclos.
 x3_auto = True
 x3_manual_mm = 100.0
+x3_manual_strokes = 20.0
 x3_auto_total_mm = 100.0
 # Modo de visualizacao do grafico 3: "dist" (distancia) ou "turn" (volta).
 graph3_mode = "dist"
@@ -1778,6 +1955,7 @@ p_turn_atrito_ef = []
 p_turn_atrito_max = []
 p_turn_atrito_min = []
 p_turn_coluna_velocidade = []
+p_turn_velocidade_alvo = []
 
 p_dist_target_mm = 0.0
 p_turn_target = 0.0
@@ -2769,6 +2947,10 @@ def _tail_dlg_csv_for_graphs(dlg_csv_path, run_token=None):
                             vals.append(float(v))
                         except Exception:
                             vals.append(float("nan"))
+                # Somente a apresentacao/processamento do ensaio recebe o offset.
+                # O dlg.csv permanece bruto para rastreabilidade.
+                if err == "0" and not math.isnan(vals[0]):
+                    vals[0] -= recip_dynamic_offset_n
 
                 sampsTimestamp.append(t_s)
                 for i in range(8):
@@ -3176,7 +3358,7 @@ def _append_dist_point(dist_mm, atr_med, atr_min, atr_max, rpm_med):
     return True
 
 
-def _append_turn_point(turn_n, atr_med, atr_min, atr_max, rpm_med):
+def _append_turn_point(turn_n, atr_med, atr_min, atr_max, rpm_med, target_speed=None):
     """
     Adiciona ponto do grafico 3 (modo por volta) com deduplicacao crescente.
     """
@@ -3197,6 +3379,8 @@ def _append_turn_point(turn_n, atr_med, atr_min, atr_max, rpm_med):
     p_turn_atrito_min.append(atr_min)
     p_turn_atrito_max.append(atr_max)
     p_turn_coluna_velocidade.append(rpm_med)
+    if target_speed is not None:
+        p_turn_velocidade_alvo.append(target_speed)
     _bump_graph_data_revision()
     return True
 
@@ -3381,7 +3565,9 @@ def _tail_realtime_dist_from_logs(
     raio_mm,
     dist_interval_mm,
     cycles_per_motor_rev=1.0,
-    run_token=None
+    run_token=None,
+    reciprocating=False,
+    target_speed_schedule=None,
 ):
     """
     Calcula atrito por distancia e por volta em tempo real de dlg.csv + drive.csv.
@@ -3412,6 +3598,9 @@ def _tail_realtime_dist_from_logs(
             "atr_min": None,
             "atr_max": None,
             "rpm_sum": 0.0,
+            "t_start": None,
+            "t_end": None,
+            "dist_sum": 0.0,
         }
 
     def _emit_dist_point(dist_mm, acc_data):
@@ -3423,11 +3612,15 @@ def _tail_realtime_dist_from_logs(
             atr_med = acc_data["atr_sum"] / float(acc_data["n_valid"])
             atr_min = acc_data["atr_min"] if acc_data["atr_min"] is not None else float("nan")
             atr_max = acc_data["atr_max"] if acc_data["atr_max"] is not None else float("nan")
-        if acc_data["rpm_cnt"] > 0:
+        if reciprocating and acc_data["t_start"] is not None and acc_data["t_end"] is not None:
+            dt = acc_data["t_end"] - acc_data["t_start"]
+            if dt > 0.0:
+                rpm_med = dist_interval_mm / dt
+        elif acc_data["rpm_cnt"] > 0:
             rpm_med = acc_data["rpm_sum"] / float(acc_data["rpm_cnt"])
         return _append_dist_point(dist_mm, atr_med, atr_min, atr_max, rpm_med)
 
-    def _emit_turn_point(turn_n, acc_data):
+    def _emit_turn_point(turn_n, acc_data, target_speed=None):
         atr_med = float("nan")
         atr_min = float("nan")
         atr_max = float("nan")
@@ -3436,9 +3629,22 @@ def _tail_realtime_dist_from_logs(
             atr_med = acc_data["atr_sum"] / float(acc_data["n_valid"])
             atr_min = acc_data["atr_min"] if acc_data["atr_min"] is not None else float("nan")
             atr_max = acc_data["atr_max"] if acc_data["atr_max"] is not None else float("nan")
-        if acc_data["rpm_cnt"] > 0:
+        if reciprocating and acc_data["t_start"] is not None and acc_data["t_end"] is not None:
+            dt = acc_data["t_end"] - acc_data["t_start"]
+            if dt > 0.0:
+                rpm_med = acc_data["dist_sum"] / dt
+        elif acc_data["rpm_cnt"] > 0:
             rpm_med = acc_data["rpm_sum"] / float(acc_data["rpm_cnt"])
-        return _append_turn_point(turn_n, atr_med, atr_min, atr_max, rpm_med)
+        return _append_turn_point(turn_n, atr_med, atr_min, atr_max, rpm_med, target_speed)
+
+    target_speed_schedule = list(target_speed_schedule or [])
+    def _target_at_time(t_s):
+        elapsed = 0.0
+        for speed, duration in target_speed_schedule:
+            elapsed += float(duration)
+            if t_s < elapsed:
+                return float(speed)
+        return float(target_speed_schedule[-1][0]) if target_speed_schedule else float("nan")
 
     # Aguarda ambos arquivos existirem.
     t0 = time.time()
@@ -3495,6 +3701,9 @@ def _tail_realtime_dist_from_logs(
     prev_t_s = 0.0
     prev_t_valid = False
     dir_sign = 1
+    stroke_dir = None
+    stroke_n = 1
+    active_target_speed = _target_at_time(0.0)
 
     have_d = False
     have_r = False
@@ -3568,7 +3777,8 @@ def _tail_realtime_dist_from_logs(
                 atr = float("nan")
                 if dlg_err == 0 and len(dcols) >= 12:
                     try:
-                        atr = float(dcols[11])
+                        ch1_value = float(dcols[3]) - recip_dynamic_offset_n
+                        atr = ch1_value / cof_force_normal_n if cof_force_normal_n > 0.0 else float("nan")
                         atr_ok = True
                     except Exception:
                         atr_ok = False
@@ -3605,9 +3815,30 @@ def _tail_realtime_dist_from_logs(
                 except Exception:
                     pass
 
+                sample_dir = None
+                if rpm_ok and abs(rpm) >= rpm_dir_deadband:
+                    sample_dir = 1 if rpm > 0.0 else -1
+                if reciprocating and sample_dir is not None:
+                    if stroke_dir is None:
+                        stroke_dir = sample_dir
+                        active_target_speed = _target_at_time(t_s_drv if not np.isnan(t_s_drv) else 0.0)
+                    elif sample_dir != stroke_dir:
+                        if _emit_turn_point(float(stroke_n), acc_turn, active_target_speed) and not first_turn_logged:
+                            log_msg("Stroke RT: primeiro stroke recebido para o grafico 3.")
+                            first_turn_logged = True
+                        stroke_n += 1
+                        acc_turn = _acc_reset()
+                        stroke_dir = sample_dir
+                        active_target_speed = _target_at_time(t_s_drv if not np.isnan(t_s_drv) else 0.0)
+
                 # Acumulo dos agregadores do grafico 3.
                 acc_dist["n_total"] += 1
                 acc_turn["n_total"] += 1
+                for acc_data in (acc_dist, acc_turn):
+                    if not np.isnan(t_s_drv):
+                        if acc_data["t_start"] is None:
+                            acc_data["t_start"] = t_s_drv
+                        acc_data["t_end"] = t_s_drv
                 if atr_ok and pos_ok:
                     acc_dist["n_valid"] += 1
                     acc_turn["n_valid"] += 1
@@ -3622,8 +3853,8 @@ def _tail_realtime_dist_from_logs(
                     if acc_turn["atr_max"] is None or atr > acc_turn["atr_max"]:
                         acc_turn["atr_max"] = atr
                     if rpm_ok:
-                        acc_dist["rpm_sum"] += rpm
-                        acc_turn["rpm_sum"] += rpm
+                        acc_dist["rpm_sum"] += abs(rpm) if reciprocating else rpm
+                        acc_turn["rpm_sum"] += abs(rpm) if reciprocating else rpm
                         acc_dist["rpm_cnt"] += 1
                         acc_turn["rpm_cnt"] += 1
                 else:
@@ -3671,6 +3902,8 @@ def _tail_realtime_dist_from_logs(
                         cum_turn += pin_turn_inc
                     if dist_inc_mm > 0.0:
                         cum_dist_mm += dist_inc_mm
+                        acc_dist["dist_sum"] += dist_inc_mm
+                        acc_turn["dist_sum"] += dist_inc_mm
 
                     while cum_dist_mm >= next_boundary_mm:
                         if _turn_rt_get_mode() == "fallback":
@@ -3681,7 +3914,7 @@ def _tail_realtime_dist_from_logs(
                         next_boundary_mm = float(interval_idx) * dist_interval_mm
                         acc_dist = _acc_reset()
 
-                    while cum_turn >= next_boundary_turn:
+                    while (not reciprocating) and cum_turn >= next_boundary_turn:
                         if _turn_rt_get_mode() == "fallback":
                             if _emit_turn_point(float(next_boundary_turn), acc_turn) and not first_turn_logged:
                                 log_msg("Volta RT: primeira volta recebida para o grafico 3.")
@@ -3714,7 +3947,7 @@ def start_acquisition():
     # Python "assigned before global declaration" errors (PyInstaller parse).
     global start_time, is_paused, tempo_pause_inicio, p_dist_target_mm, p_turn_target
     global p_strokes, p_atrito_ef, p_atrito_max, p_atrito_min, p_coluna_velocidade
-    global p_turn_strokes, p_turn_atrito_ef, p_turn_atrito_max, p_turn_atrito_min, p_turn_coluna_velocidade
+    global p_turn_strokes, p_turn_atrito_ef, p_turn_atrito_max, p_turn_atrito_min, p_turn_coluna_velocidade, p_turn_velocidade_alvo
     global contador_amostras_total
     global x_auto_total_min, x3_auto_total_mm, x_time_ref_s
 
@@ -3962,6 +4195,18 @@ def start_acquisition():
         )
         return
 
+    try:
+        encoder_calib_info = _load_required_encoder_calibration()
+    except Exception as exc:
+        messagebox.showerror(
+            "Calibracao do encoder obrigatoria",
+            "Nao e possivel realizar o ensaio sem uma calibracao valida "
+            "do encoder externo.\n\n"
+            f"{exc}"
+        )
+        log_msg(f"Inicio bloqueado: calibracao do encoder invalida ({exc}).")
+        return
+
     salvar_arquivo()
 
     # Se o usuario clicou em "Cancelar" na janela de salvar, a variavel continuara vazia.
@@ -3970,14 +4215,92 @@ def start_acquisition():
         print("Inicio cancelado: Nenhum local escolhido para salvar.")
         return
 
-    # Antes de iniciar cada ensaio, executa tara automatica obrigatoria.
-    # No modo reciprocante experimental, a tara e bypassada para testes de movimento.
-    if reciprocante_var.get():
-        log_msg("Modo reciprocante: tara automatica bypassada para teste de movimento.")
-    elif not _run_auto_tara_before_start(repo_root, exe_info):
+    # Antes de iniciar qualquer ensaio, inclusive reciprocante, executa a tara estatica.
+    if not _run_auto_tara_before_start(repo_root, exe_info):
         _cleanup_run_folder_on_abort()
         log_msg("Inicio cancelado: tara automatica nao concluida.")
         return
+
+    global recip_dynamic_offset_n
+    recip_dynamic_offset_n = 0.0
+    offset_result = {
+        "valid": True, "reason": "nao aplicavel", "offset_n": 0.0,
+        "cycles": 0, "warmup_cycles": 0, "rpm_disk_target": 0,
+        "rpm_drive": 0, "valid_samples": 0,
+        "total_samples": 0, "loss_pct": 0.0,
+    }
+    if reciprocante_var.get():
+        try:
+            offset_course_mm = float(entry_curso.get().strip().replace(',', '.'))
+            offset_radius_mm = float(ent_raio.get().strip().replace(',', '.'))
+            offset_rpm_drive = max(1, int(round(RELACAO_MECANICA)))
+            offset_rpm_disk_effective = offset_rpm_drive / RELACAO_MECANICA
+            offset_pin_speed = offset_rpm_disk_effective * (2.0 * math.pi * offset_radius_mm) / 60.0
+            offset_est_s = ((RECIP_OFFSET_CYCLES + 1) * 2.0 * offset_course_mm) / offset_pin_speed
+        except Exception:
+            _cleanup_run_folder_on_abort()
+            messagebox.showerror("Correcao dinamica", "Nao foi possivel calcular a duracao da fase preliminar.")
+            return
+        if not messagebox.askokcancel(
+            "Correcao dinamica reciprocante",
+            "Antes do ensaio oficial, o sistema executara a fase de correcao dinamica.\n\n"
+            f"Disco: 1 RPM | Drive: {offset_rpm_drive} RPM (i={RELACAO_MECANICA:.6g})\n"
+            f"Ciclos: 1 de estabilizacao + {RECIP_OFFSET_CYCLES} validos "
+            "(1 ciclo = ida + volta)\n"
+            f"Curso: {offset_course_mm:.3f} mm\nTempo teorico: {offset_est_s / 60.0:.1f} min\n\n"
+            "O tempo pode aumentar devido ao comportamento nos extremos. O ensaio oficial inicia automaticamente apos a validacao."
+        ):
+            _cleanup_run_folder_on_abort()
+            log_msg("Inicio cancelado antes da correcao dinamica.")
+            return
+
+        _set_run_finalizing(True)
+        label_ensaio_estado.config(text="Correcao dinamica: iniciando", fg="#0078D4")
+        root.update_idletasks()
+
+        def _offset_progress(elapsed_s, expected_s):
+            label_ensaio_estado.config(
+                text=f"Correcao dinamica: {elapsed_s / 60.0:.1f}/{expected_s / 60.0:.1f} min",
+                fg="#0078D4"
+            )
+            root.update()
+
+        try:
+            offset_result = orch.run_reciprocating_offset_capture(
+                repo_root=repo_root,
+                run_folder=caminho_pasta,
+                course_mm=offset_course_mm,
+                cycles=RECIP_OFFSET_CYCLES,
+                relacao=RELACAO_MECANICA,
+                raio_mm=offset_radius_mm,
+                tolerance_counts=RECIP_STOP_TOL_COUNTS,
+                rate_hz=float(getattr(orch, "DEFAULT_RATE_HZ", 50.0)),
+                max_loss_pct=5.0,
+                progress_cb=_offset_progress,
+            )
+        except Exception as e:
+            _set_run_finalizing(False)
+            label_ensaio_estado.config(text="Falha na correcao dinamica", fg="red")
+            _write_recip_offset_abort_info(str(e))
+            messagebox.showerror("Correcao dinamica", f"A fase preliminar falhou. O ensaio oficial nao foi iniciado.\n\n{e}")
+            return
+        _set_run_finalizing(False)
+        if not offset_result.get("valid"):
+            label_ensaio_estado.config(text="Correcao dinamica invalida", fg="red")
+            _write_recip_offset_abort_info(offset_result.get("reason", "desconhecido"), offset_result)
+            messagebox.showerror(
+                "Correcao dinamica",
+                "A fase preliminar foi reprovada. O ensaio oficial nao foi iniciado.\n\n"
+                f"Motivo: {offset_result.get('reason', 'desconhecido')}\n"
+                f"Amostras validas: {offset_result.get('valid_samples', 0)}\n"
+                f"Perda: {offset_result.get('loss_pct', 100.0):.3f}%"
+            )
+            return
+        recip_dynamic_offset_n = float(offset_result["offset_n"])
+        log_msg(
+            f"Correcao dinamica aprovada: offset CH1={recip_dynamic_offset_n:.10g} N, "
+            f"validas={offset_result['valid_samples']}, perda={offset_result['loss_pct']:.3f}%."
+        )
 
     # Carrega os dados de calibracao CH1 apos a tara, para registrar
     # os valores efetivamente usados neste ensaio.
@@ -4027,10 +4350,56 @@ def start_acquisition():
                 f.write("Intercept (fit),NULL,\n")
                 f.write("R2 (fit),NULL,\n")
 
+            f.write("Calibracao do encoder externo,PosEncExt,\n")
+            f.write(f"Status calibracao encoder,{encoder_calib_info['status']},\n")
+            f.write(f"Caminho calibracao encoder,{encoder_calib_info['path']},\n")
+            f.write(f"SHA256 calibracao encoder,{encoder_calib_info['sha256']},\n")
+            f.write(f"Schema calibracao encoder,{encoder_calib_info['schema_version']},\n")
+            f.write(f"Versao programa calibracao encoder,{encoder_calib_info['generator_build']},\n")
+            f.write(f"Data calibracao encoder UTC,{encoder_calib_info['calibrated_at_utc']},\n")
+            f.write(f"Canal PosEncExt,{encoder_calib_info['channel']},\n")
+            f.write(f"Unidade PosEncExt,{encoder_calib_info['unit']},\n")
+            f.write(f"Slope PosEncExt,{encoder_calib_info['slope']:.15g},\n")
+            f.write(f"Intercept PosEncExt,{encoder_calib_info['intercept']:.15g},\n")
+            f.write(f"Modulo PosEncExt [graus],{encoder_calib_info['modulo']:.15g},\n")
+            f.write(f"Referencia zero PosEncExt,{encoder_calib_info['zero_reference']},\n")
+            f.write(f"Preset encoder tSensor,{encoder_calib_info['tSensor']},\n")
+            f.write(f"Preset encoder iGain,{encoder_calib_info['iGain']},\n")
+            f.write(f"Preset encoder iLPF,{encoder_calib_info['iLPF']},\n")
+            f.write(f"Preset encoder iSensPwr,{encoder_calib_info['iSensPwr']},\n")
+            f.write(f"Preset encoder entrada DC,{encoder_calib_info['fInputDCImp']},\n")
+            f.write(f"Preset encoder entrada AC,{encoder_calib_info['fInputACImp']},\n")
+            f.write(f"Filtro PosEncExt,{encoder_calib_info['filter']},\n")
+            f.write("Filtro operacional PosEncExt,rastreador angular com innovation gate e histerese,\n")
+            f.write("Quarentena PosEncExt,PosEncExt_Quarentena: 1=reconstruida; 0=medida aceita,\n")
+            f.write(f"Taxa calibracao encoder [Hz],{encoder_calib_info['sample_rate_hz']:.10g},\n")
+            f.write(f"Referencia calibracao encoder,{encoder_calib_info['reference_source']},\n")
+            f.write(f"Relacao configurada calibracao encoder,{encoder_calib_info['ratio_configured']},\n")
+            f.write(f"Relacao medida calibracao encoder,{encoder_calib_info['ratio_measured']},\n")
+            f.write(f"Voltas treino calibracao encoder,{encoder_calib_info['training_revolutions']},\n")
+            f.write(f"Voltas holdout calibracao encoder,{encoder_calib_info['holdout_revolutions']},\n")
+            f.write(f"Voltas completas calibracao encoder,{encoder_calib_info['complete_revolutions']},\n")
+            f.write(f"RMSE calibracao encoder [graus],{encoder_calib_info['rmse_deg']},\n")
+            f.write(f"P95 calibracao encoder [graus],{encoder_calib_info['p95_deg']},\n")
+            f.write(f"Erro maximo calibracao encoder [graus],{encoder_calib_info['max_error_deg']},\n")
+            f.write(f"R2 calibracao encoder,{encoder_calib_info['r2']},\n")
+            f.write(f"Amostras calibracao encoder,{encoder_calib_info['received_samples']},\n")
+            f.write(f"Perda calibracao encoder [fracao],{encoder_calib_info['loss_fraction']},\n")
+            f.write(f"Saturacoes calibracao encoder,{encoder_calib_info['saturation_samples']},\n")
+            f.write("Validacao calibracao encoder,aprovada,\n")
+
             # Reciprocating e Curso
             f.write(f"Reciprocating,{'sim' if reciprocante_var.get() else 'não'},\n")
             f.write(f"Tolerancia reciprocante [counts],{RECIP_STOP_TOL_COUNTS},\n")
             f.write(f"Filtro borda stroke [%],{RECIP_EDGE_FILTER_PCT},\n")
+            f.write(f"Offset dinamico CH1 [N],{offset_result['offset_n']:.10g},\n")
+            f.write(f"Ciclos correcao dinamica,{offset_result['cycles']},\n")
+            f.write(f"Ciclos estabilizacao correcao dinamica,{offset_result['warmup_cycles']},\n")
+            f.write(f"RPM disco correcao dinamica,{offset_result['rpm_disk_target']:.6g},\n")
+            f.write(f"RPM Drive correcao dinamica,{offset_result['rpm_drive']},\n")
+            f.write(f"Amostras validas correcao dinamica,{offset_result['valid_samples']},\n")
+            f.write(f"Perda correcao dinamica [%],{offset_result['loss_pct']:.6f},\n")
+            f.write(f"Validacao correcao dinamica,{offset_result['reason']},\n")
             if not entry_curso.get().strip() or not reciprocante_var.get():
                 f.write(f"Curso [mm],0.00,\n")
             else:
@@ -4149,14 +4518,23 @@ def start_acquisition():
         p_turn_atrito_max.clear()
         p_turn_atrito_min.clear()
         p_turn_coluna_velocidade.clear()
+        p_turn_velocidade_alvo.clear()
         x_time_ref_s = None
         # Define alvo de distancia para eixo X do grafico 3.
         p_dist_target_mm = _calc_expected_distance_mm_from_table()
-        p_turn_target = _calc_expected_pin_turns_from_table(raio_mm)
+        if reciprocating_enabled and recip_course_mm > 0.0:
+            p_turn_target = math.ceil(recip_total_mm / recip_course_mm)
+        else:
+            p_turn_target = _calc_expected_pin_turns_from_table(raio_mm)
         if p_dist_target_mm > 0:
             x3_auto_total_mm = p_dist_target_mm
 
         dur_total = sum(d for _, d in schedule)
+        run_duration_s = dur_total
+        if reciprocating_enabled:
+            # No reciprocante, a distancia encerra o ensaio. O tempo inclui
+            # margem apenas como watchdog para paradas e inversoes.
+            run_duration_s = max(dur_total * 1.5, dur_total + 30.0)
         # Em modo automatico, eixo X de Temperatura/CoF segue duracao total prevista.
         if dur_total > 0:
             x_auto_total_min = float(dur_total) / 60.0
@@ -4191,7 +4569,7 @@ def start_acquisition():
                 repo_root=repo_root,
                 out_paths=out_paths,
                 schedule=schedule,
-                duration_s=dur_total,
+                duration_s=run_duration_s,
                 rate_hz=rate_hz,
                 # Usa a porta padrao do pipeline (41402).
                 # bind_port=0 (efemera) pode gerar execucao sem ACQDATA em
@@ -4211,7 +4589,9 @@ def start_acquisition():
                 reciprocating_course_mm=recip_course_mm,
                 reciprocating_total_mm=recip_total_mm,
                 reciprocating_tolerance_counts=RECIP_STOP_TOL_COUNTS,
-                reciprocating_edge_filter_pct=RECIP_EDGE_FILTER_PCT
+                reciprocating_edge_filter_pct=RECIP_EDGE_FILTER_PCT,
+                dynamic_offset_n=recip_dynamic_offset_n,
+                target_speed_schedule=list(zip(lista_velocidades_digitadas, lista_duracao)),
             )
         except Exception as e:
             _set_run_finalizing(False)
@@ -4236,8 +4616,8 @@ def start_acquisition():
         is_paused = False
         tempo_pause_inicio = 0
         graph_log(
-            "RUN start token={0} rate_hz={1} dur_total_s={2:.3f} relacao={3:.6f} dist_target_mm={4:.6f} turn_target={5:.6f} interval_mm={6:.6f} reciprocating={7} course_mm={8:.6f} recip_tol_counts={9} recip_edge_pct={10:.6f}".format(
-                run_token, rate_hz, dur_total, RELACAO_MECANICA, p_dist_target_mm, p_turn_target, DIST_INTERVAL_MM,
+            "RUN start token={0} rate_hz={1} dur_total_s={2:.3f} watchdog_s={3:.3f} relacao={4:.6f} dist_target_mm={5:.6f} turn_target={6:.6f} interval_mm={7:.6f} reciprocating={8} course_mm={9:.6f} recip_tol_counts={10} recip_edge_pct={11:.6f}".format(
+                run_token, rate_hz, dur_total, run_duration_s, RELACAO_MECANICA, p_dist_target_mm, p_turn_target, DIST_INTERVAL_MM,
                 reciprocating_enabled, recip_course_mm, RECIP_STOP_TOL_COUNTS, RECIP_EDGE_FILTER_PCT
             )
         )
@@ -4299,6 +4679,27 @@ def start_acquisition():
                     orch.finalize_dev_artifacts_after_run(state_snapshot)
                 except Exception as e:
                     log_msg(f"Aviso: nao foi possivel finalizar move de CSVs tecnicos ({e}).")
+                if caminho_arquivo_1:
+                    try:
+                        with open(caminho_arquivo_1, "a", encoding="utf-8", newline="") as f_info:
+                            f_info.write(
+                                f"Amostras quarentena PosEncExt,{state_snapshot.encoder_quarantine_samples},\n"
+                            )
+                            f_info.write(
+                                "Fracao quarentena PosEncExt [%],"
+                                f"{state_snapshot.encoder_quarantine_fraction * 100.0:.6f},\n"
+                            )
+                    except Exception as e:
+                        log_msg(f"Aviso: nao foi possivel registrar a quarentena no _I ({e}).")
+                if state_snapshot.reciprocating and caminho_arquivo_1:
+                    try:
+                        with open(caminho_arquivo_1, "a", encoding="utf-8", newline="") as f_info:
+                            f_info.write(f"Pos-captura reciprocante,{state_snapshot.reciprocating_postroll_status},\n")
+                            endpoint = state_snapshot.reciprocating_final_encoder_idx
+                            f_info.write(f"Indice final pelo encoder externo,{endpoint if endpoint is not None else 'NULL'},\n")
+                            f_info.write("Troca de velocidade reciprocante,somente na inversao entre strokes,\n")
+                    except Exception as e:
+                        log_msg(f"Aviso: nao foi possivel registrar a pos-captura no _I ({e}).")
                 graph_log("RUN end token={0} failure_rc={1} failure_msg={2}".format(run_token, failure_rc, failure_msg))
                 try:
                     if failure_rc:
@@ -4328,6 +4729,7 @@ def start_acquisition():
                         p_turn_atrito_max.clear()
                         p_turn_atrito_min.clear()
                         p_turn_coluna_velocidade.clear()
+                        p_turn_velocidade_alvo.clear()
                         globals()["x_time_ref_s"] = None
                         globals()["p_dist_target_mm"] = 0.0
                         globals()["p_turn_target"] = 0.0
@@ -4368,7 +4770,11 @@ def start_acquisition():
         # por intervalos de distancia configurados.
         threading.Thread(
             target=_tail_realtime_dist_from_logs,
-            args=(caminho_dlg_csv, caminho_drive_csv, RELACAO_MECANICA, raio_mm, DIST_INTERVAL_MM, 1.0, run_token),
+            args=(
+                caminho_dlg_csv, caminho_drive_csv, RELACAO_MECANICA, raio_mm,
+                DIST_INTERVAL_MM, 1.0, run_token, reciprocating_enabled,
+                list(zip(lista_velocidades_digitadas, lista_duracao)),
+            ),
             daemon=True
         ).start()
 
@@ -4521,7 +4927,7 @@ def pause_acquisition():
 def stop_acquisition():
     global running, is_paused, ip, timer_started, tempo_pause_inicio, p_dist_target_mm, p_turn_target, x_time_ref_s
     global graSamps, sampsTimestamp, p_strokes, p_atrito_ef, p_atrito_max, p_atrito_min, p_coluna_velocidade
-    global p_turn_strokes, p_turn_atrito_ef, p_turn_atrito_max, p_turn_atrito_min, p_turn_coluna_velocidade
+    global p_turn_strokes, p_turn_atrito_ef, p_turn_atrito_max, p_turn_atrito_min, p_turn_coluna_velocidade, p_turn_velocidade_alvo
 
     if running:
         resposta = messagebox.askyesno("Confirmação", "Deseja parar o programa?")
@@ -4595,6 +5001,7 @@ def stop_acquisition():
             p_turn_atrito_max.clear()
             p_turn_atrito_min.clear()
             p_turn_coluna_velocidade.clear()
+            p_turn_velocidade_alvo.clear()
             p_dist_target_mm = 0.0
             p_turn_target = 0.0
             x_time_ref_s = None
@@ -4768,6 +5175,8 @@ def update3(frame):
         mode = str(mode).strip().lower()
         if mode not in ("dist", "turn"):
             mode = "dist"
+        is_recip = bool("reciprocante_var" in globals() and reciprocante_var.get())
+        target_vals = np.array([])
 
         if mode == "turn":
             x_vals = np.array(p_turn_strokes, dtype=float) if len(p_turn_strokes) > 0 else np.array([])
@@ -4775,6 +5184,8 @@ def update3(frame):
             y_med = np.array(p_turn_atrito_ef, dtype=float) if len(p_turn_atrito_ef) > 0 else np.array([])
             y_min = np.array(p_turn_atrito_min, dtype=float) if len(p_turn_atrito_min) > 0 else np.array([])
             rpm_vals = np.array(p_turn_coluna_velocidade, dtype=float) if len(p_turn_coluna_velocidade) > 0 else np.array([])
+            if is_recip and len(p_turn_velocidade_alvo) == len(p_turn_strokes):
+                target_vals = np.array(p_turn_velocidade_alvo, dtype=float)
         else:
             x_vals = np.array(p_strokes, dtype=float) if len(p_strokes) > 0 else np.array([])
             y_max = np.array(p_atrito_max, dtype=float) if len(p_atrito_max) > 0 else np.array([])
@@ -4792,8 +5203,8 @@ def update3(frame):
                 y_min_plot = y_min
                 rpm_plot = rpm_vals
             else:
-                span_mm = max(0.001, float(x3_manual_mm))
-                if mode == "turn":
+                span_mm = max(0.001, float(x3_manual_strokes if (mode == "turn" and is_recip) else x3_manual_mm))
+                if mode == "turn" and not is_recip:
                     try:
                         raio_mm = float(ent_raio.get().strip().replace(",", "."))
                     except Exception:
@@ -4813,10 +5224,17 @@ def update3(frame):
                 raio_mm = float(ent_raio.get().strip().replace(",", "."))
             except Exception:
                 raio_mm = 0.0
-            vel_plot = _rpm_motor_to_pin_speed_mm_s(rpm_plot, raio_mm, RELACAO_MECANICA)
-            x_plot, y_max_plot, y_med_plot, y_min_plot, vel_plot = _downsample_for_plot(
-                x_plot, y_max_plot, y_med_plot, y_min_plot, vel_plot, max_points=1200
-            )
+            vel_plot = np.asarray(rpm_plot, dtype=float) if is_recip else _rpm_motor_to_pin_speed_mm_s(rpm_plot, raio_mm, RELACAO_MECANICA)
+            if len(target_vals) == len(x_vals):
+                target_plot = target_vals if x3_auto else target_vals[mask]
+                x_plot, y_max_plot, y_med_plot, y_min_plot, vel_plot, target_plot = _downsample_for_plot(
+                    x_plot, y_max_plot, y_med_plot, y_min_plot, vel_plot, target_plot, max_points=1200
+                )
+            else:
+                target_plot = np.array([])
+                x_plot, y_max_plot, y_med_plot, y_min_plot, vel_plot = _downsample_for_plot(
+                    x_plot, y_max_plot, y_med_plot, y_min_plot, vel_plot, max_points=1200
+                )
             ax3.plot(x_plot, y_max_plot, color='red', label='Atrito max', linewidth=1)
             ax3.plot(x_plot, y_med_plot, color='black', label='Atrito medio', linewidth=1)
             ax3.plot(x_plot, y_min_plot, color='cyan', label='Atrito min', linewidth=1)
@@ -4831,6 +5249,14 @@ def update3(frame):
                         linewidth=1,
                         label='Velocidade media'
                     )
+                if len(target_plot) == len(x_plot) and len(target_plot) > 0:
+                    valid_target = np.isfinite(target_plot)
+                    if np.any(valid_target):
+                        ax3_twin.step(
+                            x_plot[valid_target], target_plot[valid_target],
+                            where='mid', color='purple', linestyle=':', linewidth=1.2,
+                            label='Velocidade alvo'
+                        )
 
         if x3_auto:
             if mode == "turn":
@@ -4860,20 +5286,23 @@ def update3(frame):
                     x_target = max(x_target, float(x_vals[-1]))
         else:
             if mode == "turn":
-                try:
-                    raio_mm = float(ent_raio.get().strip().replace(",", "."))
-                except Exception:
-                    raio_mm = 0.0
-                if raio_mm > 0:
-                    x_target = max(1.0, float(x3_manual_mm) / (2.0 * math.pi * raio_mm))
+                if is_recip:
+                    x_target = max(1.0, float(x3_manual_strokes))
                 else:
-                    x_target = max(1.0, float(x3_manual_mm))
+                    try:
+                        raio_mm = float(ent_raio.get().strip().replace(",", "."))
+                    except Exception:
+                        raio_mm = 0.0
+                    if raio_mm > 0:
+                        x_target = max(1.0, float(x3_manual_mm) / (2.0 * math.pi * raio_mm))
+                    else:
+                        x_target = max(1.0, float(x3_manual_mm))
             else:
                 x_target = max(1.0, float(x3_manual_mm))
         ax3.set_xlim(0, x_target)
 
         if mode == "turn":
-            ax3.set_xlabel('Voltas (pino)', fontsize=9)
+            ax3.set_xlabel('Stroke' if is_recip else 'Voltas (pino)', fontsize=9)
         else:
             ax3.set_xlabel('Distancia [mm]', fontsize=9)
         ax3.set_ylabel('Atrito [-]', fontsize=9)
@@ -4886,6 +5315,8 @@ def update3(frame):
         ax3_twin.grid(False)
         if len(vel_plot) > 0 and np.any(np.isfinite(vel_plot)):
             vmax = np.nanmax(vel_plot)
+            if 'target_plot' in locals() and len(target_plot) > 0 and np.any(np.isfinite(target_plot)):
+                vmax = max(vmax, np.nanmax(target_plot))
             if np.isfinite(vmax):
                 ax3_twin.set_ylim(0, max(1.0, float(vmax) * 1.15))
         if not y3_auto:
@@ -5013,12 +5444,16 @@ def _plot_g3_mode_axis_view(ax, mode, twin_ax=None):
     if mode not in ("dist", "turn"):
         mode = "dist"
 
+    is_recip = bool("reciprocante_var" in globals() and reciprocante_var.get())
+    target_vals = np.array([])
     if mode == "turn":
         x_vals = np.array(p_turn_strokes, dtype=float) if len(p_turn_strokes) > 0 else np.array([])
         y_max = np.array(p_turn_atrito_max, dtype=float) if len(p_turn_atrito_max) > 0 else np.array([])
         y_med = np.array(p_turn_atrito_ef, dtype=float) if len(p_turn_atrito_ef) > 0 else np.array([])
         y_min = np.array(p_turn_atrito_min, dtype=float) if len(p_turn_atrito_min) > 0 else np.array([])
         rpm_vals = np.array(p_turn_coluna_velocidade, dtype=float) if len(p_turn_coluna_velocidade) > 0 else np.array([])
+        if is_recip and len(p_turn_velocidade_alvo) == len(p_turn_strokes):
+            target_vals = np.array(p_turn_velocidade_alvo, dtype=float)
     else:
         x_vals = np.array(p_strokes, dtype=float) if len(p_strokes) > 0 else np.array([])
         y_max = np.array(p_atrito_max, dtype=float) if len(p_atrito_max) > 0 else np.array([])
@@ -5038,8 +5473,8 @@ def _plot_g3_mode_axis_view(ax, mode, twin_ax=None):
             y_min_plot = y_min
             rpm_plot = rpm_vals
         else:
-            span_mm = max(0.001, float(x3_manual_mm))
-            if mode == "turn":
+            span_mm = max(0.001, float(x3_manual_strokes if (mode == "turn" and is_recip) else x3_manual_mm))
+            if mode == "turn" and not is_recip:
                 try:
                     raio_mm = float(ent_raio.get().strip().replace(",", "."))
                 except Exception:
@@ -5060,10 +5495,17 @@ def _plot_g3_mode_axis_view(ax, mode, twin_ax=None):
                 raio_mm = float(ent_raio.get().strip().replace(",", "."))
             except Exception:
                 raio_mm = 0.0
-            vel_plot = _rpm_motor_to_pin_speed_mm_s(rpm_plot, raio_mm, RELACAO_MECANICA)
-            x_plot, y_max_plot, y_med_plot, y_min_plot, vel_plot = _downsample_for_plot(
-                x_plot, y_max_plot, y_med_plot, y_min_plot, vel_plot, max_points=900
-            )
+            vel_plot = np.asarray(rpm_plot, dtype=float) if is_recip else _rpm_motor_to_pin_speed_mm_s(rpm_plot, raio_mm, RELACAO_MECANICA)
+            if len(target_vals) == len(x_vals):
+                target_plot = target_vals if x3_auto else target_vals[mask]
+                x_plot, y_max_plot, y_med_plot, y_min_plot, vel_plot, target_plot = _downsample_for_plot(
+                    x_plot, y_max_plot, y_med_plot, y_min_plot, vel_plot, target_plot, max_points=900
+                )
+            else:
+                target_plot = np.array([])
+                x_plot, y_max_plot, y_med_plot, y_min_plot, vel_plot = _downsample_for_plot(
+                    x_plot, y_max_plot, y_med_plot, y_min_plot, vel_plot, max_points=900
+                )
         else:
             x_plot, y_max_plot, y_med_plot, y_min_plot = _downsample_for_plot(
                 x_plot, y_max_plot, y_med_plot, y_min_plot, max_points=900
@@ -5085,6 +5527,14 @@ def _plot_g3_mode_axis_view(ax, mode, twin_ax=None):
                         linewidth=1,
                         label='Velocidade media'
                     )
+                if len(target_plot) == len(x_plot) and len(target_plot) > 0:
+                    valid_target = np.isfinite(target_plot)
+                    if np.any(valid_target):
+                        twin_ax.step(
+                            x_plot[valid_target], target_plot[valid_target],
+                            where='mid', color='purple', linestyle=':', linewidth=1.2,
+                            label='Velocidade alvo'
+                        )
 
     if x3_auto:
         if mode == "turn":
@@ -5111,14 +5561,17 @@ def _plot_g3_mode_axis_view(ax, mode, twin_ax=None):
             x_target = max(x_target, float(x_vals[-1]))
     else:
         if mode == "turn":
-            try:
-                raio_mm = float(ent_raio.get().strip().replace(",", "."))
-            except Exception:
-                raio_mm = 0.0
-            if raio_mm > 0:
-                x_target = max(1.0, float(x3_manual_mm) / (2.0 * math.pi * raio_mm))
+            if is_recip:
+                x_target = max(1.0, float(x3_manual_strokes))
             else:
-                x_target = max(1.0, float(x3_manual_mm))
+                try:
+                    raio_mm = float(ent_raio.get().strip().replace(",", "."))
+                except Exception:
+                    raio_mm = 0.0
+                if raio_mm > 0:
+                    x_target = max(1.0, float(x3_manual_mm) / (2.0 * math.pi * raio_mm))
+                else:
+                    x_target = max(1.0, float(x3_manual_mm))
         else:
             x_target = max(1.0, float(x3_manual_mm))
 
@@ -5127,8 +5580,8 @@ def _plot_g3_mode_axis_view(ax, mode, twin_ax=None):
     ax.tick_params(axis='both', labelsize=8)
     ax.set_facecolor('white')
     if mode == "turn":
-        ax.set_xlabel('Voltas (pino)', fontsize=9)
-        ax.set_title('Processamento por volta', fontsize=10)
+        ax.set_xlabel('Stroke' if is_recip else 'Voltas (pino)', fontsize=9)
+        ax.set_title('Processamento por stroke' if is_recip else 'Processamento por volta', fontsize=10)
     else:
         ax.set_xlabel('Distancia [mm]', fontsize=9)
         ax.set_title('Processamento por distancia', fontsize=10)
@@ -5142,6 +5595,8 @@ def _plot_g3_mode_axis_view(ax, mode, twin_ax=None):
         twin_ax.grid(False)
         if len(vel_plot) > 0 and np.any(np.isfinite(vel_plot)):
             vmax = np.nanmax(vel_plot)
+            if 'target_plot' in locals() and len(target_plot) > 0 and np.any(np.isfinite(target_plot)):
+                vmax = max(vmax, np.nanmax(target_plot))
             if np.isfinite(vmax):
                 twin_ax.set_ylim(0, max(1.0, float(vmax) * 1.15))
     h1, l1 = ax.get_legend_handles_labels()
@@ -5167,6 +5622,53 @@ def update_graficos_tab(frame):
         log_msg(f"Aba graficos: erro de atualizacao ({e}).")
 
 
+def _reload_final_reciprocating_graph_data():
+    """Recarrega _DP/_M finais para o PNG reciprocante usar dados reconstruidos."""
+    if not ("reciprocante_var" in globals() and reciprocante_var.get()):
+        return
+    if not caminho_turn_dist_csv or not caminho_turn_volta_csv:
+        return
+    try:
+        dist_rows = []
+        motion_rows = []
+        if os.path.isfile(caminho_turn_dist_csv):
+            with open(caminho_turn_dist_csv, "r", newline="", encoding="utf-8-sig") as f:
+                dist_rows = list(csv.DictReader(f, delimiter=";"))
+        if os.path.isfile(caminho_turn_volta_csv):
+            with open(caminho_turn_volta_csv, "r", newline="", encoding="utf-8-sig") as f:
+                motion_rows = list(csv.DictReader(f, delimiter=";"))
+
+        p_strokes.clear()
+        p_atrito_ef.clear()
+        p_atrito_max.clear()
+        p_atrito_min.clear()
+        p_coluna_velocidade.clear()
+        for row in dist_rows:
+            p_strokes.append(float(row["distancia_mm"]))
+            p_atrito_ef.append(float(row["atrito_med"]))
+            p_atrito_max.append(float(row["atrito_max"]))
+            p_atrito_min.append(float(row["atrito_min"]))
+            p_coluna_velocidade.append(float(row["velocidade_media_mm_s"]))
+
+        p_turn_strokes.clear()
+        p_turn_atrito_ef.clear()
+        p_turn_atrito_max.clear()
+        p_turn_atrito_min.clear()
+        p_turn_coluna_velocidade.clear()
+        p_turn_velocidade_alvo.clear()
+        for row in motion_rows:
+            p_turn_strokes.append(float(row["STROKE"]))
+            p_turn_atrito_ef.append(float(row["ATRITO_MEDIO"]))
+            p_turn_atrito_max.append(float(row["ATRITO_MAX"]))
+            p_turn_atrito_min.append(float(row["ATRITO_MIN"]))
+            p_turn_coluna_velocidade.append(float(row.get("VELOCIDADE_MEDIA", row.get("VELOCIDADE"))))
+            target = str(row.get("VELOCIDADE_ALVO", "NULL")).strip()
+            p_turn_velocidade_alvo.append(float(target) if target and target.upper() != "NULL" else float("nan"))
+        _bump_graph_data_revision()
+    except Exception as e:
+        graph_log(f"GRAPH final reload failed: {e}")
+
+
 def _save_graficos_tab_image(path=None):
     """
     Salva uma imagem PNG da figura 2x2 da aba "graficos".
@@ -5189,6 +5691,7 @@ def _save_graficos_tab_image(path=None):
     previous_snapshot_state = graph_snapshot_rendering
     graph_snapshot_rendering = True
     try:
+        _reload_final_reciprocating_graph_data()
         update_graficos_tab(None)
         try:
             canvas_graficos.draw()
@@ -5381,7 +5884,11 @@ def abrir_config_x():
     - Grafico 3: configuracao separada por distancia (mm).
     """
     global x_auto, x_manual_min, x_auto_total_min, x_time_ref_s
-    global x3_auto, x3_manual_mm, x3_auto_total_mm, aux
+    global x3_auto, x3_manual_mm, x3_manual_strokes, x3_auto_total_mm, aux
+    recip_stroke_axis = bool(
+        "reciprocante_var" in globals() and reciprocante_var.get() and
+        str(graph3_mode_var.get() if "graph3_mode_var" in globals() else graph3_mode) == "turn"
+    )
 
     win = tkinter.Toplevel(root)
     win.title("Configurar Eixo X")
@@ -5405,13 +5912,13 @@ def abrir_config_x():
     ent_manual = tkinter.Entry(frame, width=12, textvariable=x_manual_var)
     ent_manual.grid(row=2, column=1, padx=4, pady=2)
 
-    tkinter.Label(frame, text="Eixo X (Grafico 3 - Distancia)", font=("Arial", 9, "bold")) \
+    tkinter.Label(frame, text=("Eixo X (Grafico 3 - Strokes)" if recip_stroke_axis else "Eixo X (Grafico 3 - Distancia)"), font=("Arial", 9, "bold")) \
         .grid(row=3, column=0, columnspan=3, sticky="w", pady=(10, 6))
     tkinter.Label(frame, text="Automatico", font=("Arial", 9, "bold")).grid(row=4, column=0, padx=4, pady=(0, 4))
-    tkinter.Label(frame, text="Manual [mm]", font=("Arial", 9, "bold")).grid(row=4, column=1, padx=4, pady=(0, 4))
+    tkinter.Label(frame, text=("Manual [strokes]" if recip_stroke_axis else "Manual [mm]"), font=("Arial", 9, "bold")).grid(row=4, column=1, padx=4, pady=(0, 4))
 
     x3_auto_var = tkinter.BooleanVar(value=x3_auto)
-    x3_manual_var = tkinter.StringVar(value=f"{x3_manual_mm:.6g}")
+    x3_manual_var = tkinter.StringVar(value=f"{(x3_manual_strokes if recip_stroke_axis else x3_manual_mm):.6g}")
 
     chk3_auto = tkinter.Checkbutton(frame, variable=x3_auto_var)
     chk3_auto.grid(row=5, column=0, padx=4, pady=2)
@@ -5438,12 +5945,19 @@ def abrir_config_x():
 
         if x3_auto_var.get():
             previsto_mm = _calc_expected_distance_mm_from_table()
-            if previsto_mm > 0:
+            if recip_stroke_axis:
+                try:
+                    curso = float(entry_curso.get().strip().replace(",", "."))
+                except Exception:
+                    curso = 0.0
+                previsto = math.ceil(previsto_mm / curso) if previsto_mm > 0 and curso > 0 else 0
+                lbl_info_3.config(text=(f"Grafico 3 automatico: previsao = {previsto} strokes" if previsto else "Grafico 3 automatico: quantidade sera congelada no START."))
+            elif previsto_mm > 0:
                 lbl_info_3.config(text=f"Grafico 3 automatico: distancia prevista = {previsto_mm:.2f} mm")
             else:
                 lbl_info_3.config(text="Grafico 3 automatico: distancia prevista sera congelada no START.")
         else:
-            lbl_info_3.config(text="Grafico 3 manual: janela em mm com varredura ciclica.")
+            lbl_info_3.config(text=("Grafico 3 manual: janela em quantidade de strokes." if recip_stroke_axis else "Grafico 3 manual: janela em mm com varredura ciclica."))
 
     x_auto_var.trace_add("write", _refresh_state)
     x3_auto_var.trace_add("write", _refresh_state)
@@ -5454,7 +5968,7 @@ def abrir_config_x():
 
     def _apply():
         global x_auto, x_manual_min, x_auto_total_min
-        global x3_auto, x3_manual_mm, x3_auto_total_mm, aux
+        global x3_auto, x3_manual_mm, x3_manual_strokes, x3_auto_total_mm, aux
 
         if x_auto_var.get():
             x_auto = True
@@ -5493,12 +6007,15 @@ def abrir_config_x():
             except Exception:
                 messagebox.showwarning(
                     "Valor Invalido",
-                    "Distancia manual do eixo X (Grafico 3) deve ser um numero positivo em mm."
+                    ("Quantidade manual de strokes deve ser um numero positivo." if recip_stroke_axis else "Distancia manual do eixo X (Grafico 3) deve ser um numero positivo em mm.")
                 )
                 return
             x3_auto = False
-            x3_manual_mm = v3
-            log_msg(f"Eixo X G3 manual: janela={x3_manual_mm:.2f} mm.")
+            if recip_stroke_axis:
+                x3_manual_strokes = v3
+            else:
+                x3_manual_mm = v3
+            log_msg(f"Eixo X G3 manual: janela={v3:.2f} {'strokes' if recip_stroke_axis else 'mm'}.")
 
         _bump_graph_config_revision()
         try:
@@ -5883,7 +6400,7 @@ btn_salvar_recip_tol.grid(row=10, column=1, sticky="w", padx=6, pady=(2, 4))
 
 tkinter.Label(
     cfg_frame,
-    text="Faixa usada para inverter sentido; aborta se parar fora dela.",
+    text="Faixa apenas diagnostica do erro no extremo; nao antecipa a parada nem aborta.",
     anchor="w",
     justify="left"
 ).grid(row=11, column=0, columnspan=3, sticky="w", padx=6, pady=(2, 10))
@@ -5910,19 +6427,41 @@ tkinter.Label(
 
 tkinter.Label(
     cfg_frame,
-    text="Calibracao de canais",
+    text="Ciclos da correcao dinamica reciprocante",
     font=("Arial", 10, "bold")
 ).grid(row=15, column=0, sticky="w", padx=6, pady=(8, 4), columnspan=3)
 
+recip_offset_cycles_var = tkinter.StringVar(value=str(RECIP_OFFSET_CYCLES))
+entry_recip_offset_cycles = tkinter.Entry(cfg_frame, textvariable=recip_offset_cycles_var)
+entry_recip_offset_cycles.grid(row=16, column=0, sticky="ew", padx=6, pady=(2, 4))
+
+btn_salvar_recip_offset = tkinter.Button(
+    cfg_frame, text="Salvar ciclos", command=salvar_ciclos_correcao_reciprocante
+)
+btn_salvar_recip_offset.grid(row=16, column=1, sticky="w", padx=6, pady=(2, 4))
+
+tkinter.Label(
+    cfg_frame,
+    text="Ciclos validos; o programa executa 1 ciclo extra de estabilizacao. Disco a 1 RPM.",
+    anchor="w",
+    justify="left"
+).grid(row=17, column=0, columnspan=3, sticky="w", padx=6, pady=(2, 10))
+
+tkinter.Label(
+    cfg_frame,
+    text="Calibracao de canais",
+    font=("Arial", 10, "bold")
+).grid(row=18, column=0, sticky="w", padx=6, pady=(8, 4), columnspan=3)
+
 btn_cfg_canais = tkinter.Button(cfg_frame, text="Configurar canais", command=abrir_configurar_canais)
-btn_cfg_canais.grid(row=16, column=0, sticky="w", padx=6, pady=(2, 6))
+btn_cfg_canais.grid(row=19, column=0, sticky="w", padx=6, pady=(2, 6))
 
 tkinter.Label(
     cfg_frame,
     text="Recomendado: sem ensaio ativo e sem processos de aquisicao em segundo plano.",
     anchor="w",
     justify="left"
-).grid(row=17, column=0, columnspan=3, sticky="w", padx=6, pady=(2, 8))
+).grid(row=20, column=0, columnspan=3, sticky="w", padx=6, pady=(2, 8))
 
 #'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 
@@ -6116,6 +6655,8 @@ def muda_estado_reciprocante():
             lbl_header_voltas_cursos.config(text="Cursos_mot")
         if 'lbl_header_voltas_pin' in globals():
             lbl_header_voltas_pin.config(text="Cursos_pin")
+        if 'rb_g3_turn' in globals():
+            rb_g3_turn.config(text="Stroke")
     else:
         chk_reciprocante.config(selectcolor="white")
         entry_curso.config(state='disabled')
@@ -6124,6 +6665,8 @@ def muda_estado_reciprocante():
             lbl_header_voltas_cursos.config(text='Voltas_mot')
         if 'lbl_header_voltas_pin' in globals():
             lbl_header_voltas_pin.config(text='Voltas_pin')
+        if 'rb_g3_turn' in globals():
+            rb_g3_turn.config(text="Volta")
 
     if 'calcular_voltas_cursos_duracao' in globals():
         calcular_voltas_cursos_duracao()
@@ -6558,7 +7101,7 @@ rb_g3_dist = tkinter.Radiobutton(
 rb_g3_dist.pack(side="left", padx=(0, 4))
 rb_g3_turn = tkinter.Radiobutton(
     frame_toolbar,
-    text="Volta",
+    text=("Stroke" if reciprocante_var.get() else "Volta"),
     variable=graph3_mode_var,
     value="turn",
     bg="#d9d9d9",

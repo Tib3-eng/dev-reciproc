@@ -32,14 +32,14 @@ DLG4000\bin\Release\dlg_encoder_test.exe
 Identificador esperado desta versao:
 
 ```text
-2026-07-29-gain3-drivefilter-r4
+2026-08-05-10rev-fixedpath-r5
 ```
 
 Menu:
 
 ```text
 1 - Monitorar CH3 (angulo e sinal 4-20 mA)
-2 - Autocalibrar graus com Drive (4 wraps / 3 voltas)
+2 - Autocalibrar graus com Drive (11 wraps / 10 voltas)
 3 - Diagnostico nominal manual (4 transicoes)
 4 - Calibracao de corrente com referencia
 5 - Verificar comunicacao com o DLG
@@ -139,13 +139,13 @@ Sequencia:
 4. somente depois o programa envia `START` ao Drive;
 5. apos `STARTED`, descarta o backlog DLG anterior ao movimento e reancora o
    relogio da captura em pacotes atuais;
-6. detecta quatro wraps, que delimitam tres voltas completas;
+6. detecta onze wraps, que delimitam dez voltas completas;
 7. solicita `STOP` ao Drive e exige a confirmacao `STOPPED`;
 8. fecha os CSVs e executa a regressao;
 9. grava o JSON somente se todas as validacoes forem aprovadas.
 
 O primeiro trecho parcial, entre a partida e o primeiro wrap, nao entra no
-ajuste. Os intervalos entre os quatro wraps formam as tres voltas completas.
+ajuste. Os intervalos entre os onze wraps formam as dez voltas completas.
 
 O DLG trabalha por padrao a 200 Hz. A 1 RPM isso fornece aproximadamente
 12.000 amostras por volta, ou 0,03 grau nominal por amostra. O Drive registra
@@ -174,9 +174,9 @@ O processamento:
 9. divide cada volta em bins de 1 grau;
 10. exige pelo menos 8 amostras e usa a mediana raw de cada bin;
 11. exige pelo menos 320 bins validos em cada volta;
-12. ajusta uma regressao linear robusta Huber nas duas primeiras voltas;
-13. valida a terceira volta sem usa-la no treinamento;
-14. depois da aprovacao, reajusta o modelo operacional com as tres voltas.
+12. ajusta uma regressao linear robusta Huber nas sete primeiras voltas;
+13. valida as tres ultimas voltas sem usa-las no treinamento;
+14. depois da aprovacao, reajusta o modelo operacional com as dez voltas.
 
 Perdas `NULL` ou linhas com `pos_err` nao recebem copia do ultimo valor. O
 algoritmo usa os pontos validos anterior e posterior apenas quando a lacuna
@@ -192,7 +192,7 @@ filtro operacional do encoder continua sendo a mediana causal de 9 amostras.
 
 ### Criterios de aprovacao
 
-A terceira volta e avaliada de duas formas:
+As tres voltas de holdout sao avaliadas de duas formas:
 
 - medianas por bin de 1 grau;
 - todas as amostras depois da mesma mediana causal de 9 amostras usada pelo
@@ -223,8 +223,14 @@ demais em cada instante.
 
 ### Arquivos
 
-Com a saida historica `encoder_CH3_mA.json`, o nome permanece por
-compatibilidade, mas o conteudo aprovado da opcao 2 declara:
+A calibracao angular aprovada e gravada no caminho fixo:
+
+```text
+%LOCALAPPDATA%\LATRIB\calibrations\encoder_external_ch3.json
+```
+
+Os nomes historicos `encoder_CH3_mA.json` permanecem apenas como fallback de
+leitura para diagnostico. O conteudo aprovado da opcao 2 declara:
 
 ```json
 "purpose": "encoder_ch3_angle_deg",
@@ -236,12 +242,12 @@ O campo `unit`, e nao o nome do arquivo, define o tipo da calibracao.
 Artefatos:
 
 ```text
-encoder_CH3_mA.json
-encoder_CH3_mA_autocal.csv
-encoder_CH3_mA_autocal_events.log
-encoder_CH3_mA_autocal_drive\drive.csv
-encoder_CH3_mA_autocal_drive\schedule.csv
-encoder_CH3_mA_autocal_drive\a5_speed_events.log
+encoder_external_ch3.json
+encoder_external_ch3_autocal.csv
+encoder_external_ch3_autocal_events.log
+encoder_external_ch3_autocal_drive\drive.csv
+encoder_external_ch3_autocal_drive\schedule.csv
+encoder_external_ch3_autocal_drive\a5_speed_events.log
 ```
 
 O JSON registra preset do CH3, fit operacional, fit de treino, metricas do
@@ -287,6 +293,13 @@ Depois que o JSON angular foi aprovado, o monitor nao consulta o Drive. As
 perdas de `P0B-09` afetam somente a referencia temporaria usada para criar a
 calibracao; a posicao operacional vem diretamente do CH3.
 
+No supervisorio, a calibracao angular e obrigatoria antes da tara e de
+qualquer movimento. O logger aplica o preset do JSON ao CH3, converte cada
+amostra diretamente para graus e normaliza em `[0, 360)`. Nesta primeira
+integracao, a coluna final `PosEncExt` nao recebe filtro temporal, preservando
+o alinhamento original entre CH1 e CH3 no DLG. O `_I.csv` registra caminho,
+hash, fit, preset e metricas da calibracao efetivamente usada.
+
 `mA nominal` nao e uma medicao eletrica independente. Para medir a corrente
 real, use instrumento de loop apropriado.
 
@@ -328,7 +341,7 @@ captura. O replay procura automaticamente o `drive.csv` irmao:
 captura_autocal_drive\drive.csv
 ```
 
-Capturas antigas com apenas tres wraps possuem somente duas voltas completas.
+Capturas antigas com menos de onze wraps nao possuem as dez voltas completas.
 Elas podem ajudar no diagnostico externo, mas nao atendem ao holdout exigido e
 nao sao aprovadas pela metodologia nova.
 

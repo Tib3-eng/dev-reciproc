@@ -39,3 +39,5 @@ desktop.ini
 # Python cache
 **/__pycache__/
 *.pyc
+**/build_py/work/
+**/build_py/novo_tribometro/novo_tribometro/

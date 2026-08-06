@@ -18,8 +18,8 @@ Fluxo:
 
 Importante:
 - ACQDATA entrega int16_t bruto. O manual nao define uma conversao universal para mA.
-- A autocalibracao motorizada usa quatro wraps para obter tres voltas completas:
-  duas treinam um fit robusto raw->graus e a terceira e um holdout.
+- A autocalibracao motorizada usa onze wraps para obter dez voltas completas:
+  sete treinam um fit robusto raw->graus e tres formam o holdout.
 - A autocalibracao manual por extremos permanece apenas como normalizacao
   nominal 4-20 mA, nao rastreavel.
 - A autocalibracao grava CSV bruto e log textual com as decisoes do detector.
@@ -55,7 +55,7 @@ Importante:
 
 #define ENCODER_CHANNEL          3
 #define ENCODER_MODEL            "BRT25-A0M16bit-RT1-X3"
-#define ENCODER_TEST_BUILD_ID    "2026-07-29-gain3-drivefilter-r4"
+#define ENCODER_TEST_BUILD_ID    "2026-08-05-10rev-fixedpath-r5"
 #define SENSOR_CURRENT           1
 #define ENCODER_GAIN_INDEX       1
 #define ENCODER_GAIN_NOMINAL     3
@@ -84,8 +84,8 @@ Importante:
 #define MONITOR_FILTER_SAMPLES   9
 #define CALIB_CAPTURE_MS         2000
 #define AUTO_CALIB_MANUAL_TIMEOUT_MS 120000
-#define AUTO_CALIB_MOTOR_TIMEOUT_MS  300000
-#define AUTO_CALIB_TRANSITIONS   4
+#define AUTO_CALIB_MOTOR_TIMEOUT_MS  900000
+#define AUTO_CALIB_TRANSITIONS   11
 #define AUTO_CALIB_FILTER_SAMPLES 5
 #define AUTO_CALIB_PRE_SAMPLES   9
 #define AUTO_CALIB_GUARD_SAMPLES 5
@@ -113,8 +113,13 @@ Importante:
 #define AUTO_CALIB_ENDPOINT_FAR_MS 350
 #define AUTO_CALIB_ENDPOINT_TRIM_FRACTION 0.10
 #define AUTO_CALIB_ENDPOINT_MAX_SAMPLES 4096
-#define ANGULAR_COMPLETE_REVOLUTIONS \
-    (AUTO_CALIB_TRANSITIONS - 1)
+#define ANGULAR_COMPLETE_REVOLUTIONS 10
+#define ANGULAR_TRAINING_REVOLUTIONS 7
+#define ANGULAR_HOLDOUT_REVOLUTIONS  3
+#if ANGULAR_TRAINING_REVOLUTIONS + ANGULAR_HOLDOUT_REVOLUTIONS != \
+    ANGULAR_COMPLETE_REVOLUTIONS
+#error Angular training and holdout split must cover all revolutions.
+#endif
 #define ANGULAR_BIN_COUNT        360
 #define ANGULAR_EDGE_EXCLUSION_DEG 5
 #define ANGULAR_MIN_BIN_SAMPLES  8
@@ -139,6 +144,8 @@ Importante:
 #define ENCODER_FULL_SCALE_DEG    360.0
 
 #define DEFAULT_CALIB_PATH       "out\\encoder_CH3_mA.json"
+#define CANONICAL_CALIB_SUBPATH  \
+    "LATRIB\\calibrations\\encoder_external_ch3.json"
 #define MAX_PACKET_SAMPLES       720
 #define MAX_CALIB_FILE_BYTES     (1024L * 1024L)
 
@@ -1548,7 +1555,9 @@ static int test_auto_cal_detector(int reverse_direction)
     int i;
 
     auto_cal_detector_init(&detector, 200);
-    for (i = 0; i < 850; ++i) {
+    for (i = 0;
+         i < AUTO_CALIB_TRANSITIONS * 200 + 100;
+         ++i) {
         int phase = (i + 50) % 200;
         int raw = reverse_direction
             ? 15000 - phase * 60
@@ -1667,7 +1676,9 @@ static int test_auto_cal_rejects_pulse(void)
         return 0;
     }
 
-    for (i = 0; i < 850; ++i) {
+    for (i = 0;
+         i < AUTO_CALIB_TRANSITIONS * 200 + 100;
+         ++i) {
         int phase = (i + 50) % 200;
         int16_t raw = (int16_t)(3000 + phase * 60);
         int result = auto_cal_process_sample(
@@ -1706,7 +1717,9 @@ static int test_auto_cal_noisy_persistent_trace(void)
     int i;
 
     auto_cal_detector_init(&detector, 200);
-    for (i = 0; i < 650; ++i) {
+    for (i = 0;
+         i < AUTO_CALIB_TRANSITIONS * 140 + 100;
+         ++i) {
         int phase = (i + 50) % 140;
         int raw =
             -500 - phase * 25 +
@@ -1898,7 +1911,9 @@ static int test_auto_cal_tolerates_isolated_gaps(void)
         return 0;
     }
     auto_cal_detector_init(&detector, 400);
-    for (i = 0; i < 1700; ++i) {
+    for (i = 0;
+         i < AUTO_CALIB_TRANSITIONS * 400 + 100;
+         ++i) {
         int phase = (i + 100) % 400;
         int16_t raw = (int16_t)(3000 + phase * 30);
         int result;
@@ -2936,9 +2951,12 @@ static int compute_angular_fit_from_csv(
     ];
     AngularBinPoint training[
         ANGULAR_BIN_COUNT *
-        (ANGULAR_COMPLETE_REVOLUTIONS - 1)
+        ANGULAR_TRAINING_REVOLUTIONS
     ];
-    AngularBinPoint validation[ANGULAR_BIN_COUNT];
+    AngularBinPoint validation[
+        ANGULAR_BIN_COUNT *
+        ANGULAR_HOLDOUT_REVOLUTIONS
+    ];
     long long wrap_qpc[AUTO_CALIB_TRANSITIONS];
     double wrap_motor[AUTO_CALIB_TRANSITIONS];
     size_t dlg_count = 0;
@@ -3201,7 +3219,7 @@ static int compute_angular_fit_from_csv(
          revolution < point_count;
          ++revolution) {
         if (points[revolution].revolution <
-            ANGULAR_COMPLETE_REVOLUTIONS - 1) {
+            ANGULAR_TRAINING_REVOLUTIONS) {
             training[training_count++] = points[revolution];
         } else {
             validation[validation_count++] =
@@ -3212,8 +3230,10 @@ static int compute_angular_fit_from_csv(
     fit->validation_bins = validation_count;
     if (training_count <
             ANGULAR_MIN_VALID_BINS *
-                (ANGULAR_COMPLETE_REVOLUTIONS - 1) ||
-        validation_count < ANGULAR_MIN_VALID_BINS ||
+                ANGULAR_TRAINING_REVOLUTIONS ||
+        validation_count <
+            ANGULAR_MIN_VALID_BINS *
+                ANGULAR_HOLDOUT_REVOLUTIONS ||
         !robust_angular_linear_fit(
             training,
             training_count,
@@ -3318,8 +3338,10 @@ static int compute_angular_fit_from_csv(
                 filter_next = 0;
                 previous_detector_index = -1;
             }
-            if (revolution !=
-                    ANGULAR_COMPLETE_REVOLUTIONS - 1 ||
+            if (revolution <
+                    ANGULAR_TRAINING_REVOLUTIONS ||
+                revolution >=
+                    ANGULAR_COMPLETE_REVOLUTIONS ||
                 dlg[i].detector_index <
                     detector->transition_indices[revolution]) {
                 continue;
@@ -3646,7 +3668,7 @@ static int run_auto_cal_replay(
     } else if (loss_acceptable && !reversed) {
         fprintf(
             stderr,
-            "REPLAY falhou: sao necessarios quatro wraps, "
+            "REPLAY falhou: sao necessarios onze wraps, "
             "drive.csv correspondente e dados sincronizados validos.\n"
         );
     }
@@ -3672,8 +3694,19 @@ static int run_auto_cal_replay(
     return finalized;
 }
 
+static int build_canonical_calibration_path(
+    char *path,
+    size_t path_size);
+
 static void print_usage(const char *program)
 {
+    char canonical_path[MAX_PATH];
+    const char *default_path =
+        build_canonical_calibration_path(
+            canonical_path,
+            sizeof(canonical_path))
+            ? canonical_path
+            : DEFAULT_CALIB_PATH;
     printf(
         "Uso:\n"
         "  %s                    Abre o menu interativo.\n"
@@ -3707,15 +3740,45 @@ static void print_usage(const char *program)
         program,
         program,
         program,
-        DEFAULT_CALIB_PATH,
+        default_path,
         DEFAULT_DLG_IP,
         (unsigned)DEFAULT_DLG_PORT,
         (unsigned)DEFAULT_LOCAL_PORT
     );
 }
 
+static int build_canonical_calibration_path(
+    char *path,
+    size_t path_size)
+{
+    char *local_appdata = NULL;
+    size_t local_appdata_length = 0;
+    int written;
+
+    if (!path || path_size == 0 ||
+        _dupenv_s(
+            &local_appdata,
+            &local_appdata_length,
+            "LOCALAPPDATA") != 0 ||
+        !local_appdata || !*local_appdata) {
+        free(local_appdata);
+        return 0;
+    }
+    written = _snprintf_s(
+        path,
+        path_size,
+        _TRUNCATE,
+        "%s\\%s",
+        local_appdata,
+        CANONICAL_CALIB_SUBPATH
+    );
+    free(local_appdata);
+    return written > 0 && written < (int)path_size;
+}
+
 static int parse_args(int argc, char **argv, AppConfig *config)
 {
+    static char canonical_calib_path[MAX_PATH];
     int i;
 
     memset(config, 0, sizeof(*config));
@@ -3734,7 +3797,12 @@ static int parse_args(int argc, char **argv, AppConfig *config)
     config->drive_direction = 1;
     config->encoder_target_rpm = DEFAULT_ENCODER_RPM;
     config->mechanical_ratio = DEFAULT_MECHANICAL_RATIO;
-    config->calib_out_path = DEFAULT_CALIB_PATH;
+    config->calib_out_path =
+        build_canonical_calibration_path(
+            canonical_calib_path,
+            sizeof(canonical_calib_path))
+            ? canonical_calib_path
+            : DEFAULT_CALIB_PATH;
 
     for (i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -4321,7 +4389,21 @@ static int load_auto_calibration(Calibration *calibration)
     };
     char executable_dir[MAX_PATH];
     char executable_paths[2][MAX_PATH];
+    char canonical_path[MAX_PATH];
     size_t i;
+
+    if (build_canonical_calibration_path(
+            canonical_path,
+            sizeof(canonical_path))) {
+        int result = load_calibration_file(
+            canonical_path,
+            1,
+            calibration
+        );
+        if (result != 0) {
+            return result;
+        }
+    }
 
     for (i = 0; i < sizeof(relative_paths) / sizeof(relative_paths[0]); ++i) {
         int result = load_calibration_file(
@@ -5505,6 +5587,7 @@ static int write_angular_calibration_file(
 {
     FILE *file = NULL;
     char temporary_path[MAX_PATH];
+    SYSTEMTIME calibrated_at_utc;
     double loss_fraction =
         received_samples > 0 || lost_packets > 0
             ? (double)lost_packets /
@@ -5524,7 +5607,25 @@ static int write_angular_calibration_file(
         return 0;
     }
 
+    GetSystemTime(&calibrated_at_utc);
     fprintf(file, "{\n");
+    fprintf(file, "  \"schema_version\": 1,\n");
+    fprintf(
+        file,
+        "  \"generator_build\": \"%s\",\n",
+        ENCODER_TEST_BUILD_ID
+    );
+    fprintf(
+        file,
+        "  \"calibrated_at_utc\": "
+        "\"%04u-%02u-%02uT%02u:%02u:%02uZ\",\n",
+        (unsigned)calibrated_at_utc.wYear,
+        (unsigned)calibrated_at_utc.wMonth,
+        (unsigned)calibrated_at_utc.wDay,
+        (unsigned)calibrated_at_utc.wHour,
+        (unsigned)calibrated_at_utc.wMinute,
+        (unsigned)calibrated_at_utc.wSecond
+    );
     fprintf(file, "  \"purpose\": \"encoder_ch3_angle_deg\",\n");
     fprintf(file, "  \"unit\": \"deg\",\n");
     fprintf(file, "  \"encoder_model\": \"%s\",\n", ENCODER_MODEL);
@@ -5716,8 +5817,16 @@ static int write_angular_calibration_file(
         "    \"complete_revolutions\": %d,\n",
         ANGULAR_COMPLETE_REVOLUTIONS
     );
-    fprintf(file, "    \"training_revolutions\": 2,\n");
-    fprintf(file, "    \"holdout_revolutions\": 1,\n");
+    fprintf(
+        file,
+        "    \"training_revolutions\": %d,\n",
+        ANGULAR_TRAINING_REVOLUTIONS
+    );
+    fprintf(
+        file,
+        "    \"holdout_revolutions\": %d,\n",
+        ANGULAR_HOLDOUT_REVOLUTIONS
+    );
     fprintf(file, "    \"bin_width_deg\": 1.0,\n");
     fprintf(
         file,
@@ -7281,12 +7390,14 @@ static int prompt_auto_calibration_start(
             "--------------------------------------\n"
             "Serao detectados %d wraps para delimitar %d voltas "
             "completas.\n"
-            "Duas voltas treinam a regressao raw->graus; a terceira "
-            "valida a precisao.\n"
+            "%d voltas treinam a regressao raw->graus; %d voltas "
+            "validam a precisao.\n"
             "O JSON anterior so sera substituido se todos os limites "
             "forem aprovados.\n\n",
             AUTO_CALIB_TRANSITIONS,
-            ANGULAR_COMPLETE_REVOLUTIONS
+            ANGULAR_COMPLETE_REVOLUTIONS,
+            ANGULAR_TRAINING_REVOLUTIONS,
+            ANGULAR_HOLDOUT_REVOLUTIONS
         );
     } else {
         printf(
@@ -8780,10 +8891,11 @@ cleanup:
             fprintf(
                 stderr,
                 "Falha: nao foi possivel correlacionar os CSVs "
-                "do DLG e do Drive. Verifique quatro wraps, P0B-09, "
+                "do DLG e do Drive. Verifique os %d wraps, P0B-09, "
                 "pos_mod e gaps de comunicacao. Leituras ausentes "
                 "curtas sao toleradas; lacunas acima de %.1f s nao "
                 "sao preenchidas.\n",
+                AUTO_CALIB_TRANSITIONS,
                 ANGULAR_MAX_DRIVE_GAP_S
             );
             auto_cal_log_line(
@@ -9611,8 +9723,11 @@ static int test_angular_fit_pipeline(int reverse_direction)
         !angular_fit_passes_quality(&fit) ||
         fit.drive_position_modulus != position_modulus ||
         fit.training_bins <
-            2 * ANGULAR_MIN_VALID_BINS ||
-        fit.validation_bins < ANGULAR_MIN_VALID_BINS ||
+            ANGULAR_TRAINING_REVOLUTIONS *
+                ANGULAR_MIN_VALID_BINS ||
+        fit.validation_bins <
+            ANGULAR_HOLDOUT_REVOLUTIONS *
+                ANGULAR_MIN_VALID_BINS ||
         auto_cal_abs(
             fit.slope_deg_per_count - 0.02
         ) > 0.0005 ||
@@ -10634,8 +10749,6 @@ static void init_menu_state(
     MenuState *state,
     const AppConfig *defaults)
 {
-    char executable_dir[MAX_PATH];
-
     memset(state, 0, sizeof(*state));
     state->config = *defaults;
     state->config.relation_loaded =
@@ -10660,34 +10773,14 @@ static void init_menu_state(
     } else {
         state->config.calib_path = NULL;
     }
-    if ((!defaults->calib_out_path ||
-         strcmp(defaults->calib_out_path, DEFAULT_CALIB_PATH) == 0) &&
-        get_executable_dir(executable_dir, sizeof(executable_dir))) {
-        int written = _snprintf_s(
-            state->calib_out_path,
-            sizeof(state->calib_out_path),
-            _TRUNCATE,
-            "%s\\out\\encoder_CH3_mA.json",
-            executable_dir
-        );
-        if (written < 0 ||
-            written >= (int)sizeof(state->calib_out_path)) {
-            strcpy_s(
-                state->calib_out_path,
-                sizeof(state->calib_out_path),
-                DEFAULT_CALIB_PATH
-            );
-        }
-    } else {
-        strncpy_s(
-            state->calib_out_path,
-            sizeof(state->calib_out_path),
-            defaults->calib_out_path
-                ? defaults->calib_out_path
-                : DEFAULT_CALIB_PATH,
-            _TRUNCATE
-        );
-    }
+    strncpy_s(
+        state->calib_out_path,
+        sizeof(state->calib_out_path),
+        defaults->calib_out_path
+            ? defaults->calib_out_path
+            : DEFAULT_CALIB_PATH,
+        _TRUNCATE
+    );
     state->config.calib_out_path = state->calib_out_path;
 }
 
@@ -10752,7 +10845,7 @@ static void print_menu_header(const MenuState *state)
     printf(
         "------------------------------------------------------------\n"
         " 1 - Monitorar CH3 (angulo e sinal 4-20 mA)\n"
-        " 2 - Autocalibrar graus com Drive (4 wraps / 3 voltas)\n"
+        " 2 - Autocalibrar graus com Drive (11 wraps / 10 voltas)\n"
         " 3 - Diagnostico nominal manual (4 transicoes)\n"
         " 4 - Calibracao de corrente com referencia\n"
         " 5 - Verificar comunicacao com o DLG\n"
@@ -11128,6 +11221,8 @@ static int run_interactive_menu(const AppConfig *defaults)
                    choice == 3 ||
                    choice == 4) {
             Calibration written;
+            AppConfig action_config = state.config;
+            char canonical_path[MAX_PATH];
             int action_result;
             int action =
                 choice == 2
@@ -11136,19 +11231,29 @@ static int run_interactive_menu(const AppConfig *defaults)
                         ? ACTION_AUTO_CALIBRATE_MANUAL
                         : ACTION_REFERENCE_CALIBRATE;
 
+            if (choice != 2 &&
+                build_canonical_calibration_path(
+                    canonical_path,
+                    sizeof(canonical_path)) &&
+                _stricmp(
+                    state.config.calib_out_path,
+                    canonical_path) == 0) {
+                action_config.calib_out_path = DEFAULT_CALIB_PATH;
+            }
+
             action_result = run_hardware_action(
-                &state.config,
+                &action_config,
                 action
             );
             if (action_result == 0 &&
                 load_calibration_file(
-                    state.config.calib_out_path,
+                    action_config.calib_out_path,
                     1,
                     &written) == 1) {
                 strcpy_s(
                     state.calib_path,
                     sizeof(state.calib_path),
-                    state.config.calib_out_path
+                    action_config.calib_out_path
                 );
                 state.config.calib_path = state.calib_path;
                 printf(
@@ -11216,6 +11321,15 @@ int main(int argc, char **argv)
             config.sample_rate_hz,
             config.mechanical_ratio
         ) ? 0 : 1;
+    }
+    if (config.calibrate) {
+        char canonical_path[MAX_PATH];
+        if (build_canonical_calibration_path(
+                canonical_path,
+                sizeof(canonical_path)) &&
+            _stricmp(config.calib_out_path, canonical_path) == 0) {
+            config.calib_out_path = DEFAULT_CALIB_PATH;
+        }
     }
     action_result = run_hardware_action(
         &config,
