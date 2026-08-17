@@ -10,9 +10,17 @@ add_executable(DLGlogger src/DLGlogger.c)
 target_compile_definitions(DLGlogger PRIVATE WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
 target_link_libraries(DLGlogger PRIVATE ws2_32)
 
-add_executable(dlg_logger_ipc src/dlg_logger_ipc.c)
+add_executable(dlg_logger_ipc
+  src/dlg_logger_ipc.c
+  ../EncoderCore/src/encoder_state.c
+  ../EncoderCore/src/encoder_control_protocol.c
+)
+target_include_directories(dlg_logger_ipc PRIVATE ../EncoderCore/include)
 target_compile_definitions(dlg_logger_ipc PRIVATE WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
-target_link_libraries(dlg_logger_ipc PRIVATE ws2_32)
+target_link_libraries(dlg_logger_ipc PRIVATE ws2_32 winmm)
+if (MSVC)
+  target_compile_options(dlg_logger_ipc PRIVATE /W4)
+endif()
 
 add_executable(dlg_encoder_test src/dlg_encoder_test.c)
 target_compile_definitions(dlg_encoder_test PRIVATE WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)

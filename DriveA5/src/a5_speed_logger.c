@@ -46,12 +46,15 @@ Resumo de funcoes:
 #include <errno.h>
 #include <share.h>
 #include <stdarg.h>
+#include <math.h>
 
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <windows.h>
 
 #include <modbus.h>
+#include "encoder_control_protocol.h"
+#include "recip_encoder_controller.h"
 
 enum {
     REG_CTRL    = 12544,  // 12545-1 : RUN/RDY
@@ -66,6 +69,8 @@ enum {
     REG_P0B_07  = 0x0B07, // P0B-07 (abs pos, 32-bit) - historical naming
     REG_P0B_09  = 0x0B09, // P0B-09 (pos per revolution, 0..65535)
     REG_P0B_00  = 0x0B00, // P0B-00 (actual motor speed, rpm)
+    REG_P0B_33  = 0x0B21, // P0B-33 (fault selector/history index)
+    REG_P0B_34  = 0x0B22, // P0B-34 (fault code selected by P0B-33)
     REG_P05_02  = 0x0502, // P05-02 (command units per revolution)
     REG_P0C_26  = 0x0C26  // word order
 };
@@ -78,9 +83,11 @@ static const uint16_t WORD_RDY = 0x0000;
 #define FAST_RESP_US 3000
 #define FAST_BYTE_US 2000
 #define RAMP_TIME_S 3.0
-#define ENCODER_CAL_PREFLIGHT_READS 3
-#define ENCODER_CAL_PREFLIGHT_ATTEMPTS 30
+#define DRIVE_PREFLIGHT_READS 3
+#define DRIVE_PREFLIGHT_ATTEMPTS 30
 #define ENCODER_CAL_POSITION_LOSS_S 2.0
+#define RECIP_ENCODER_REVERSE_DELAY_S 0.020
+#define RECIP_ENCODER_ORIGIN_TIMEOUT_S 3.0
 
 typedef struct {
     int rpm;
@@ -135,6 +142,18 @@ typedef struct {
 
 static int recip_target_reached(const recip_state_t *r, int64_t pos, int64_t target);
 static int recip_stroke_limit_reached(const recip_state_t *r, int64_t pos);
+
+static int encoder_control_link_is_stale(
+    int64_t now_qpc,
+    int64_t last_packet_qpc,
+    int64_t qpc_frequency,
+    double timeout_s
+){
+    if(now_qpc <= 0 || last_packet_qpc <= 0 || qpc_frequency <= 0 || timeout_s <= 0.0){
+        return 1;
+    }
+    return (double)(now_qpc - last_packet_qpc) / (double)qpc_frequency > timeout_s;
+}
 
 static FILE *g_ev = NULL;
 static volatile LONG g_console_stop_requested = 0;
@@ -222,6 +241,445 @@ static void ev_logf(const char *fmt, ...){
     va_end(ap);
     fputc('\n', g_ev);
     fflush(g_ev);
+}
+
+typedef struct {
+    int requested;
+    int action_enabled;
+    int active;
+    int wsa_started;
+    uint16_t port;
+    uint64_t session_id;
+    double tolerance_mm;
+    double course_mm;
+    double total_mm;
+    double stroke_timeout_s;
+    int stop_compensation_enabled;
+    double stop_model_slope_s;
+    double stop_margin_mm;
+    double stop_velocity_window_s;
+    double stop_max_course_fraction;
+    int forward_sign;
+    int forward_sign_configured;
+    SOCKET socket_handle;
+    encoder_control_packet_t origin_packet;
+    int have_origin;
+    uint64_t prestart_last_sequence;
+    recip_encoder_controller_t controller;
+    int controller_started;
+    int fault_logged;
+    int complete_logged;
+    int action_pending;
+    recip_encoder_decision_t pending_decision;
+    uint64_t pending_sequence;
+    int64_t pending_packet_qpc;
+    int pending_idx;
+    uint64_t packets_received;
+    uint64_t packets_valid;
+    uint64_t packets_rejected;
+    uint64_t sequence_gaps;
+    uint64_t latency_count;
+    double latency_sum_ms;
+    double latency_max_ms;
+    uint64_t latency_over_20ms;
+    uint64_t latency_over_50ms;
+    uint64_t latency_over_100ms;
+    uint64_t reverse_events;
+    uint64_t stop_compensation_clamped_events;
+    uint64_t physical_reversals;
+    uint64_t endpoint_count;
+    double endpoint_abs_error_sum_mm;
+    double endpoint_abs_error_max_mm;
+    int have_physical_extreme;
+    double last_physical_extreme_mm;
+    uint64_t physical_course_count;
+    double physical_course_sum_mm;
+    double physical_course_min_mm;
+    double physical_course_max_mm;
+} recip_shadow_t;
+
+static void recip_shadow_reset_motion(recip_shadow_t *shadow){
+    uint64_t discarded = 0;
+    if(!shadow || !shadow->requested) return;
+    if(shadow->socket_handle != INVALID_SOCKET){
+        char buffer[sizeof(encoder_control_packet_t)];
+        while(recvfrom(shadow->socket_handle, buffer, sizeof(buffer), 0,
+                       NULL, NULL) >= 0){
+            discarded++;
+        }
+    }
+    shadow->have_origin = 0;
+    shadow->prestart_last_sequence = 0u;
+    memset(&shadow->controller, 0, sizeof(shadow->controller));
+    shadow->controller_started = 0;
+    shadow->fault_logged = 0;
+    shadow->complete_logged = 0;
+    shadow->action_pending = 0;
+    shadow->pending_sequence = 0u;
+    shadow->pending_packet_qpc = 0;
+    shadow->pending_idx = -1;
+    shadow->have_physical_extreme = 0;
+    ev_logf("RECIP_SHADOW_RESET reason=pause_or_start discarded=%llu",
+            (unsigned long long)discarded);
+}
+
+static int recip_shadow_open(recip_shadow_t *shadow){
+    WSADATA wsa;
+    struct sockaddr_in address;
+    u_long nonblocking = 1;
+    if(!shadow || !shadow->requested) return 0;
+    shadow->socket_handle = INVALID_SOCKET;
+    if(WSAStartup(MAKEWORD(2, 2), &wsa) != 0){
+        ev_logf("RECIP_SHADOW_DISABLED reason=WSAStartup error=%d", WSAGetLastError());
+        return 0;
+    }
+    shadow->wsa_started = 1;
+    shadow->socket_handle = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if(shadow->socket_handle == INVALID_SOCKET){
+        ev_logf("RECIP_SHADOW_DISABLED reason=socket error=%d", WSAGetLastError());
+        WSACleanup();
+        shadow->wsa_started = 0;
+        return 0;
+    }
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons(shadow->port);
+    if(bind(shadow->socket_handle, (const struct sockaddr *)&address, sizeof(address)) != 0 ||
+       ioctlsocket(shadow->socket_handle, FIONBIO, &nonblocking) != 0){
+        ev_logf("RECIP_SHADOW_DISABLED reason=bind_or_nonblocking port=%u error=%d",
+                (unsigned)shadow->port, WSAGetLastError());
+        closesocket(shadow->socket_handle);
+        shadow->socket_handle = INVALID_SOCKET;
+        WSACleanup();
+        shadow->wsa_started = 0;
+        return 0;
+    }
+    shadow->active = 1;
+    recip_shadow_reset_motion(shadow);
+    ev_logf("RECIP_SHADOW_READY host=127.0.0.1 port=%u session=%llu tol_mm=%.6f course_mm=%.6f total_mm=%.6f stroke_timeout_s=%.6f forward_sign=%d sign_source=%s stop_compensation=%d stop_model_slope_s=%.9f stop_margin_mm=%.9f stop_velocity_window_s=%.6f stop_max_course_fraction=%.6f action_enabled=%d",
+            (unsigned)shadow->port, (unsigned long long)shadow->session_id,
+            shadow->tolerance_mm, shadow->course_mm, shadow->total_mm,
+            shadow->stroke_timeout_s, shadow->forward_sign,
+            shadow->forward_sign_configured ? "DYNAMIC_CORRECTION" : "LEARN_ON_MOVE",
+            shadow->stop_compensation_enabled, shadow->stop_model_slope_s,
+            shadow->stop_margin_mm, shadow->stop_velocity_window_s,
+            shadow->stop_max_course_fraction, shadow->action_enabled);
+    return 1;
+}
+
+static void recip_shadow_log_decision(
+    recip_shadow_t *shadow,
+    const recip_encoder_decision_t *decision,
+    int idx,
+    uint64_t sequence,
+    int64_t packet_qpc,
+    double observation_latency_ms
+){
+    if(!shadow || !decision) return;
+    if((decision->events & RECIP_ENCODER_EVENT_PHYSICAL_REVERSAL) != 0u){
+        if(shadow->have_physical_extreme){
+            double physical_course = fabs(
+                decision->physical_extreme_mm - shadow->last_physical_extreme_mm);
+            shadow->physical_course_count++;
+            shadow->physical_course_sum_mm += physical_course;
+            if(shadow->physical_course_count == 1u ||
+               physical_course < shadow->physical_course_min_mm){
+                shadow->physical_course_min_mm = physical_course;
+            }
+            if(physical_course > shadow->physical_course_max_mm){
+                shadow->physical_course_max_mm = physical_course;
+            }
+        }
+        shadow->last_physical_extreme_mm = decision->physical_extreme_mm;
+        shadow->have_physical_extreme = 1;
+        shadow->physical_reversals++;
+        {
+            double endpoint_abs_error = fabs(decision->endpoint_error_mm);
+            shadow->endpoint_count++;
+            shadow->endpoint_abs_error_sum_mm += endpoint_abs_error;
+            if(endpoint_abs_error > shadow->endpoint_abs_error_max_mm){
+                shadow->endpoint_abs_error_max_mm = endpoint_abs_error;
+            }
+        }
+        ev_logf("RECIP_SHADOW_PHYSICAL_REVERSAL idx=%d seq=%llu qpc=%lld stroke=%llu completed_direction=%d new_direction=%d extreme_mm=%.9f physical_target_mm=%.9f endpoint_error_mm=%.9f trigger_mm=%.9f anticipation_mm=%.9f velocity_estimate_mm_s=%.9f anticipation_clamped=%d observation_latency_ms=%.6f action_enabled=%d",
+                idx, (unsigned long long)sequence, (long long)packet_qpc,
+                (unsigned long long)decision->completed_strokes,
+                -decision->command_direction, decision->command_direction,
+                decision->physical_extreme_mm,
+                decision->physical_target_mm, decision->endpoint_error_mm,
+                decision->trigger_position_mm,
+                decision->stopping_anticipation_mm,
+                decision->velocity_estimate_mm_s,
+                decision->stopping_anticipation_clamped,
+                observation_latency_ms, shadow->action_enabled);
+    }
+    if(decision->action == RECIP_ENCODER_ACTION_REVERSE){
+        shadow->reverse_events++;
+        if(decision->stopping_anticipation_clamped){
+            shadow->stop_compensation_clamped_events++;
+        }
+        ev_logf("RECIP_SHADOW_REVERSE idx=%d seq=%llu qpc=%lld stroke=%llu new_direction=%d position_mm=%.9f next_target_mm=%.9f physical_target_mm=%.9f trigger_mm=%.9f anticipation_mm=%.9f velocity_estimate_mm_s=%.9f anticipation_clamped=%d path_mm=%.9f trigger_error_mm=%.9f observation_latency_ms=%.6f outside_tol=%d action_enabled=%d",
+                idx, (unsigned long long)sequence, (long long)packet_qpc,
+                (unsigned long long)decision->completed_strokes,
+                decision->command_direction, decision->position_mm,
+                decision->target_mm, decision->physical_target_mm,
+                decision->trigger_position_mm,
+                decision->stopping_anticipation_mm,
+                decision->velocity_estimate_mm_s,
+                decision->stopping_anticipation_clamped,
+                decision->path_progress_mm,
+                decision->endpoint_error_mm, observation_latency_ms,
+                (decision->events & RECIP_ENCODER_EVENT_OUTSIDE_TOLERANCE) != 0u,
+                shadow->action_enabled);
+        if(shadow->action_enabled && !shadow->action_pending){
+            shadow->pending_decision = *decision;
+            shadow->pending_sequence = sequence;
+            shadow->pending_packet_qpc = packet_qpc;
+            shadow->pending_idx = idx;
+            shadow->action_pending = 1;
+        }
+    }else if(decision->action == RECIP_ENCODER_ACTION_COMPLETE && !shadow->complete_logged){
+        shadow->complete_logged = 1;
+        if(decision->stopping_anticipation_clamped){
+            shadow->stop_compensation_clamped_events++;
+        }
+        ev_logf("RECIP_SHADOW_COMPLETE idx=%d seq=%llu qpc=%lld strokes=%llu position_mm=%.9f physical_target_mm=%.9f trigger_mm=%.9f anticipation_mm=%.9f velocity_estimate_mm_s=%.9f anticipation_clamped=%d path_mm=%.9f trigger_error_mm=%.9f observation_latency_ms=%.6f action_enabled=%d",
+                idx, (unsigned long long)sequence, (long long)packet_qpc,
+                (unsigned long long)decision->completed_strokes,
+                decision->position_mm, decision->physical_target_mm,
+                decision->trigger_position_mm,
+                decision->stopping_anticipation_mm,
+                decision->velocity_estimate_mm_s,
+                decision->stopping_anticipation_clamped,
+                decision->path_progress_mm,
+                decision->endpoint_error_mm, observation_latency_ms,
+                shadow->action_enabled);
+        if(shadow->action_enabled && !shadow->action_pending){
+            shadow->pending_decision = *decision;
+            shadow->pending_sequence = sequence;
+            shadow->pending_packet_qpc = packet_qpc;
+            shadow->pending_idx = idx;
+            shadow->action_pending = 1;
+        }
+    }else if(decision->action == RECIP_ENCODER_ACTION_FAULT && !shadow->fault_logged){
+        shadow->fault_logged = 1;
+        ev_logf("RECIP_SHADOW_FAULT idx=%d seq=%llu qpc=%lld fault=%s position_mm=%.9f target_mm=%.9f path_mm=%.9f observation_latency_ms=%.6f action_enabled=%d",
+                idx, (unsigned long long)sequence, (long long)packet_qpc,
+                recip_encoder_fault_name(decision->fault),
+                decision->position_mm, decision->target_mm,
+                decision->path_progress_mm, observation_latency_ms,
+                shadow->action_enabled);
+        if(shadow->action_enabled && !shadow->action_pending){
+            shadow->pending_decision = *decision;
+            shadow->pending_sequence = sequence;
+            shadow->pending_packet_qpc = packet_qpc;
+            shadow->pending_idx = idx;
+            shadow->action_pending = 1;
+        }
+    }
+}
+
+static void recip_shadow_drain(
+    recip_shadow_t *shadow,
+    int64_t now_qpc,
+    int64_t qpc_frequency,
+    int idx
+){
+    if(!shadow || !shadow->active) return;
+    for(;;){
+        encoder_control_packet_t packet;
+        struct sockaddr_in source;
+        int source_size = (int)sizeof(source);
+        int received = recvfrom(
+            shadow->socket_handle, (char *)&packet, sizeof(packet), 0,
+            (struct sockaddr *)&source, &source_size);
+        uint64_t previous_sequence;
+        encoder_control_packet_result_t validation;
+        if(received < 0){
+            int error = WSAGetLastError();
+            if(error != WSAEWOULDBLOCK){
+                shadow->packets_rejected++;
+                ev_logf("RECIP_SHADOW_RECV_ERROR idx=%d error=%d", idx, error);
+            }
+            break;
+        }
+        shadow->packets_received++;
+        if(source.sin_addr.s_addr != htonl(INADDR_LOOPBACK)){
+            shadow->packets_rejected++;
+            continue;
+        }
+        previous_sequence = shadow->prestart_last_sequence;
+        validation = encoder_control_packet_validate(
+            &packet, (size_t)received, shadow->session_id, previous_sequence);
+        if(validation != ENCODER_CONTROL_PACKET_OK){
+            shadow->packets_rejected++;
+            continue;
+        }
+        shadow->packets_valid++;
+        if(previous_sequence != 0u && packet.sequence > previous_sequence + 1u){
+            shadow->sequence_gaps += packet.sequence - previous_sequence - 1u;
+        }
+        shadow->prestart_last_sequence = packet.sequence;
+        if(now_qpc >= packet.qpc && qpc_frequency > 0){
+            double latency_ms = 1000.0 * (double)(now_qpc - packet.qpc) /
+                                (double)qpc_frequency;
+            shadow->latency_sum_ms += latency_ms;
+            shadow->latency_count++;
+            if(latency_ms > shadow->latency_max_ms) shadow->latency_max_ms = latency_ms;
+            if(latency_ms > 20.0) shadow->latency_over_20ms++;
+            if(latency_ms > 50.0) shadow->latency_over_50ms++;
+            if(latency_ms > 100.0) shadow->latency_over_100ms++;
+        }
+        if(!shadow->have_origin &&
+           (packet.flags & ENCODER_CONTROL_FLAG_ACCEPTED) != 0u &&
+           (packet.flags & ENCODER_CONTROL_FLAG_INITIALIZED) != 0u &&
+           packet.health == (uint32_t)ENCODER_HEALTH_OK){
+            shadow->origin_packet = packet;
+            shadow->have_origin = 1;
+            shadow->last_physical_extreme_mm = packet.relative_mm;
+            shadow->have_physical_extreme = 1;
+            ev_logf("RECIP_SHADOW_ORIGIN idx=%d seq=%llu qpc=%lld position_mm=%.9f path_mm=%.9f",
+                    idx, (unsigned long long)packet.sequence,
+                    (long long)packet.qpc, packet.relative_mm,
+                    packet.path_distance_mm);
+        }
+        if(!shadow->controller_started && shadow->have_origin &&
+           (packet.flags & ENCODER_CONTROL_FLAG_ACCEPTED) != 0u &&
+           (shadow->forward_sign != 0 ||
+            (packet.sequence > shadow->origin_packet.sequence &&
+             fabs(packet.relative_mm - shadow->origin_packet.relative_mm) >= 0.5))){
+            recip_encoder_config_t config;
+            recip_encoder_decision_t decision;
+            int learned_now = 0;
+            if(shadow->forward_sign == 0){
+                shadow->forward_sign =
+                    packet.relative_mm >= shadow->origin_packet.relative_mm ? 1 : -1;
+                learned_now = 1;
+            }
+            recip_encoder_config_default(&config);
+            config.session_id = shadow->session_id;
+            config.course_mm = shadow->course_mm;
+            config.total_mm = shadow->total_mm;
+            config.tolerance_mm = shadow->tolerance_mm;
+            config.encoder_timeout_s = 3.0;
+            config.stroke_timeout_s = shadow->stroke_timeout_s;
+            config.initial_direction = shadow->forward_sign;
+            config.stop_anticipation_enabled = shadow->stop_compensation_enabled;
+            config.stop_model_slope_s = shadow->stop_model_slope_s;
+            config.stop_margin_mm = shadow->stop_margin_mm;
+            config.stop_velocity_window_s = shadow->stop_velocity_window_s;
+            config.stop_max_course_fraction = shadow->stop_max_course_fraction;
+            if(recip_encoder_controller_start(
+                   &shadow->controller, &config, qpc_frequency,
+                   &shadow->origin_packet, &decision)){
+                shadow->controller_started = 1;
+                ev_logf("RECIP_SHADOW_INIT idx=%d origin_seq=%llu first_motion_seq=%llu encoder_forward_sign=%d sign_source=%s home_mm=%.9f target_mm=%.9f filter=causal_median filter_samples=%d target_band_mm=%.6f reversal_hysteresis_mm=%.6f path_method=completed_strokes stop_compensation=%d stop_model=linear_speed stop_model_slope_s=%.9f stop_margin_mm=%.9f stop_velocity_estimator=causal_ols stop_velocity_window_s=%.6f stop_max_course_fraction=%.6f action_enabled=%d",
+                        idx,
+                        (unsigned long long)shadow->origin_packet.sequence,
+                        (unsigned long long)packet.sequence,
+                        shadow->forward_sign,
+                        learned_now ? "LEARNED_NET_DISPLACEMENT" :
+                        shadow->forward_sign_configured ? "DYNAMIC_CORRECTION" :
+                        "PREVIOUSLY_LEARNED",
+                        shadow->controller.home_mm, shadow->controller.target_mm,
+                        config.position_filter_samples, config.target_band_mm,
+                        config.reversal_hysteresis_mm,
+                        config.stop_anticipation_enabled,
+                        config.stop_model_slope_s, config.stop_margin_mm,
+                        config.stop_velocity_window_s,
+                        config.stop_max_course_fraction,
+                        shadow->action_enabled);
+            }
+        }
+        if(shadow->controller_started &&
+           packet.sequence > shadow->controller.last_sequence){
+            recip_encoder_decision_t decision;
+            double observation_latency_ms = 0.0;
+            if(now_qpc >= packet.qpc && qpc_frequency > 0){
+                observation_latency_ms = 1000.0 * (double)(now_qpc - packet.qpc) /
+                                         (double)qpc_frequency;
+            }
+            (void)recip_encoder_controller_update(
+                &shadow->controller, &packet, sizeof(packet), &decision);
+            recip_shadow_log_decision(
+                shadow, &decision, idx, packet.sequence, packet.qpc,
+                observation_latency_ms);
+        }
+    }
+    if(shadow->controller_started && !shadow->controller.faulted &&
+       !shadow->controller.complete){
+        recip_encoder_decision_t decision;
+        (void)recip_encoder_controller_tick(
+            &shadow->controller, now_qpc, &decision);
+        recip_shadow_log_decision(
+            shadow, &decision, idx, shadow->controller.last_sequence,
+            shadow->controller.last_packet_qpc,
+            qpc_frequency > 0
+                ? 1000.0 * (double)(now_qpc - shadow->controller.last_packet_qpc) /
+                  (double)qpc_frequency
+                : 0.0);
+    }
+}
+
+static int recip_shadow_take_pending(
+    recip_shadow_t *shadow,
+    recip_encoder_decision_t *decision,
+    uint64_t *sequence,
+    int64_t *packet_qpc,
+    int *idx
+){
+    if(!shadow || !decision || !shadow->action_pending) return 0;
+    *decision = shadow->pending_decision;
+    if(sequence) *sequence = shadow->pending_sequence;
+    if(packet_qpc) *packet_qpc = shadow->pending_packet_qpc;
+    if(idx) *idx = shadow->pending_idx;
+    shadow->action_pending = 0;
+    return 1;
+}
+
+static void recip_shadow_close(recip_shadow_t *shadow){
+    double mean_latency_ms;
+    double endpoint_abs_error_mean_mm;
+    double physical_course_mean_mm;
+    if(!shadow || !shadow->requested) return;
+    mean_latency_ms = shadow->latency_count
+        ? shadow->latency_sum_ms / (double)shadow->latency_count : 0.0;
+    endpoint_abs_error_mean_mm = shadow->endpoint_count
+        ? shadow->endpoint_abs_error_sum_mm / (double)shadow->endpoint_count : 0.0;
+    physical_course_mean_mm = shadow->physical_course_count
+        ? shadow->physical_course_sum_mm / (double)shadow->physical_course_count : 0.0;
+    ev_logf("RECIP_SHADOW_END active=%d session=%llu received=%llu valid=%llu rejected=%llu sequence_gaps=%llu latency_count=%llu latency_mean_ms=%.6f latency_max_ms=%.6f latency_over_20ms=%llu latency_over_50ms=%llu latency_over_100ms=%llu controller_started=%d forward_sign=%d reverse_events=%llu stop_compensation=%d stop_compensation_clamped_events=%llu physical_reversals=%llu endpoint_count=%llu endpoint_abs_error_mean_mm=%.6f endpoint_abs_error_max_mm=%.6f physical_course_count=%llu physical_course_mean_mm=%.6f physical_course_min_mm=%.6f physical_course_max_mm=%.6f complete=%d fault=%s action_enabled=%d",
+            shadow->active, (unsigned long long)shadow->session_id,
+            (unsigned long long)shadow->packets_received,
+            (unsigned long long)shadow->packets_valid,
+            (unsigned long long)shadow->packets_rejected,
+            (unsigned long long)shadow->sequence_gaps,
+            (unsigned long long)shadow->latency_count,
+            mean_latency_ms, shadow->latency_max_ms,
+            (unsigned long long)shadow->latency_over_20ms,
+            (unsigned long long)shadow->latency_over_50ms,
+            (unsigned long long)shadow->latency_over_100ms,
+            shadow->controller_started, shadow->forward_sign,
+            (unsigned long long)shadow->reverse_events,
+            shadow->stop_compensation_enabled,
+            (unsigned long long)shadow->stop_compensation_clamped_events,
+            (unsigned long long)shadow->physical_reversals,
+            (unsigned long long)shadow->endpoint_count,
+            endpoint_abs_error_mean_mm, shadow->endpoint_abs_error_max_mm,
+            (unsigned long long)shadow->physical_course_count,
+            physical_course_mean_mm, shadow->physical_course_min_mm,
+            shadow->physical_course_max_mm,
+            shadow->controller.complete,
+            recip_encoder_fault_name(shadow->controller.fault),
+            shadow->action_enabled);
+    if(shadow->socket_handle != INVALID_SOCKET){
+        closesocket(shadow->socket_handle);
+        shadow->socket_handle = INVALID_SOCKET;
+    }
+    if(shadow->wsa_started) WSACleanup();
+    shadow->wsa_started = 0;
+    shadow->active = 0;
 }
 
 /*
@@ -797,6 +1255,43 @@ typedef enum {
     IPC_CMD_START = 4
 } ipc_cmd_t;
 
+typedef enum {
+    RECIP_ORIGIN_WAIT_STOPPED = -1,
+    RECIP_ORIGIN_WAIT_TIMEOUT = 0,
+    RECIP_ORIGIN_WAIT_READY = 1
+} recip_origin_wait_result_t;
+
+static ipc_cmd_t ipc_poll_command(int use_ipc, int stop_on_pipe_failure);
+static recip_origin_wait_result_t recip_shadow_wait_for_origin(
+    recip_shadow_t *shadow,
+    int use_ipc,
+    int64_t qpc_frequency,
+    double timeout_s
+);
+
+typedef struct {
+    SOCKET socket_handle;
+    struct sockaddr_in target;
+    encoder_control_packet_t packet;
+    DWORD delay_ms;
+} delayed_encoder_packet_t;
+
+static DWORD WINAPI delayed_encoder_packet_sender(LPVOID parameter){
+    delayed_encoder_packet_t *delayed = (delayed_encoder_packet_t *)parameter;
+    int sent;
+    if(!delayed) return 0;
+    Sleep(delayed->delay_ms);
+    sent = sendto(
+        delayed->socket_handle,
+        (const char *)&delayed->packet,
+        sizeof(delayed->packet),
+        0,
+        (const struct sockaddr *)&delayed->target,
+        sizeof(delayed->target)
+    );
+    return sent == (int)sizeof(delayed->packet) ? 1u : 0u;
+}
+
 static ipc_cmd_t ipc_take_pending_command(
     char *pending,
     size_t *pending_len
@@ -913,6 +1408,181 @@ static int run_internal_self_test(void){
 }
 
 /*
+Funcao: validate_drive_fault_status
+Objetivo: Confirma que os registradores de diagnostico do Drive respondem e
+          que nao ha codigo de falha ativo antes de liberar READY.
+Retorno: 0 quando as duas leituras passam e P0B-34 e zero; -1 caso contrario.
+*/
+static int validate_drive_fault_status(modbus_t *ctx){
+    uint16_t selector = 0;
+    uint16_t fault_code = 0;
+    int selector_mode = 0;
+    int fault_mode = 0;
+    int selector_ok;
+    int fault_ok;
+
+    selector_ok = read_u16_cached_retry(
+        ctx, REG_P0B_33, &selector, &selector_mode, 3, 30) == 0;
+    fault_ok = read_u16_cached_retry(
+        ctx, REG_P0B_34, &fault_code, &fault_mode, 3, 30) == 0;
+    ev_logf(
+        "DRIVE_FAULT_STATUS selector_ok=%d selector=%u fault_ok=%d "
+        "fault_code=%u selector_fc=%d fault_fc=%d",
+        selector_ok, (unsigned)selector, fault_ok, (unsigned)fault_code,
+        selector_mode, fault_mode
+    );
+    if(!selector_ok || !fault_ok) return -1;
+    if(fault_code != 0u) return -1;
+    return 0;
+}
+
+static int run_encoder_control_link_self_test(void){
+    const uint64_t session_id = 0x123456789ABCDEF0ull;
+    WSADATA wsa;
+    SOCKET receiver = INVALID_SOCKET;
+    SOCKET sender = INVALID_SOCKET;
+    struct sockaddr_in address;
+    int address_size = (int)sizeof(address);
+    DWORD timeout_ms = 500;
+    encoder_state_output_t output;
+    encoder_control_packet_t sent_packet;
+    encoder_control_packet_t received_packet;
+    recip_encoder_config_t recip_config;
+    recip_encoder_controller_t recip_controller;
+    recip_encoder_decision_t recip_decision;
+    int received_size;
+    LARGE_INTEGER frequency;
+    LARGE_INTEGER before;
+    LARGE_INTEGER after;
+    double latency_us;
+    HANDLE delayed_thread = NULL;
+    DWORD delayed_thread_result = 0;
+    u_long nonblocking = 1;
+    delayed_encoder_packet_t delayed_packet;
+    recip_shadow_t delayed_shadow;
+    recip_origin_wait_result_t origin_wait;
+    double origin_wait_ms;
+    int ok = 0;
+
+    if(WSAStartup(MAKEWORD(2, 2), &wsa) != 0){
+        puts("SELF-TEST ENCODER LINK FALHOU: WSAStartup.");
+        return 0;
+    }
+    receiver = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    sender = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if(receiver == INVALID_SOCKET || sender == INVALID_SOCKET) goto cleanup;
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = 0;
+    if(bind(receiver, (const struct sockaddr *)&address, sizeof(address)) != 0) goto cleanup;
+    if(getsockname(receiver, (struct sockaddr *)&address, &address_size) != 0) goto cleanup;
+    if(setsockopt(receiver, SOL_SOCKET, SO_RCVTIMEO,
+                  (const char *)&timeout_ms, sizeof(timeout_ms)) != 0) goto cleanup;
+
+    memset(&output, 0, sizeof(output));
+    output.accepted = 1;
+    output.initialized = 1;
+    output.relative_mm = 9.5;
+    output.path_distance_mm = 12.0;
+    output.speed_mm_s = 5.0;
+    output.extreme_relative_mm = 10.0;
+    output.accepted_age_s = 0.005;
+    output.direction = ENCODER_DIRECTION_FORWARD;
+    output.health = ENCODER_HEALTH_OK;
+    output.sample_status = ENCODER_SAMPLE_ACCEPTED;
+    if(!encoder_control_packet_build(
+           &sent_packet, session_id, 1u, 1000, &output)) goto cleanup;
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&before);
+    if(sendto(sender, (const char *)&sent_packet, sizeof(sent_packet), 0,
+              (const struct sockaddr *)&address, sizeof(address)) != sizeof(sent_packet)){
+        goto cleanup;
+    }
+    received_size = recvfrom(receiver, (char *)&received_packet,
+                             sizeof(received_packet), 0, NULL, NULL);
+    QueryPerformanceCounter(&after);
+    if(received_size != sizeof(received_packet)) goto cleanup;
+    latency_us = 1000000.0 * (double)(after.QuadPart - before.QuadPart) /
+                 (double)frequency.QuadPart;
+    if(encoder_control_packet_validate(
+           &received_packet, (size_t)received_size, session_id, 0u) !=
+       ENCODER_CONTROL_PACKET_OK) goto cleanup;
+    if(encoder_control_packet_validate(
+           &received_packet, (size_t)received_size, session_id + 1u, 0u) !=
+       ENCODER_CONTROL_PACKET_BAD_SESSION) goto cleanup;
+    if(encoder_control_packet_validate(
+           &received_packet, (size_t)received_size, session_id, 1u) !=
+       ENCODER_CONTROL_PACKET_OLD_SEQUENCE) goto cleanup;
+    if(!encoder_control_link_is_stale(1201, 1000, 1000, 0.100) ||
+       encoder_control_link_is_stale(1050, 1000, 1000, 0.100)) goto cleanup;
+    recip_encoder_config_default(&recip_config);
+    recip_config.session_id = session_id;
+    recip_config.course_mm = 10.0;
+    recip_config.total_mm = 30.0;
+    if(!recip_encoder_controller_start(
+           &recip_controller, &recip_config, 1000,
+           &received_packet, &recip_decision)) goto cleanup;
+    output.relative_mm = 19.5;
+    output.path_distance_mm = 22.0;
+    output.direction = ENCODER_DIRECTION_FORWARD;
+    if(!encoder_control_packet_build(
+           &sent_packet, session_id, 2u, 2000, &output)) goto cleanup;
+    if(recip_encoder_controller_update(
+           &recip_controller, &sent_packet, sizeof(sent_packet),
+           &recip_decision) != RECIP_ENCODER_ACTION_REVERSE ||
+       recip_decision.command_direction != -1) goto cleanup;
+
+    /* Reproduz a janela real: DATA_OK chega antes do primeiro pacote UDP. */
+    if(ioctlsocket(receiver, FIONBIO, &nonblocking) != 0) goto cleanup;
+    memset(&delayed_shadow, 0, sizeof(delayed_shadow));
+    delayed_shadow.active = 1;
+    delayed_shadow.socket_handle = receiver;
+    delayed_shadow.session_id = session_id;
+    output.relative_mm = 2.5;
+    output.path_distance_mm = 2.5;
+    if(!encoder_control_packet_build(
+           &delayed_packet.packet, session_id, 3u,
+           qpc_now_ticks(), &output)) goto cleanup;
+    delayed_packet.socket_handle = sender;
+    delayed_packet.target = address;
+    delayed_packet.delay_ms = 50;
+    delayed_thread = CreateThread(
+        NULL, 0, delayed_encoder_packet_sender, &delayed_packet, 0, NULL);
+    if(!delayed_thread) goto cleanup;
+    QueryPerformanceCounter(&before);
+    origin_wait = recip_shadow_wait_for_origin(
+        &delayed_shadow, 0, frequency.QuadPart, 0.500);
+    QueryPerformanceCounter(&after);
+    origin_wait_ms = 1000.0 * (double)(after.QuadPart - before.QuadPart) /
+                     (double)frequency.QuadPart;
+    if(WaitForSingleObject(delayed_thread, 1000) != WAIT_OBJECT_0) goto cleanup;
+    if(!GetExitCodeThread(delayed_thread, &delayed_thread_result)) goto cleanup;
+    CloseHandle(delayed_thread);
+    delayed_thread = NULL;
+    if(origin_wait != RECIP_ORIGIN_WAIT_READY ||
+       !delayed_shadow.have_origin ||
+       delayed_shadow.origin_packet.sequence != 3u ||
+       delayed_thread_result != 1u ||
+       origin_wait_ms < 20.0 || origin_wait_ms >= 500.0) goto cleanup;
+
+    printf("SELF-TEST ENCODER LINK OK: udp_loopback latency_us=%.3f session=OK sequence=OK stale=OK state_machine=OK delayed_origin_wait_ms=%.3f\n",
+           latency_us, origin_wait_ms);
+    ok = 1;
+
+cleanup:
+    if(!ok) printf("SELF-TEST ENCODER LINK FALHOU: WSA=%d\n", WSAGetLastError());
+    if(delayed_thread){
+        (void)WaitForSingleObject(delayed_thread, 1000);
+        CloseHandle(delayed_thread);
+    }
+    if(sender != INVALID_SOCKET) closesocket(sender);
+    if(receiver != INVALID_SOCKET) closesocket(receiver);
+    WSACleanup();
+    return ok;
+}
+
+/*
 Funcao: ipc_poll_command
 Objetivo: Executa responsabilidade especifica dentro do modulo.
 Quando usar: Chamada pelo fluxo interno deste arquivo.
@@ -979,6 +1649,81 @@ static ipc_cmd_t ipc_poll_command(
         pending,
         &pending_len
     );
+}
+
+/*
+Funcao: recip_shadow_wait_for_origin
+Objetivo: Mantem o Drive parado enquanto aguarda o primeiro pacote causal
+          valido do encoder externo. Evita reprovar a partida no intervalo
+          entre DATA_OK do DLG e a primeira publicacao UDP.
+Retorno: READY com origem valida, STOPPED por comando do operador ou TIMEOUT.
+*/
+static recip_origin_wait_result_t recip_shadow_wait_for_origin(
+    recip_shadow_t *shadow,
+    int use_ipc,
+    int64_t qpc_frequency,
+    double timeout_s
+){
+    int64_t wait_start;
+    int64_t timeout_ticks;
+
+    if(!shadow || !shadow->active || qpc_frequency <= 0 || timeout_s <= 0.0){
+        return RECIP_ORIGIN_WAIT_TIMEOUT;
+    }
+
+    wait_start = qpc_now_ticks();
+    timeout_ticks = (int64_t)(timeout_s * (double)qpc_frequency + 0.5);
+    ev_logf(
+        "RECIP_ENCODER_ORIGIN_WAIT timeout_s=%.3f motor_stopped=1",
+        timeout_s
+    );
+
+    for(;;){
+        int64_t now = qpc_now_ticks();
+        ipc_cmd_t command;
+
+        recip_shadow_drain(shadow, now, qpc_frequency, -1);
+        if(shadow->have_origin){
+            double wait_ms = 1000.0 * (double)(now - wait_start) /
+                             (double)qpc_frequency;
+            ev_logf(
+                "RECIP_ENCODER_ORIGIN_READY wait_ms=%.3f seq=%llu "
+                "position_mm=%.9f received=%llu valid=%llu rejected=%llu",
+                wait_ms,
+                (unsigned long long)shadow->origin_packet.sequence,
+                shadow->origin_packet.relative_mm,
+                (unsigned long long)shadow->packets_received,
+                (unsigned long long)shadow->packets_valid,
+                (unsigned long long)shadow->packets_rejected
+            );
+            return RECIP_ORIGIN_WAIT_READY;
+        }
+
+        command = ipc_poll_command(use_ipc, 0);
+        if(command == IPC_CMD_STOP || command == IPC_CMD_PAUSE){
+            ev_logf(
+                "RECIP_ENCODER_ORIGIN_WAIT_CANCELLED command=%s "
+                "wait_ms=%.3f motor_stopped=1",
+                command == IPC_CMD_STOP ? "STOP" : "PAUSE",
+                1000.0 * (double)(now - wait_start) /
+                    (double)qpc_frequency
+            );
+            return RECIP_ORIGIN_WAIT_STOPPED;
+        }
+
+        if(now - wait_start >= timeout_ticks){
+            ev_logf(
+                "RECIP_ENCODER_ORIGIN_TIMEOUT timeout_s=%.3f "
+                "received=%llu valid=%llu rejected=%llu motor_stopped=1",
+                timeout_s,
+                (unsigned long long)shadow->packets_received,
+                (unsigned long long)shadow->packets_valid,
+                (unsigned long long)shadow->packets_rejected
+            );
+            return RECIP_ORIGIN_WAIT_TIMEOUT;
+        }
+        Sleep(1);
+    }
 }
 /*
 Funcao: qpc_freq_ticks
@@ -1232,11 +1977,23 @@ static void print_usage(void){
     puts("  a5_speed_logger --port COM4 --out <csv> --schedule <csv>");
     puts("                 [--rate <hz>] [--duration <s>] [--slave <id>]");
     puts("                 [--baud <n>] [--parity N|E|O] [--ipc] [--setup]");
-    puts("                 [--encoder-calibration]");
+    puts("                 [--strict-setup] [--encoder-calibration]");
     puts("                 [--reciprocating --recip-course-mm <mm> --recip-total-mm <mm>]");
     puts("                 [--recip-radius-mm <mm> --recip-ratio <i> --recip-tol-counts <n>]");
+    puts("                 [--recip-encoder-shadow --recip-shadow-port <n>]");
+    puts("                 [--recip-shadow-session <id> --recip-shadow-tol-mm <mm>]");
+    puts("                 [--recip-shadow-total-mm <mm> --recip-shadow-stroke-timeout-s <s>]");
+    puts("                 [--recip-shadow-forward-sign -1|0|1]");
+    puts("                 [--recip-shadow-stop-compensation]");
+    puts("                 [--recip-shadow-stop-slope-s <s> --recip-shadow-stop-margin-mm <mm>]");
+    puts("                 [--recip-shadow-stop-velocity-window-s <s>]");
+    puts("                 [--recip-shadow-stop-max-course-fraction <0..1>]");
+    puts("                 [--recip-encoder-control] [--command-only]");
     puts("  --encoder-calibration exige --ipc e coleta somente P0B-09.");
+    puts("  --strict-setup exige --setup e bloqueia READY sem readback, parada,");
+    puts("                 status sem falha e 3 leituras validas de P0B-09.");
     puts("  --self-test valida o parser IPC sem acessar hardware.");
+    puts("  --self-test-encoder-link valida UDP local/sessao/sequencia/stale sem hardware.");
 }
 
 /*
@@ -1260,10 +2017,20 @@ int main(int argc, char **argv){
     double duration_s = 0.0;
     int use_ipc = 0;
     int do_setup = 0;
+    int strict_setup = 0;
     int encoder_calibration = 0;
+    int command_only = 0;
     int self_test = 0;
+    int self_test_encoder_link = 0;
     recip_state_t recip = {0};
+    recip_shadow_t recip_shadow = {0};
     recip.relacao = 1.0;
+    recip_shadow.socket_handle = INVALID_SOCKET;
+    recip_shadow.tolerance_mm = 0.5;
+    recip_shadow.stop_model_slope_s = 0.0;
+    recip_shadow.stop_margin_mm = 0.0;
+    recip_shadow.stop_velocity_window_s = 0.25;
+    recip_shadow.stop_max_course_fraction = 0.45;
 
     for(int i = 1; i < argc; ++i){
         if(strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0){
@@ -1272,6 +2039,10 @@ int main(int argc, char **argv){
         }
         if(strcmp(argv[i], "--self-test") == 0){
             self_test = 1;
+            continue;
+        }
+        if(strcmp(argv[i], "--self-test-encoder-link") == 0){
+            self_test_encoder_link = 1;
             continue;
         }
         if(strcmp(argv[i], "--port") == 0 && i + 1 < argc){ port = argv[++i]; continue; }
@@ -1284,6 +2055,7 @@ int main(int argc, char **argv){
         if(strcmp(argv[i], "--parity") == 0 && i + 1 < argc){ parity = (char)toupper((unsigned char)argv[++i][0]); continue; }
         if(strcmp(argv[i], "--ipc") == 0){ use_ipc = 1; continue; }
         if(strcmp(argv[i], "--setup") == 0){ do_setup = 1; continue; }
+        if(strcmp(argv[i], "--strict-setup") == 0){ strict_setup = 1; continue; }
         if(strcmp(argv[i], "--encoder-calibration") == 0){ encoder_calibration = 1; continue; }
         if(strcmp(argv[i], "--reciprocating") == 0){ recip.enabled = 1; continue; }
         if(strcmp(argv[i], "--recip-course-mm") == 0 && i + 1 < argc){ recip.course_mm = atof(argv[++i]); continue; }
@@ -1291,11 +2063,57 @@ int main(int argc, char **argv){
         if(strcmp(argv[i], "--recip-radius-mm") == 0 && i + 1 < argc){ recip.raio_mm = atof(argv[++i]); continue; }
         if(strcmp(argv[i], "--recip-ratio") == 0 && i + 1 < argc){ recip.relacao = atof(argv[++i]); continue; }
         if(strcmp(argv[i], "--recip-tol-counts") == 0 && i + 1 < argc){ recip.tol_counts = atoi(argv[++i]); continue; }
+        if(strcmp(argv[i], "--command-only") == 0){ command_only = 1; continue; }
+        if(strcmp(argv[i], "--recip-encoder-shadow") == 0){
+            recip_shadow.requested = 1;
+            recip_shadow.action_enabled = 0;
+            continue;
+        }
+        if(strcmp(argv[i], "--recip-encoder-control") == 0){
+            recip_shadow.requested = 1;
+            recip_shadow.action_enabled = 1;
+            command_only = 1;
+            strict_setup = 1;
+            continue;
+        }
+        if(strcmp(argv[i], "--recip-shadow-port") == 0 && i + 1 < argc){ recip_shadow.port = (uint16_t)atoi(argv[++i]); continue; }
+        if(strcmp(argv[i], "--recip-shadow-session") == 0 && i + 1 < argc){ recip_shadow.session_id = (uint64_t)_strtoui64(argv[++i], NULL, 10); continue; }
+        if(strcmp(argv[i], "--recip-shadow-tol-mm") == 0 && i + 1 < argc){ recip_shadow.tolerance_mm = atof(argv[++i]); continue; }
+        if(strcmp(argv[i], "--recip-shadow-total-mm") == 0 && i + 1 < argc){ recip_shadow.total_mm = atof(argv[++i]); continue; }
+        if(strcmp(argv[i], "--recip-shadow-stroke-timeout-s") == 0 && i + 1 < argc){ recip_shadow.stroke_timeout_s = atof(argv[++i]); continue; }
+        if(strcmp(argv[i], "--recip-shadow-forward-sign") == 0 && i + 1 < argc){
+            recip_shadow.forward_sign = atoi(argv[++i]);
+            recip_shadow.forward_sign_configured = recip_shadow.forward_sign != 0;
+            continue;
+        }
+        if(strcmp(argv[i], "--recip-shadow-stop-compensation") == 0){
+            recip_shadow.stop_compensation_enabled = 1;
+            continue;
+        }
+        if(strcmp(argv[i], "--recip-shadow-stop-slope-s") == 0 && i + 1 < argc){
+            recip_shadow.stop_model_slope_s = atof(argv[++i]);
+            continue;
+        }
+        if(strcmp(argv[i], "--recip-shadow-stop-margin-mm") == 0 && i + 1 < argc){
+            recip_shadow.stop_margin_mm = atof(argv[++i]);
+            continue;
+        }
+        if(strcmp(argv[i], "--recip-shadow-stop-velocity-window-s") == 0 && i + 1 < argc){
+            recip_shadow.stop_velocity_window_s = atof(argv[++i]);
+            continue;
+        }
+        if(strcmp(argv[i], "--recip-shadow-stop-max-course-fraction") == 0 && i + 1 < argc){
+            recip_shadow.stop_max_course_fraction = atof(argv[++i]);
+            continue;
+        }
         print_usage();
         return 1;
     }
     if(self_test){
         return run_internal_self_test() ? 0 : 1;
+    }
+    if(self_test_encoder_link){
+        return run_encoder_control_link_self_test() ? 0 : 1;
     }
     if(!out_path || !sched_path){
         print_usage();
@@ -1317,15 +2135,27 @@ int main(int argc, char **argv){
         fprintf(stderr, "--encoder-calibration nao pode ser combinado com --reciprocating.\n");
         return 1;
     }
-    if(encoder_calibration &&
+    if(strict_setup && !do_setup){
+        fprintf(stderr, "--strict-setup exige --setup.\n");
+        return 1;
+    }
+    if(recip_shadow.requested && !recip.enabled){
+        fprintf(stderr, "Controle/observacao do encoder exige --reciprocating.\n");
+        return 1;
+    }
+    if(command_only && encoder_calibration){
+        fprintf(stderr, "--command-only nao pode ser combinado com --encoder-calibration.\n");
+        return 1;
+    }
+    if((encoder_calibration || strict_setup) &&
        !SetConsoleCtrlHandler(console_ctrl_handler, TRUE)){
         fprintf(stderr, "Falha instalando handler de Ctrl+C.\n");
         return 1;
     }
     ev_open_for_out(out_path);
-    ev_logf("START port=%s out=%s schedule=%s rate=%.3f duration=%.3f slave=%d baud=%d parity=%c ipc=%d setup=%d encoder_calibration=%d",
+    ev_logf("START port=%s out=%s schedule=%s rate=%.3f duration=%.3f slave=%d baud=%d parity=%c ipc=%d setup=%d strict_setup=%d encoder_calibration=%d command_only=%d",
             port, out_path, sched_path, rate_hz, duration_s, slave, baud, parity, use_ipc, do_setup,
-            encoder_calibration);
+            strict_setup, encoder_calibration, command_only);
     if(encoder_calibration){
         ev_logf(
             "ENCODER_QPC_MODE valid_position=modbus_read_midpoint "
@@ -1342,6 +2172,51 @@ int main(int argc, char **argv){
             ev_close();
             return 1;
         }
+    }
+    if(recip_shadow.requested){
+        recip_shadow.course_mm = recip.course_mm;
+        if(recip_shadow.total_mm <= 0.0) recip_shadow.total_mm = recip.total_mm;
+        if(recip_shadow.port == 0u || recip_shadow.session_id == 0u ||
+           recip_shadow.course_mm <= 0.0 || recip_shadow.total_mm <= 0.0 ||
+           recip_shadow.tolerance_mm < 0.0 || recip_shadow.stroke_timeout_s <= 0.0){
+            fprintf(stderr, "Parametros do modo sombra reciprocante invalidos.\n");
+            ev_logf("ERROR invalid reciprocating shadow parameters.");
+            ev_close();
+            return 1;
+        }
+        if(recip_shadow.forward_sign < -1 || recip_shadow.forward_sign > 1){
+            fprintf(stderr, "Sentido preaprendido do encoder deve ser -1, 0 ou 1.\n");
+            ev_logf("ERROR invalid reciprocating shadow forward sign.");
+            ev_close();
+            return 1;
+        }
+        if((recip_shadow.stop_compensation_enabled != 0 &&
+            recip_shadow.stop_compensation_enabled != 1) ||
+           !isfinite(recip_shadow.stop_model_slope_s) ||
+           recip_shadow.stop_model_slope_s < 0.0 ||
+           !isfinite(recip_shadow.stop_margin_mm) ||
+           recip_shadow.stop_margin_mm < 0.0 ||
+           !isfinite(recip_shadow.stop_velocity_window_s) ||
+           recip_shadow.stop_velocity_window_s <= 0.0 ||
+           !isfinite(recip_shadow.stop_max_course_fraction) ||
+           recip_shadow.stop_max_course_fraction <= 0.0 ||
+           recip_shadow.stop_max_course_fraction >= 1.0){
+            fprintf(stderr, "Parametros de antecipacao de parada invalidos.\n");
+            ev_logf("ERROR invalid reciprocating shadow stop compensation parameters.");
+            ev_close();
+            return 1;
+        }
+        ev_logf("RECIP_SHADOW_CONFIG port=%u session=%llu tol_mm=%.6f course_mm=%.6f total_mm=%.6f stroke_timeout_s=%.6f stop_compensation=%d stop_model_slope_s=%.9f stop_margin_mm=%.9f stop_velocity_window_s=%.6f stop_max_course_fraction=%.6f action_enabled=%d",
+                (unsigned)recip_shadow.port,
+                (unsigned long long)recip_shadow.session_id,
+                recip_shadow.tolerance_mm, recip_shadow.course_mm,
+                recip_shadow.total_mm, recip_shadow.stroke_timeout_s,
+                recip_shadow.stop_compensation_enabled,
+                recip_shadow.stop_model_slope_s,
+                recip_shadow.stop_margin_mm,
+                recip_shadow.stop_velocity_window_s,
+                recip_shadow.stop_max_course_fraction,
+                recip_shadow.action_enabled);
     }
 
     seg_t *segs = NULL;
@@ -1371,7 +2246,11 @@ int main(int argc, char **argv){
     }
     /* Desabilita buffering para consumo em tempo real por UI/agregador. */
     setvbuf(f, NULL, _IONBF, 0);
-    fprintf(f, "idx,t_qpc,t_s,pos,rpm,pos_err,rpm_err,pos_mod\n");
+    if(command_only){
+        fprintf(f, "idx,t_qpc,t_s,cmd_rpm,cmd_err\n");
+    }else{
+        fprintf(f, "idx,t_qpc,t_s,pos,rpm,pos_err,rpm_err,pos_mod\n");
+    }
     fflush(f);
 
     char port_path[64];
@@ -1407,23 +2286,23 @@ int main(int argc, char **argv){
         int post_setup_stop_ok = 1;
 
         ev_logf("Applying setup_speed_mode.");
-        if(encoder_calibration){
+        if(encoder_calibration || strict_setup){
             pre_setup_stop_ok =
                 stop_drive_now(ctx, &setup_stop_rpm, 0);
             ev_logf(
-                "ENCODER_SETUP_PRE_STOP confirmed=%d.",
+                "STRICT_SETUP_PRE_STOP confirmed=%d.",
                 pre_setup_stop_ok
             );
         }
         setup_result =
             pre_setup_stop_ok
-                ? setup_speed_mode(ctx, encoder_calibration)
+                ? setup_speed_mode(ctx, encoder_calibration || strict_setup)
                 : -1;
-        if(encoder_calibration){
+        if(encoder_calibration || strict_setup){
             post_setup_stop_ok =
                 stop_drive_now(ctx, &setup_stop_rpm, 0);
             ev_logf(
-                "ENCODER_SETUP_POST_STOP confirmed=%d.",
+                "STRICT_SETUP_POST_STOP confirmed=%d.",
                 post_setup_stop_ok
             );
         }
@@ -1432,7 +2311,7 @@ int main(int argc, char **argv){
            !post_setup_stop_ok){
             fprintf(
                 stderr,
-                encoder_calibration
+                (encoder_calibration || strict_setup)
                     ? "Falha configurando/confirmando o modo de "
                       "velocidade; READY nao sera emitido.\n"
                     : "Aviso: uma ou mais escritas do setup falharam.\n"
@@ -1443,9 +2322,9 @@ int main(int argc, char **argv){
                 setup_result,
                 pre_setup_stop_ok,
                 post_setup_stop_ok,
-                encoder_calibration
+                encoder_calibration || strict_setup
             );
-            if(encoder_calibration){
+            if(encoder_calibration || strict_setup){
                 modbus_close(ctx);
                 modbus_free(ctx);
                 fclose(f);
@@ -1456,10 +2335,11 @@ int main(int argc, char **argv){
         }
     }
 
-    /* Read word order once (used only if we ever need 32-bit regs) */
+    /* Telemetria e escala so existem nos modos legados/de calibracao. */
     uint16_t order = 1;
     int p0c26_mode = 0;
-    if(read_u16_cached_retry(ctx, REG_P0C_26, &order, &p0c26_mode, 3, 20) != 0){
+    if(!command_only &&
+       read_u16_cached_retry(ctx, REG_P0C_26, &order, &p0c26_mode, 3, 20) != 0){
         order = 1;
     }
     int low_first = (order != 0);
@@ -1467,8 +2347,12 @@ int main(int argc, char **argv){
     /* Read command units per revolution (P05-02) once for scaling. */
     uint16_t cmd_units_per_rev = 0;
     int p0502_mode = 0;
-    if(read_u16_cached_retry(ctx, REG_P05_02, &cmd_units_per_rev, &p0502_mode, 5, 20) != 0){
+    if(!command_only &&
+       read_u16_cached_retry(ctx, REG_P05_02, &cmd_units_per_rev, &p0502_mode, 5, 20) != 0){
         cmd_units_per_rev = 0;
+    }
+    if(command_only){
+        ev_logf("DRIVE_PERIODIC_TELEMETRY_DISABLED source=external_encoder command_only=1");
     }
 
     int p0b09_mode = 0;
@@ -1476,7 +2360,7 @@ int main(int argc, char **argv){
     int encoder_stopped_emitted = 0;
     encoder_drive_status_t encoder_status = {0};
 
-    if(encoder_calibration){
+    if(encoder_calibration || strict_setup){
         int preflight_stop_rpm = 0;
         int preflight_stop_ok;
         int valid_reads = 0;
@@ -1494,7 +2378,7 @@ int main(int argc, char **argv){
                 0
             );
         ev_logf(
-            "ENCODER_PREFLIGHT_STOP confirmed=%d before READY.",
+            "DRIVE_PREFLIGHT_STOP confirmed=%d before READY.",
             preflight_stop_ok
         );
         if(!preflight_stop_ok){
@@ -1514,19 +2398,24 @@ int main(int argc, char **argv){
             ev_close();
             return 2;
         }
-        set_timeouts_us(ctx, FAST_RESP_US, FAST_BYTE_US);
-        while(valid_reads < ENCODER_CAL_PREFLIGHT_READS &&
-              attempts < ENCODER_CAL_PREFLIGHT_ATTEMPTS &&
-              !console_stop_requested()){
-            attempts++;
-            if(read_p0b09_cached(ctx, &preflight_pos, &p0b09_mode) == 0){
-                valid_reads++;
-            }else{
-                valid_reads = 0;
+        if(command_only){
+            valid_reads = DRIVE_PREFLIGHT_READS;
+            ev_logf("DRIVE_PREFLIGHT_POSITION_SKIPPED command_only=1 source=external_encoder");
+        }else{
+            set_timeouts_us(ctx, FAST_RESP_US, FAST_BYTE_US);
+            while(valid_reads < DRIVE_PREFLIGHT_READS &&
+                  attempts < DRIVE_PREFLIGHT_ATTEMPTS &&
+                  !console_stop_requested()){
+                attempts++;
+                if(read_p0b09_cached(ctx, &preflight_pos, &p0b09_mode) == 0){
+                    valid_reads++;
+                }else{
+                    valid_reads = 0;
+                }
+                if(valid_reads < DRIVE_PREFLIGHT_READS) Sleep(20);
             }
-            if(valid_reads < ENCODER_CAL_PREFLIGHT_READS) Sleep(20);
         }
-        if(valid_reads < ENCODER_CAL_PREFLIGHT_READS){
+        if(!command_only && valid_reads < DRIVE_PREFLIGHT_READS){
             int stopped_rpm = 0;
             int stop_ok;
             int cancelled = console_stop_requested();
@@ -1539,7 +2428,7 @@ int main(int argc, char **argv){
             ev_logf(
                 "ERROR ENCODER_PREFLIGHT valid=%d required=%d attempts=%d cancelled=%d",
                 valid_reads,
-                ENCODER_CAL_PREFLIGHT_READS,
+                DRIVE_PREFLIGHT_READS,
                 attempts,
                 cancelled
             );
@@ -1557,17 +2446,57 @@ int main(int argc, char **argv){
             ev_close();
             return cancelled && stop_ok ? 0 : 2;
         }
-        ev_logf(
-            "ENCODER_PREFLIGHT_OK reads=%d attempts=%d last_pos=%u",
-            valid_reads,
-            attempts,
-            (unsigned)preflight_pos
-        );
-        encoder_status_accept_position(
-            &encoder_status,
-            preflight_pos,
-            qpc_now_ticks()
-        );
+        if(!command_only){
+            ev_logf(
+                "DRIVE_PREFLIGHT_POSITION_OK reads=%d attempts=%d last_pos=%u",
+                valid_reads,
+                attempts,
+                (unsigned)preflight_pos
+            );
+        }
+        if(validate_drive_fault_status(ctx) != 0){
+            int stopped_rpm = 0;
+            int stop_ok = stop_drive_now(ctx, &stopped_rpm, 0);
+            fprintf(
+                stderr,
+                "Falha: status do Drive indisponivel ou P0B-34 indica falha; "
+                "READY nao sera emitido.\n"
+            );
+            ev_logf("ERROR DRIVE_PREFLIGHT_FAULT_STATUS stop_confirmed=%d", stop_ok);
+            emit_encoder_stopped(
+                encoder_calibration,
+                stop_ok,
+                &encoder_stopped_emitted
+            );
+            modbus_close(ctx);
+            modbus_free(ctx);
+            fclose(f);
+            free(segs);
+            ev_close();
+            return 2;
+        }
+        ev_logf("DRIVE_PREFLIGHT_OK strict_setup=%d encoder_calibration=%d", strict_setup, encoder_calibration);
+        if(!command_only){
+            encoder_status_accept_position(
+                &encoder_status,
+                preflight_pos,
+                qpc_now_ticks()
+            );
+        }
+    }
+
+    if(recip_shadow.requested && !recip_shadow_open(&recip_shadow)){
+        if(recip_shadow.action_enabled){
+            fprintf(stderr, "Falha abrindo o canal local do encoder externo.\n");
+            ev_logf("FATAL RECIP_ENCODER_CONTROL receiver_unavailable action_enabled=1");
+            modbus_close(ctx);
+            modbus_free(ctx);
+            fclose(f);
+            free(segs);
+            ev_close();
+            return 2;
+        }
+        ev_logf("RECIP_SHADOW_CONTINUE_LEGACY reason=receiver_unavailable action_enabled=0");
     }
 
     if(use_ipc){
@@ -1614,6 +2543,21 @@ int main(int argc, char **argv){
                 return 1;
             }
             trim(line);
+            if(_stricmp(line, "STOP") == 0){
+                int stopped_rpm = 0;
+                int stop_ok = stop_drive_now(ctx, &stopped_rpm, 0);
+                ev_logf(
+                    "IPC STOP before START strict_setup=%d stop_confirmed=%d",
+                    strict_setup,
+                    stop_ok
+                );
+                modbus_close(ctx);
+                modbus_free(ctx);
+                fclose(f);
+                free(segs);
+                ev_close();
+                return stop_ok ? 0 : 2;
+            }
             if(_stricmp(line, "START") != 0){
                 modbus_close(ctx);
                 modbus_free(ctx);
@@ -1627,7 +2571,7 @@ int main(int argc, char **argv){
         ev_logf("IPC START received.");
     }
 
-    if(recip.enabled){
+    if(recip.enabled && !recip_shadow.action_enabled){
         uint16_t init_raw = 0;
         int init_ok = -1;
         for(int k = 0; k < 10; ++k){
@@ -1677,6 +2621,51 @@ int main(int argc, char **argv){
     int64_t ramp_ticks = (int64_t)(RAMP_TIME_S * (double)qpc_freq + 0.5);
     int64_t start_ticks = qpc_now_ticks();
     int64_t next_ticks = start_ticks;
+    if(recip_shadow.action_enabled){
+        recip_origin_wait_result_t origin_wait = recip_shadow_wait_for_origin(
+            &recip_shadow,
+            use_ipc,
+            qpc_freq,
+            RECIP_ENCODER_ORIGIN_TIMEOUT_S
+        );
+        if(origin_wait != RECIP_ORIGIN_WAIT_READY){
+            int stopped_rpm = 0;
+            int stop_ok = stop_drive_now(ctx, &stopped_rpm, 0);
+            if(origin_wait == RECIP_ORIGIN_WAIT_TIMEOUT){
+                fprintf(
+                    stderr,
+                    "Encoder externo nao entregou origem valida em %.0f s; "
+                    "motor nao foi ligado.\n",
+                    RECIP_ENCODER_ORIGIN_TIMEOUT_S
+                );
+                ev_logf(
+                    "FATAL RECIP_ENCODER_NO_ORIGIN timeout_s=%.3f "
+                    "before_motion=1 motor_started=0 stop_confirmed=%d",
+                    RECIP_ENCODER_ORIGIN_TIMEOUT_S,
+                    stop_ok
+                );
+            }else{
+                ev_logf(
+                    "RECIP_ENCODER_ORIGIN_WAIT_STOPPED before_motion=1 "
+                    "motor_started=0 stop_confirmed=%d",
+                    stop_ok
+                );
+            }
+            recip_shadow_close(&recip_shadow);
+            modbus_close(ctx);
+            modbus_free(ctx);
+            fclose(f);
+            free(segs);
+            ev_close();
+            if(origin_wait == RECIP_ORIGIN_WAIT_STOPPED){
+                return stop_ok ? 0 : 2;
+            }
+            return 2;
+        }
+        /* O tempo do ensaio comeca somente depois da barreira de origem. */
+        start_ticks = qpc_now_ticks();
+        next_ticks = start_ticks;
+    }
 
     int stop_requested = 0;
     int stop_sent = 0;
@@ -1685,13 +2674,23 @@ int main(int argc, char **argv){
     int64_t hard_stop_ticks = start_ticks + (int64_t)(duration_s * (double)qpc_freq);
     int64_t recip_done_ticks = 0;
     int64_t recip_postroll_limit_ticks = (int64_t)(2.0 * (double)qpc_freq + 0.5);
+    int recip_external_active = recip.enabled && recip_shadow.action_enabled;
+    int external_motor_direction = 1;
+    int external_reverse_pending = 0;
+    int64_t external_reverse_deadline_ticks = 0;
     int current_cmd_rpm = 0;
-    int desired_seg_rpm = recip.enabled ? recip_target_rpm(&recip, segs, 0) : segs[0].rpm;
+    int desired_seg_rpm = recip.enabled
+        ? (recip_external_active
+            ? rpm_abs_safe(segs[0].rpm)
+            : recip_target_rpm(&recip, segs, 0))
+        : segs[0].rpm;
     rpm_ramp_t rpm_ramp = {0, 0, 0, start_ticks, start_ticks};
     DWORD next_progress_log_ms = GetTickCount() + 1000;
     int n_pos_err = 0;
     int n_rpm_err = 0;
+    int n_cmd_err = 0;
     int encoder_abort = 0;
+    int command_abort = 0;
     int encoder_stop_confirmed = 1;
     int encoder_consecutive_misses = 0;
     int encoder_ramp_write_failures = 0;
@@ -1736,19 +2735,48 @@ int main(int argc, char **argv){
         encoder_status.next_emit_ms =
             GetTickCount64() + 1000ULL;
     }else if(recip.enabled){
-        (void)cmd_rpm(ctx, 0);
+        if(cmd_rpm(ctx, 0) != 0 && recip_external_active){
+            fprintf(stderr, "Falha zerando setpoint antes do reciprocante.\n");
+            recip_abort(&recip, "RECIP_ENCODER_START_ZERO_FAILED");
+            stop_requested = 1;
+            goto finish_run;
+        }
         if(cmd_run(ctx) != 0){
+            if(recip_external_active){
+                fprintf(stderr, "Falha RUN no controle pelo encoder externo.\n");
+                recip_abort(&recip, "RECIP_ENCODER_START_RUN_FAILED");
+                stop_requested = 1;
+                goto finish_run;
+            }
             fprintf(stderr, "Falha RUN.\n");
             ev_logf("WARN cmd_run failed at start.");
         }
         if(cmd_rpm(ctx, desired_seg_rpm) == 0){
             current_cmd_rpm = desired_seg_rpm;
+        }else if(recip_external_active){
+            fprintf(stderr, "Falha aplicando setpoint inicial reciprocante.\n");
+            recip_abort(&recip, "RECIP_ENCODER_START_RPM_FAILED");
+            stop_requested = 1;
+            goto finish_run;
         }
         ramp_begin(&rpm_ramp, current_cmd_rpm, current_cmd_rpm, start_ticks, 0);
         ev_logf("RUN started reciprocating; first target rpm=%d total_samples=%d", desired_seg_rpm, total_samples);
     }else{
-        (void)cmd_rpm(ctx, 0);
+        if(cmd_rpm(ctx, 0) != 0 && command_only){
+            fprintf(stderr, "Falha zerando setpoint antes do ensaio.\n");
+            ev_logf("FATAL COMMAND_ONLY_START setpoint_zero_failed.");
+            command_abort = 1;
+            stop_requested = 1;
+            goto finish_run;
+        }
         if(cmd_run(ctx) != 0){
+            if(command_only){
+                fprintf(stderr, "Falha RUN no modo sem telemetria periodica.\n");
+                ev_logf("FATAL COMMAND_ONLY_START cmd_run_failed.");
+                command_abort = 1;
+                stop_requested = 1;
+                goto finish_run;
+            }
             fprintf(stderr, "Falha RUN.\n");
             ev_logf("WARN cmd_run failed at start.");
         }
@@ -1782,12 +2810,19 @@ int main(int argc, char **argv){
             stop_requested = 1;
             break;
         }
+        if(ipc_cmd == IPC_CMD_PAUSE && recip_external_active){
+            ev_logf("PAUSE treated as STOP in external encoder control idx=%d/%d",
+                    idx, total_samples);
+            stop_requested = 1;
+            break;
+        }
         if(ipc_cmd == IPC_CMD_PAUSE && !paused){
             paused = 1;
             pause_start_ticks = qpc_now_ticks();
             stop_drive_now(ctx, &current_cmd_rpm, stop_ramp_ticks);
             current_cmd_rpm = 0;
             ramp_begin(&rpm_ramp, 0, 0, pause_start_ticks, 0);
+            recip_shadow_reset_motion(&recip_shadow);
             ev_logf("PAUSE received at idx=%d", idx);
         }else if(ipc_cmd == IPC_CMD_RESUME && paused){
             int64_t now_resume = qpc_now_ticks();
@@ -1797,8 +2832,13 @@ int main(int argc, char **argv){
             next_ticks += paused_ticks;
             hard_stop_ticks += paused_ticks;
             paused = 0;
+            recip_shadow_reset_motion(&recip_shadow);
             if(!stop_sent){
-                desired_seg_rpm = recip.enabled ? recip_target_rpm(&recip, segs, seg_idx) : segs[seg_idx].rpm;
+                desired_seg_rpm = recip.enabled
+                    ? (recip_external_active
+                        ? external_motor_direction * rpm_abs_safe(segs[seg_idx].rpm)
+                        : recip_target_rpm(&recip, segs, seg_idx))
+                    : segs[seg_idx].rpm;
                 if(encoder_calibration){
                     if(cmd_rpm(ctx, 0) != 0 ||
                        cmd_run(ctx) != 0){
@@ -1858,17 +2898,137 @@ int main(int argc, char **argv){
         }
 
         int64_t now = qpc_now_ticks();
+        recip_shadow_drain(&recip_shadow, now, qpc_freq, idx);
+        if(recip_external_active && !recip_shadow.controller_started &&
+           (now - start_ticks) >= (int64_t)(3.0 * (double)qpc_freq + 0.5)){
+            recip_abort(&recip, "RECIP_ENCODER_NO_MOTION_OR_DIRECTION timeout_s=3.000");
+            ev_logf("FATAL %s", recip.abort_msg);
+            fprintf(stderr, "%s\n", recip.abort_msg);
+            stop_drive_now(ctx, &current_cmd_rpm, 0);
+            current_cmd_rpm = 0;
+            stop_sent = 1;
+            stop_requested = 1;
+            break;
+        }
+        if(recip_external_active && !stop_sent){
+            recip_encoder_decision_t external_decision;
+            uint64_t external_sequence = 0u;
+            int64_t external_packet_qpc = 0;
+            int external_packet_idx = -1;
+            if(recip_shadow_take_pending(
+                   &recip_shadow, &external_decision, &external_sequence,
+                   &external_packet_qpc, &external_packet_idx)){
+                if(external_decision.action == RECIP_ENCODER_ACTION_FAULT){
+                    char msg[192];
+                    snprintf(msg, sizeof(msg),
+                             "RECIP_ENCODER_FAULT fault=%s seq=%llu qpc=%lld",
+                             recip_encoder_fault_name(external_decision.fault),
+                             (unsigned long long)external_sequence,
+                             (long long)external_packet_qpc);
+                    recip_abort(&recip, msg);
+                    ev_logf("FATAL %s", recip.abort_msg);
+                    fprintf(stderr, "%s\n", recip.abort_msg);
+                    stop_drive_now(ctx, &current_cmd_rpm, 0);
+                    current_cmd_rpm = 0;
+                    stop_sent = 1;
+                    stop_requested = 1;
+                    break;
+                }
+                if(external_decision.action == RECIP_ENCODER_ACTION_COMPLETE){
+                    stop_drive_now(ctx, &current_cmd_rpm, 0);
+                    current_cmd_rpm = 0;
+                    stop_sent = 1;
+                    recip.done = 1;
+                    recip_done_ticks = now;
+                    external_reverse_pending = 0;
+                    ev_logf("RECIP_ENCODER_DONE idx=%d seq=%llu qpc=%lld strokes=%llu position_mm=%.9f physical_target_mm=%.9f trigger_mm=%.9f anticipation_mm=%.9f velocity_estimate_mm_s=%.9f path_mm=%.9f completed_segment=%d action_enabled=1 postroll_max_s=2.000",
+                            external_packet_idx,
+                            (unsigned long long)external_sequence,
+                            (long long)external_packet_qpc,
+                            (unsigned long long)external_decision.completed_strokes,
+                            external_decision.position_mm,
+                            external_decision.physical_target_mm,
+                            external_decision.trigger_position_mm,
+                            external_decision.stopping_anticipation_mm,
+                            external_decision.velocity_estimate_mm_s,
+                            external_decision.path_progress_mm,
+                            seg_idx);
+                    puts("RECIP_MOTION_DONE");
+                    fflush(stdout);
+                }else if(external_decision.action == RECIP_ENCODER_ACTION_REVERSE){
+                    int completed_seg_idx = seg_idx;
+                    if(cmd_rpm(ctx, 0) != 0){
+                        recip_abort(&recip, "RECIP_ENCODER_STOP_COMMAND_FAILED");
+                        ev_logf("FATAL %s", recip.abort_msg);
+                        stop_drive_now(ctx, &current_cmd_rpm, 0);
+                        current_cmd_rpm = 0;
+                        stop_sent = 1;
+                        stop_requested = 1;
+                        break;
+                    }
+                    current_cmd_rpm = 0;
+                    external_motor_direction = -external_motor_direction;
+                    if(schedule_idx != seg_idx){
+                        ev_logf("RECIP_SEGMENT_APPLY idx=%d previous=%d next=%d boundary=encoder_stroke",
+                                idx, seg_idx, schedule_idx);
+                        seg_idx = schedule_idx;
+                    }
+                    desired_seg_rpm = external_motor_direction * rpm_abs_safe(segs[seg_idx].rpm);
+                    external_reverse_deadline_ticks = now +
+                        (int64_t)(RECIP_ENCODER_REVERSE_DELAY_S * (double)qpc_freq + 0.5);
+                    external_reverse_pending = 1;
+                    ev_logf("RECIP_ENCODER_TRIGGER idx=%d seq=%llu qpc=%lld stroke=%llu position_mm=%.9f physical_target_mm=%.9f trigger_mm=%.9f anticipation_mm=%.9f velocity_estimate_mm_s=%.9f path_mm=%.9f completed_segment=%d next_segment=%d action_enabled=1",
+                            external_packet_idx,
+                            (unsigned long long)external_sequence,
+                            (long long)external_packet_qpc,
+                            (unsigned long long)external_decision.completed_strokes,
+                            external_decision.position_mm,
+                            external_decision.physical_target_mm,
+                            external_decision.trigger_position_mm,
+                            external_decision.stopping_anticipation_mm,
+                            external_decision.velocity_estimate_mm_s,
+                            external_decision.path_progress_mm,
+                            completed_seg_idx, seg_idx);
+                }
+            }
+            if(external_reverse_pending && now >= external_reverse_deadline_ticks){
+                if(cmd_run(ctx) != 0 || cmd_rpm(ctx, desired_seg_rpm) != 0){
+                    recip_abort(&recip, "RECIP_ENCODER_REVERSE_COMMAND_FAILED");
+                    ev_logf("FATAL %s", recip.abort_msg);
+                    stop_drive_now(ctx, &current_cmd_rpm, 0);
+                    current_cmd_rpm = 0;
+                    stop_sent = 1;
+                    stop_requested = 1;
+                    break;
+                }
+                current_cmd_rpm = desired_seg_rpm;
+                external_reverse_pending = 0;
+                ev_logf("RECIP_ENCODER_REVERSE_COMMAND idx=%d qpc=%lld motor_direction=%d rpm=%d segment=%d delay_ms=%.3f action_enabled=1",
+                        idx, (long long)now, external_motor_direction,
+                        desired_seg_rpm, seg_idx,
+                        1000.0 * RECIP_ENCODER_REVERSE_DELAY_S);
+            }
+        }
         if(!stop_sent && now >= hard_stop_ticks){
             stop_drive_now(ctx, &current_cmd_rpm, stop_ramp_ticks);
             current_cmd_rpm = 0;
             ramp_begin(&rpm_ramp, 0, 0, now, 0);
             stop_sent = 1;
             ev_logf("Hard stop deadline reached at idx=%d.", idx);
-            if(recip.enabled && !recip.done && recip.accum_counts < (double)recip.total_counts){
+            if(recip.enabled && !recip.done){
                 char msg[192];
-                snprintf(msg, sizeof(msg),
-                         "RECIP_DISTANCE_NOT_REACHED idx=%d accum_counts=%.0f total_counts=%lld",
-                         idx, recip.accum_counts, (long long)recip.total_counts);
+                if(recip_external_active){
+                    snprintf(msg, sizeof(msg),
+                             "RECIP_ENCODER_DISTANCE_NOT_REACHED idx=%d strokes=%llu path_mm=%.9f total_mm=%.9f",
+                             idx,
+                             (unsigned long long)recip_shadow.controller.completed_strokes,
+                             recip_shadow.controller.last_path_mm,
+                             recip_shadow.total_mm);
+                }else{
+                    snprintf(msg, sizeof(msg),
+                             "RECIP_DISTANCE_NOT_REACHED idx=%d accum_counts=%.0f total_counts=%lld",
+                             idx, recip.accum_counts, (long long)recip.total_counts);
+                }
                 recip_abort(&recip, msg);
                 fprintf(stderr, "%s\n", recip.abort_msg);
                 ev_logf("FATAL %s", recip.abort_msg);
@@ -1903,6 +3063,16 @@ int main(int argc, char **argv){
                     if(encoder_calibration){
                         encoder_ramp_write_failures = 0;
                     }
+                }else if(command_only){
+                    n_cmd_err++;
+                    if(n_cmd_err >= 3){
+                        fprintf(stderr, "Falha repetida enviando setpoint ao Drive.\n");
+                        ev_logf("FATAL COMMAND_ONLY_RPM_WRITE target=%d failures=%d",
+                                rpm_cmd_now, n_cmd_err);
+                        command_abort = 1;
+                        stop_requested = 1;
+                        break;
+                    }
                 }else if(encoder_calibration){
                     encoder_ramp_write_failures++;
                     if(encoder_ramp_write_failures >= 3){
@@ -1923,7 +3093,8 @@ int main(int argc, char **argv){
                     }
                 }
             }
-        }else if(!stop_sent && recip.enabled && !recip.stop_pending && !recip.done){
+        }else if(!stop_sent && recip.enabled && !recip_external_active &&
+                 !recip.stop_pending && !recip.done){
             int rpm_cmd_now = recip_target_rpm(&recip, segs, seg_idx);
             if(rpm_cmd_now != current_cmd_rpm){
                 if(cmd_rpm(ctx, rpm_cmd_now) == 0){
@@ -1940,37 +3111,39 @@ int main(int argc, char **argv){
         int64_t pos_read_start_qpc;
         int64_t pos_read_end_qpc;
         int pos_read_result;
-        set_timeouts_us(ctx, FAST_RESP_US, FAST_BYTE_US);
         uint16_t pos_raw = 0;
-        pos_read_start_qpc = qpc_now_ticks();
-        pos_read_result =
-            read_p0b09_cached(ctx, &pos_raw, &p0b09_mode);
-        pos_read_end_qpc = qpc_now_ticks();
-        if(pos_read_result == 0){
-            sampled_pos_qpc =
-                pos_read_start_qpc +
-                (pos_read_end_qpc - pos_read_start_qpc) / 2;
-            if(cmd_units_per_rev > 0){
-                /* Escala 0..65535 -> 0..(P05-02-1) */
-                sampled_pos = (int32_t)(((uint32_t)pos_raw * (uint32_t)cmd_units_per_rev) / 65536u);
-            }else{
-                sampled_pos = (int32_t)pos_raw;
+        if(!command_only){
+            set_timeouts_us(ctx, FAST_RESP_US, FAST_BYTE_US);
+            pos_read_start_qpc = qpc_now_ticks();
+            pos_read_result =
+                read_p0b09_cached(ctx, &pos_raw, &p0b09_mode);
+            pos_read_end_qpc = qpc_now_ticks();
+            if(pos_read_result == 0){
+                sampled_pos_qpc =
+                    pos_read_start_qpc +
+                    (pos_read_end_qpc - pos_read_start_qpc) / 2;
+                if(cmd_units_per_rev > 0){
+                    /* Escala 0..65535 -> 0..(P05-02-1) */
+                    sampled_pos = (int32_t)(((uint32_t)pos_raw * (uint32_t)cmd_units_per_rev) / 65536u);
+                }else{
+                    sampled_pos = (int32_t)pos_raw;
+                }
+                sampled_pos_ok = 1;
+                if(encoder_calibration){
+                    encoder_status_accept_position(
+                        &encoder_status,
+                        pos_raw,
+                        sampled_pos_qpc
+                    );
+                }
             }
-            sampled_pos_ok = 1;
-            if(encoder_calibration){
-                encoder_status_accept_position(
-                    &encoder_status,
-                    pos_raw,
-                    sampled_pos_qpc
-                );
+            if(!encoder_calibration &&
+               read_rpm_cached(ctx, &sampled_rpm, &rpm_mode) == 0){
+                sampled_rpm_ok = 1;
             }
+            if(!sampled_pos_ok) n_pos_err++;
+            if(!encoder_calibration && !sampled_rpm_ok) n_rpm_err++;
         }
-        if(!encoder_calibration &&
-           read_rpm_cached(ctx, &sampled_rpm, &rpm_mode) == 0){
-            sampled_rpm_ok = 1;
-        }
-        if(!sampled_pos_ok) n_pos_err++;
-        if(!encoder_calibration && !sampled_rpm_ok) n_rpm_err++;
 
         if(encoder_calibration && !stop_sent){
             if(sampled_pos_ok){
@@ -2025,7 +3198,7 @@ int main(int argc, char **argv){
             );
         }
 
-        if(recip.enabled && !stop_sent){
+        if(recip.enabled && !recip_external_active && !stop_sent){
             if(sampled_pos_ok){
                 recip.miss_count = 0;
                 (void)recip_update_unwrapped(&recip, sampled_pos);
@@ -2116,18 +3289,25 @@ int main(int argc, char **argv){
                     );
 
                     if(reached_target){
+                        int target_rpm_abs = rpm_abs_safe(segs[seg_idx].rpm);
+                        double target_speed_mm_s =
+                            (double)target_rpm_abs * (2.0 * 3.141592653589793 * recip.raio_mm) /
+                            (60.0 * recip.relacao);
                         if(cmd_rpm(ctx, 0) == 0){
                             current_cmd_rpm = 0;
                         }
                         recip.stop_pending = 1;
                         recip.stop_target = target;
-                        ev_logf("RECIP_STOP_TRIGGER idx=%d dir=%d pos=%lld target=%lld endpoint_error=%lld accum_counts=%.0f",
+                        ev_logf("RECIP_STOP_TRIGGER idx=%d qpc=%lld dir=%d pos=%lld target=%lld endpoint_error=%lld accum_counts=%.0f target_rpm_abs=%d target_speed_mm_s=%.9f",
                                 idx,
+                                (long long)now,
                                 recip.direction,
                                 (long long)recip.pos_unwrapped,
                                 (long long)target,
                                 (long long)(recip.pos_unwrapped - target),
-                                recip.accum_counts);
+                                recip.accum_counts,
+                                target_rpm_abs,
+                                target_speed_mm_s);
                     }
                 }
             }else{
@@ -2162,11 +3342,16 @@ int main(int argc, char **argv){
             {
                 int next_desired;
                 if(!recip.enabled) seg_idx = schedule_idx;
-                next_desired = recip.enabled ? recip_target_rpm(&recip, segs, seg_idx) : segs[seg_idx].rpm;
+                next_desired = recip.enabled
+                    ? (recip_external_active
+                        ? external_motor_direction * rpm_abs_safe(segs[seg_idx].rpm)
+                        : recip_target_rpm(&recip, segs, seg_idx))
+                    : segs[seg_idx].rpm;
                 if(!stop_sent && next_desired != desired_seg_rpm){
                     desired_seg_rpm = next_desired;
                     if(recip.enabled){
-                        if(!recip.stop_pending && !recip.done && cmd_rpm(ctx, desired_seg_rpm) == 0){
+                        if(!recip_external_active && !recip.stop_pending &&
+                           !recip.done && cmd_rpm(ctx, desired_seg_rpm) == 0){
                             current_cmd_rpm = desired_seg_rpm;
                         }
                     }else{
@@ -2175,10 +3360,15 @@ int main(int argc, char **argv){
                 }
             }
 
-            fprintf(f, "%d,%lld,%.6f,NULL,NULL,1,%d,%u\n",
-                    idx, (long long)t_qpc, t_s,
-                    encoder_calibration ? 0 : 1,
-                    (unsigned)(cmd_units_per_rev > 0 ? cmd_units_per_rev : 65536u));
+            if(command_only){
+                fprintf(f, "%d,%lld,%.6f,%d,%d\n",
+                        idx, (long long)t_qpc, t_s, current_cmd_rpm, n_cmd_err);
+            }else{
+                fprintf(f, "%d,%lld,%.6f,NULL,NULL,1,%d,%u\n",
+                        idx, (long long)t_qpc, t_s,
+                        encoder_calibration ? 0 : 1,
+                        (unsigned)(cmd_units_per_rev > 0 ? cmd_units_per_rev : 65536u));
+            }
             idx++;
             next_ticks += dt_ticks;
         }
@@ -2200,11 +3390,16 @@ int main(int argc, char **argv){
             {
                 int next_desired;
                 if(!recip.enabled) seg_idx = schedule_idx;
-                next_desired = recip.enabled ? recip_target_rpm(&recip, segs, seg_idx) : segs[seg_idx].rpm;
+                next_desired = recip.enabled
+                    ? (recip_external_active
+                        ? external_motor_direction * rpm_abs_safe(segs[seg_idx].rpm)
+                        : recip_target_rpm(&recip, segs, seg_idx))
+                    : segs[seg_idx].rpm;
                 if(!stop_sent && next_desired != desired_seg_rpm){
                     desired_seg_rpm = next_desired;
                     if(recip.enabled){
-                        if(!recip.stop_pending && !recip.done && cmd_rpm(ctx, desired_seg_rpm) == 0){
+                        if(!recip_external_active && !recip.stop_pending &&
+                           !recip.done && cmd_rpm(ctx, desired_seg_rpm) == 0){
                             current_cmd_rpm = desired_seg_rpm;
                         }
                     }else{
@@ -2213,24 +3408,30 @@ int main(int argc, char **argv){
                 }
             }
 
-            if(sampled_pos_ok) fprintf(f, "%d,%lld,%.6f,%ld,", idx, (long long)t_qpc, t_s, (long)sampled_pos);
-            else               fprintf(f, "%d,%lld,%.6f,NULL,", idx, (long long)t_qpc, t_s);
+            if(command_only){
+                fprintf(f, "%d,%lld,%.6f,%d,%d\n",
+                        idx, (long long)t_qpc, t_s, current_cmd_rpm, n_cmd_err);
+            }else{
+                if(sampled_pos_ok) fprintf(f, "%d,%lld,%.6f,%ld,", idx, (long long)t_qpc, t_s, (long)sampled_pos);
+                else               fprintf(f, "%d,%lld,%.6f,NULL,", idx, (long long)t_qpc, t_s);
 
-            if(sampled_rpm_ok) fprintf(f, "%d,", (int)sampled_rpm);
-            else               fprintf(f, "NULL,");
+                if(sampled_rpm_ok) fprintf(f, "%d,", (int)sampled_rpm);
+                else               fprintf(f, "NULL,");
 
-            fprintf(f, "%d,%d,%u\n",
-                    sampled_pos_ok ? 0 : 1,
-                    encoder_calibration ? 0 : (sampled_rpm_ok ? 0 : 1),
-                    (unsigned)(cmd_units_per_rev > 0 ? cmd_units_per_rev : 65536u));
+                fprintf(f, "%d,%d,%u\n",
+                        sampled_pos_ok ? 0 : 1,
+                        encoder_calibration ? 0 : (sampled_rpm_ok ? 0 : 1),
+                        (unsigned)(cmd_units_per_rev > 0 ? cmd_units_per_rev : 65536u));
+            }
             idx++;
             next_ticks += dt_ticks;
         }
         {
             DWORD now_ms = GetTickCount();
             if((LONG)(now_ms - next_progress_log_ms) >= 0){
-                ev_logf("PROGRESS idx=%d/%d seg=%d cmd_rpm=%d stop_sent=%d paused=%d pos_err=%d rpm_err=%d",
-                        idx, total_samples, seg_idx, current_cmd_rpm, stop_sent, paused, n_pos_err, n_rpm_err);
+                ev_logf("PROGRESS idx=%d/%d seg=%d cmd_rpm=%d stop_sent=%d paused=%d pos_err=%d rpm_err=%d cmd_err=%d command_only=%d",
+                        idx, total_samples, seg_idx, current_cmd_rpm, stop_sent,
+                        paused, n_pos_err, n_rpm_err, n_cmd_err, command_only);
                 next_progress_log_ms = now_ms + 1000;
             }
         }
@@ -2243,9 +3444,10 @@ int main(int argc, char **argv){
     }
 
 finish_run:
+    recip_shadow_drain(&recip_shadow, qpc_now_ticks(), qpc_freq, -1);
     if(stop_requested){
         puts(
-            (encoder_abort || recip.abort)
+            (encoder_abort || recip.abort || command_abort)
                 ? "STOP requested (internal failure)."
                 : console_stop_requested()
                 ? "STOP requested (console)."
@@ -2281,13 +3483,15 @@ finish_run:
         encoder_stop_confirmed,
         &encoder_stopped_emitted
     );
-    ev_logf("END stop_requested=%d stop_sent=%d pos_err=%d rpm_err=%d recip_abort=%d encoder_abort=%d msg=%s",
+    recip_shadow_close(&recip_shadow);
+    ev_logf("END stop_requested=%d stop_sent=%d pos_err=%d rpm_err=%d recip_abort=%d encoder_abort=%d command_abort=%d msg=%s",
             stop_requested, stop_sent, n_pos_err, n_rpm_err, recip.abort, encoder_abort,
+            command_abort,
             recip.abort_msg);
     modbus_close(ctx);
     modbus_free(ctx);
     fclose(f);
     free(segs);
     ev_close();
-    return (recip.abort || encoder_abort) ? 2 : 0;
+    return (recip.abort || encoder_abort || command_abort) ? 2 : 0;
 }

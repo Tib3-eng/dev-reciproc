@@ -1,5 +1,6 @@
 # Build / artefatos (recursivo)
 **/build/
+**/build_vs2022/
 **/out/
 **/bin/
 **/obj/

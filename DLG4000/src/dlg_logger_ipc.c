@@ -45,6 +45,7 @@ Resumo de funcoes:
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <mmsystem.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
@@ -54,6 +55,8 @@ Resumo de funcoes:
 #include <share.h>
 #include <stdarg.h>
 #include <math.h>
+#include "encoder_state.h"
+#include "encoder_control_protocol.h"
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -869,6 +872,247 @@ static void print_usage(void){
     puts("                [--ip <dlg_ip>] [--port <dlg_port>]");
     puts("                [--bind-ip <ip>] [--bind-port <port>]");
     puts("                [--force-normal <N>]");
+    puts("                [--compat-out <csv> --compat-rate <hz>]");
+    puts("                [--encoder-state-out <csv> --encoder-radius-mm <mm>]");
+    puts("                [--encoder-max-speed-mm-s <mm/s> --encoder-target-mm <mm>]");
+    puts("                [--encoder-control-port <localhost_udp> --encoder-session <u64>]");
+    puts("                [--encoder-reciprocating-shadow]");
+    puts("                [--self-test-decimation]");
+    puts("                [--self-test-encoder-state]");
+}
+
+static int calculate_decimation(double full_rate_hz, double compat_rate_hz){
+    double ratio;
+    int decimation;
+    if(full_rate_hz <= 0.0 || compat_rate_hz <= 0.0 || compat_rate_hz > full_rate_hz){
+        return 0;
+    }
+    ratio = full_rate_hz / compat_rate_hz;
+    decimation = (int)(ratio + 0.5);
+    if(decimation < 1 || fabs(ratio - (double)decimation) > 1.0e-9){
+        return 0;
+    }
+    return decimation;
+}
+
+static void write_data_csv_row(
+    FILE *file,
+    int idx,
+    int64_t t_qpc,
+    double t_s,
+    char ch_buf[DEFAULT_CHANNELS][32],
+    int has_atrito,
+    double atrito)
+{
+    if(has_atrito){
+        fprintf(file, "%d,%lld,%.6f,%s,%s,%s,%s,%s,%s,%s,%s,%.6f,0\n",
+                idx, (long long)t_qpc, t_s,
+                ch_buf[0], ch_buf[1], ch_buf[2], ch_buf[3],
+                ch_buf[4], ch_buf[5], ch_buf[6], ch_buf[7], atrito);
+    }else{
+        fprintf(file, "%d,%lld,%.6f,%s,%s,%s,%s,%s,%s,%s,%s,NULL,0\n",
+                idx, (long long)t_qpc, t_s,
+                ch_buf[0], ch_buf[1], ch_buf[2], ch_buf[3],
+                ch_buf[4], ch_buf[5], ch_buf[6], ch_buf[7]);
+    }
+}
+
+static void write_null_csv_row(FILE *file, int idx, int64_t t_qpc, double t_s){
+    fprintf(file, "%d,%lld,%.6f,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,1\n",
+            idx, (long long)t_qpc, t_s);
+}
+
+#define CONT_DIRECTION_MEDIAN_SAMPLES 51
+#define CONT_DIRECTION_MOTION_MM 0.2
+#define CONT_DIRECTION_LOCK_MM 1.0
+#define CONT_DIRECTION_CONFIRM_SAMPLES 5
+#define CONT_DIRECTION_LOCK_TIMEOUT_S 3.0
+#define CONT_DIRECTION_INCONSISTENT_MM 1.0
+
+typedef enum {
+    CONT_DIRECTION_FAULT_NONE = 0,
+    CONT_DIRECTION_FAULT_LOCK_TIMEOUT = 1,
+    CONT_DIRECTION_FAULT_INCONSISTENT = 2
+} continuous_direction_fault_t;
+
+typedef struct {
+    int locked_direction;
+    int candidate_direction;
+    int candidate_samples;
+    double recent_relative_mm[CONT_DIRECTION_MEDIAN_SAMPLES];
+    int recent_count;
+    int recent_next;
+    double filtered_relative_mm;
+    int64_t movement_qpc;
+    double max_progress_mm;
+    continuous_direction_fault_t fault;
+} continuous_direction_lock_t;
+
+static const char *continuous_direction_fault_name(continuous_direction_fault_t fault){
+    switch(fault){
+        case CONT_DIRECTION_FAULT_LOCK_TIMEOUT: return "DIRECTION_LOCK_TIMEOUT";
+        case CONT_DIRECTION_FAULT_INCONSISTENT: return "DIRECTION_INCONSISTENT";
+        default: return "NONE";
+    }
+}
+
+static double continuous_direction_median(const continuous_direction_lock_t *lock){
+    double sorted[CONT_DIRECTION_MEDIAN_SAMPLES];
+    int count;
+    if(!lock || lock->recent_count <= 0) return 0.0;
+    count = lock->recent_count;
+    for(int i = 0; i < count; ++i){
+        int j = i;
+        sorted[i] = lock->recent_relative_mm[i];
+        while(j > 0 && sorted[j - 1] > sorted[j]){
+            double tmp = sorted[j - 1];
+            sorted[j - 1] = sorted[j];
+            sorted[j] = tmp;
+            --j;
+        }
+    }
+    return sorted[count / 2];
+}
+
+static int update_continuous_direction_lock(
+    continuous_direction_lock_t *lock,
+    const encoder_state_output_t *output,
+    int64_t qpc,
+    int64_t qpc_frequency)
+{
+    int sign;
+    if(!lock || !output || lock->fault != CONT_DIRECTION_FAULT_NONE){
+        return lock ? lock->locked_direction : 0;
+    }
+    if(output->accepted){
+        lock->recent_relative_mm[lock->recent_next] = output->relative_mm;
+        lock->recent_next = (lock->recent_next + 1) % CONT_DIRECTION_MEDIAN_SAMPLES;
+        if(lock->recent_count < CONT_DIRECTION_MEDIAN_SAMPLES) lock->recent_count++;
+        lock->filtered_relative_mm = continuous_direction_median(lock);
+
+        if(lock->movement_qpc == 0 && fabs(lock->filtered_relative_mm) >= CONT_DIRECTION_MOTION_MM){
+            lock->movement_qpc = qpc;
+        }
+        if(lock->locked_direction == 0){
+            if(fabs(lock->filtered_relative_mm) >= CONT_DIRECTION_LOCK_MM){
+                sign = lock->filtered_relative_mm >= 0.0 ? 1 : -1;
+                if(lock->candidate_direction == sign){
+                    lock->candidate_samples++;
+                }else{
+                    lock->candidate_direction = sign;
+                    lock->candidate_samples = 1;
+                }
+                if(lock->candidate_samples >= CONT_DIRECTION_CONFIRM_SAMPLES){
+                    lock->locked_direction = sign;
+                }
+            }else{
+                lock->candidate_direction = 0;
+                lock->candidate_samples = 0;
+            }
+        }
+        if(lock->locked_direction != 0 &&
+           lock->locked_direction * lock->filtered_relative_mm <= -CONT_DIRECTION_INCONSISTENT_MM){
+            lock->fault = CONT_DIRECTION_FAULT_INCONSISTENT;
+        }
+    }
+    if(lock->locked_direction == 0 && lock->movement_qpc != 0 && qpc_frequency > 0 &&
+       (double)(qpc - lock->movement_qpc) / (double)qpc_frequency >= CONT_DIRECTION_LOCK_TIMEOUT_S){
+        lock->fault = CONT_DIRECTION_FAULT_LOCK_TIMEOUT;
+    }
+    return lock->locked_direction;
+}
+
+static double continuous_direction_progress(
+    continuous_direction_lock_t *lock,
+    const encoder_state_output_t *output)
+{
+    double directional_mm;
+    if(!lock || !output || lock->locked_direction == 0) return 0.0;
+    if(!output->accepted) return lock->max_progress_mm;
+    directional_mm = lock->locked_direction * output->relative_mm;
+    if(directional_mm > lock->max_progress_mm) lock->max_progress_mm = directional_mm;
+    if(lock->max_progress_mm < 0.0) lock->max_progress_mm = 0.0;
+    return lock->max_progress_mm;
+}
+
+static int run_encoder_state_self_test(void){
+    const int64_t frequency = 1000000LL;
+    const double radius_mm = 10.0;
+    const double speed_mm_s = 5.0;
+    const double target_mm = 10.0;
+    const double mm_per_degree = (2.0 * 3.14159265358979323846 * radius_mm) / 360.0;
+    encoder_state_config_t config;
+    encoder_state_t state;
+    encoder_state_output_t output;
+    continuous_direction_lock_t direction_lock = {0};
+    double progress_mm = 0.0;
+    int64_t crossing_qpc = 0;
+    double previous_progress = 0.0;
+    int64_t previous_qpc = 0;
+    continuous_direction_lock_t noise_lock = {0};
+    encoder_state_output_t noise_output;
+    memset(&noise_output, 0, sizeof(noise_output));
+    noise_output.accepted = 1;
+    for(int idx = 0; idx < 100; ++idx){
+        noise_output.relative_mm = (idx % 2 == 0) ? 0.25 : -0.25;
+        (void)update_continuous_direction_lock(
+            &noise_lock, &noise_output, idx * 5000LL, frequency);
+    }
+    if(noise_lock.locked_direction != 0 || noise_lock.fault != CONT_DIRECTION_FAULT_NONE) return 0;
+    encoder_state_config_default(&config);
+    config.radius_mm = radius_mm;
+    config.max_physical_speed_mm_s = 10.0;
+    if(!encoder_state_init(&state, &config, frequency, NULL)) return 0;
+    for(int idx = 0; idx <= 400; ++idx){
+        double t_s = (double)idx / 200.0;
+        double angle = fmod((speed_mm_s * t_s) / mm_per_degree, 360.0);
+        int64_t qpc = (int64_t)(t_s * (double)frequency + 0.5);
+        if(encoder_state_update_angle(&state, qpc, angle, ENCODER_INPUT_HAS_VALUE, &output) != ENCODER_SAMPLE_ACCEPTED){
+            return 0;
+        }
+        (void)update_continuous_direction_lock(&direction_lock, &output, qpc, frequency);
+        progress_mm = continuous_direction_progress(&direction_lock, &output);
+        if(previous_progress < target_mm && progress_mm >= target_mm){
+            if(!encoder_interpolate_crossing_qpc(previous_qpc, previous_progress,
+                                                 qpc, progress_mm, target_mm,
+                                                 &crossing_qpc)){
+                return 0;
+            }
+        }
+        previous_progress = progress_mm;
+        previous_qpc = qpc;
+    }
+    if(direction_lock.locked_direction != 1 || direction_lock.fault != CONT_DIRECTION_FAULT_NONE ||
+       fabs(progress_mm - target_mm) >= 1.0e-9 || crossing_qpc != 2000000LL ||
+       fabs(output.speed_mm_s - speed_mm_s) >= 1.0e-6){
+        return 0;
+    }
+    {
+        continuous_direction_lock_t timeout_lock = {0};
+        encoder_state_output_t timeout_output;
+        memset(&timeout_output, 0, sizeof(timeout_output));
+        timeout_output.accepted = 1;
+        timeout_output.relative_mm = 0.25;
+        for(int idx = 0; idx <= 650; ++idx){
+            (void)update_continuous_direction_lock(
+                &timeout_lock, &timeout_output, idx * 5000LL, frequency);
+        }
+        if(timeout_lock.fault != CONT_DIRECTION_FAULT_LOCK_TIMEOUT) return 0;
+    }
+    {
+        continuous_direction_lock_t inconsistent_lock = {0};
+        encoder_state_output_t inconsistent_output;
+        memset(&inconsistent_output, 0, sizeof(inconsistent_output));
+        inconsistent_lock.locked_direction = 1;
+        inconsistent_output.accepted = 1;
+        inconsistent_output.relative_mm = -2.0;
+        for(int idx = 0; idx < CONT_DIRECTION_MEDIAN_SAMPLES; ++idx){
+            (void)update_continuous_direction_lock(
+                &inconsistent_lock, &inconsistent_output, idx * 5000LL, frequency);
+        }
+        if(inconsistent_lock.fault != CONT_DIRECTION_FAULT_INCONSISTENT) return 0;
+    }
+    return 1;
 }
 
 /*
@@ -881,6 +1125,8 @@ Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementac
 */
 int main(int argc, char **argv){
     const char *out_path = NULL;
+    const char *compat_out_path = NULL;
+    const char *encoder_state_out_path = NULL;
     const char *dlg_ip = DLG_IP_DEFAULT;
     const char *bind_ip = LOCAL_BIND_IP_DEFAULT;
     uint16_t dlg_port = DLG_PORT_DEFAULT;
@@ -888,7 +1134,16 @@ int main(int argc, char **argv){
     double rate_hz = DEFAULT_RATE_HZ;
     double duration_s = DEFAULT_DURATION_S;
     double force_normal_n = 0.0;
+    double compat_rate_hz = 0.0;
+    double encoder_radius_mm = 0.0;
+    double encoder_max_speed_mm_s = 0.0;
+    double encoder_target_mm = 0.0;
+    uint16_t encoder_control_port = 0;
+    uint64_t encoder_session_id = 0;
     int use_ipc = 0;
+    int self_test_decimation = 0;
+    int self_test_encoder_state = 0;
+    int encoder_reciprocating_shadow = 0;
 
     for(int i = 1; i < argc; ++i){
         if(strcmp(argv[i], "--out") == 0 && i + 1 < argc){ out_path = argv[++i]; continue; }
@@ -899,18 +1154,84 @@ int main(int argc, char **argv){
         if(strcmp(argv[i], "--bind-ip") == 0 && i + 1 < argc){ bind_ip = argv[++i]; continue; }
         if(strcmp(argv[i], "--bind-port") == 0 && i + 1 < argc){ bind_port = (uint16_t)atoi(argv[++i]); continue; }
         if(strcmp(argv[i], "--force-normal") == 0 && i + 1 < argc){ force_normal_n = atof(argv[++i]); continue; }
+        if(strcmp(argv[i], "--compat-out") == 0 && i + 1 < argc){ compat_out_path = argv[++i]; continue; }
+        if(strcmp(argv[i], "--compat-rate") == 0 && i + 1 < argc){ compat_rate_hz = atof(argv[++i]); continue; }
+        if(strcmp(argv[i], "--encoder-state-out") == 0 && i + 1 < argc){ encoder_state_out_path = argv[++i]; continue; }
+        if(strcmp(argv[i], "--encoder-radius-mm") == 0 && i + 1 < argc){ encoder_radius_mm = atof(argv[++i]); continue; }
+        if(strcmp(argv[i], "--encoder-max-speed-mm-s") == 0 && i + 1 < argc){ encoder_max_speed_mm_s = atof(argv[++i]); continue; }
+        if(strcmp(argv[i], "--encoder-target-mm") == 0 && i + 1 < argc){ encoder_target_mm = atof(argv[++i]); continue; }
+        if(strcmp(argv[i], "--encoder-control-port") == 0 && i + 1 < argc){ encoder_control_port = (uint16_t)atoi(argv[++i]); continue; }
+        if(strcmp(argv[i], "--encoder-session") == 0 && i + 1 < argc){ encoder_session_id = _strtoui64(argv[++i], NULL, 10); continue; }
+        if(strcmp(argv[i], "--encoder-reciprocating-shadow") == 0){ encoder_reciprocating_shadow = 1; continue; }
+        if(strcmp(argv[i], "--self-test-decimation") == 0){ self_test_decimation = 1; continue; }
+        if(strcmp(argv[i], "--self-test-encoder-state") == 0){ self_test_encoder_state = 1; continue; }
         if(strcmp(argv[i], "--ipc") == 0){ use_ipc = 1; continue; }
         print_usage();
         return 1;
+    }
+    if(self_test_decimation){
+        int factor = calculate_decimation(rate_hz, compat_rate_hz);
+        int full_samples = 2000;
+        int compat_samples = 0;
+        if(factor <= 0){
+            fprintf(stderr, "SELF_TEST_FAIL full_rate=%.9g compat_rate=%.9g\n", rate_hz, compat_rate_hz);
+            return 1;
+        }
+        for(int idx = 0; idx < full_samples; ++idx){
+            if((idx % factor) == 0) compat_samples++;
+        }
+        if(factor != 4 || compat_samples != 500){
+            fprintf(stderr, "SELF_TEST_FAIL factor=%d compat_samples=%d\n",
+                    factor, compat_samples);
+            return 1;
+        }
+        printf("SELF_TEST_OK full_rate=%.9g compat_rate=%.9g decimation=%d full_samples=%d compat_samples=%d\n",
+               rate_hz, compat_rate_hz, factor, full_samples, compat_samples);
+        return 0;
+    }
+    if(self_test_encoder_state){
+        if(!run_encoder_state_self_test()){
+            fprintf(stderr, "SELF_TEST_ENCODER_FAIL\n");
+            return 1;
+        }
+        puts("SELF_TEST_ENCODER_OK rate=200 target_mm=10 crossing_s=2 speed_mm_s=5");
+        return 0;
     }
     if(!out_path || duration_s <= 0 || rate_hz <= 0){
         print_usage();
         return 1;
     }
+    if((compat_out_path && compat_rate_hz <= 0.0) || (!compat_out_path && compat_rate_hz > 0.0) ||
+       (compat_out_path && calculate_decimation(rate_hz, compat_rate_hz) <= 0) ||
+       (compat_out_path && _stricmp(out_path, compat_out_path) == 0)){
+        fprintf(stderr, "Compatibilidade exige arquivo distinto e divisor inteiro da taxa principal.\n");
+        return 1;
+    }
+    if((encoder_state_out_path && (encoder_radius_mm <= 0.0 || encoder_max_speed_mm_s <= 0.0 ||
+                                   (!encoder_reciprocating_shadow && encoder_target_mm <= 0.0))) ||
+       (!encoder_state_out_path && (encoder_radius_mm > 0.0 || encoder_max_speed_mm_s > 0.0 || encoder_target_mm > 0.0)) ||
+       (encoder_state_out_path && (_stricmp(out_path, encoder_state_out_path) == 0 ||
+                                   (compat_out_path && _stricmp(compat_out_path, encoder_state_out_path) == 0)))){
+        fprintf(stderr, "Estado do encoder exige arquivo distinto, raio, velocidade maxima e alvo positivos.\n");
+        return 1;
+    }
+    if(encoder_reciprocating_shadow &&
+       (!encoder_state_out_path || encoder_control_port == 0 || encoder_session_id == 0)){
+        fprintf(stderr, "Sombra reciprocante exige estado do encoder e enlace UDP local.\n");
+        return 1;
+    }
+    if((encoder_control_port == 0) != (encoder_session_id == 0) ||
+       (encoder_control_port != 0 && !encoder_state_out_path)){
+        fprintf(stderr, "Enlace do encoder exige porta, sessao nao nula e estado do encoder ativo.\n");
+        return 1;
+    }
     ensure_out_dir_for_path(out_path);
     ev_open_for_out(out_path);
-    ev_logf("START out=%s duration=%.3f rate=%.3f dlg=%s:%u bind=%s:%u ipc=%d force=%.6f",
-            out_path, duration_s, rate_hz, dlg_ip, (unsigned)dlg_port,
+    ev_logf("START out=%s duration=%.3f rate=%.3f compat_out=%s compat_rate=%.3f encoder_state_out=%s encoder_radius_mm=%.6f encoder_max_speed_mm_s=%.6f encoder_target_mm=%.6f dlg=%s:%u bind=%s:%u ipc=%d force=%.6f",
+            out_path, duration_s, rate_hz, compat_out_path ? compat_out_path : "", compat_rate_hz,
+            encoder_state_out_path ? encoder_state_out_path : "", encoder_radius_mm,
+            encoder_max_speed_mm_s, encoder_target_mm,
+            dlg_ip, (unsigned)dlg_port,
             bind_ip ? bind_ip : "", (unsigned)bind_port, use_ipc, force_normal_n);
     FILE *f = _fsopen(out_path, "w", _SH_DENYNO);
     if(!f){
@@ -974,14 +1295,14 @@ int main(int argc, char **argv){
         normalizeDegrees[ch] = 0;
         has_calib[ch] = 0;
 
-        double s = 0.0, b = 0.0;
+        double fit_slope = 0.0, fit_intercept = 0.0;
         int ts = DEFAULT_TSENSOR, lpf = DEFAULT_ILPF, g = DEFAULT_IGAIN_IDX, pwr = DEFAULT_SENSPWR_IDX;
         int dc = DEFAULT_INPUT_DC, ac = DEFAULT_INPUT_AC;
         int use_bal = DEFAULT_USE_BALANCE, normalize_deg = 0;
-        if(load_calib_for_channel(ch + 1, &s, &b, &ts, &lpf, &g, &pwr,
+        if(load_calib_for_channel(ch + 1, &fit_slope, &fit_intercept, &ts, &lpf, &g, &pwr,
                                   &dc, &ac, &use_bal, &normalize_deg)){
-            slope[ch] = s;
-            intercept[ch] = b;
+            slope[ch] = fit_slope;
+            intercept[ch] = fit_intercept;
             tSensor[ch] = ts;
             iLPF[ch] = lpf;
             iGainIdx[ch] = g;
@@ -992,6 +1313,18 @@ int main(int argc, char **argv){
             normalizeDegrees[ch] = normalize_deg;
             has_calib[ch] = 1;
         }
+    }
+    if(encoder_state_out_path &&
+       (!has_calib[ENCODER_CHANNEL - 1] || !normalizeDegrees[ENCODER_CHANNEL - 1] ||
+        tSensor[ENCODER_CHANNEL - 1] != 1 || iGainIdx[ENCODER_CHANNEL - 1] != 1 ||
+        iLPF[ENCODER_CHANNEL - 1] != 0)){
+        fprintf(stderr, "Calibracao angular CH3 aprovada (corrente/x3/LPF0) nao encontrada.\n");
+        ev_logf("ERROR encoder state requires approved CH3 angle calibration.");
+        closesocket(s);
+        WSACleanup();
+        fclose(f);
+        ev_close();
+        return 1;
     }
 
     stop_acq(s, &addr);
@@ -1006,6 +1339,110 @@ int main(int argc, char **argv){
     acq_start(s, &addr);
     ev_logf("ACQSETUP/START sent.");
 
+    int64_t qpc_freq = qpc_freq_ticks();
+    FILE *f_compat = NULL;
+    FILE *f_encoder = NULL;
+    SOCKET encoder_control_socket = INVALID_SOCKET;
+    struct sockaddr_in encoder_control_addr;
+    uint64_t encoder_control_sequence = 0;
+    uint64_t encoder_control_sent = 0;
+    uint64_t encoder_control_send_errors = 0;
+    int compat_decimation = 0;
+    int compat_idx = 0;
+    encoder_state_t encoder_state;
+    encoder_state_output_t encoder_output;
+    int encoder_enabled = encoder_state_out_path != NULL;
+    continuous_direction_lock_t encoder_direction_lock = {0};
+    int encoder_target_emitted = 0;
+    int encoder_failure_emitted = 0;
+    int encoder_has_previous_progress = 0;
+    double encoder_previous_progress_mm = 0.0;
+    int64_t encoder_previous_qpc = 0;
+    if(compat_out_path){
+        ensure_out_dir_for_path(compat_out_path);
+        f_compat = _fsopen(compat_out_path, "w", _SH_DENYNO);
+        if(!f_compat){
+            fprintf(stderr, "Falha abrindo CSV de compatibilidade: %s\n", compat_out_path);
+            ev_logf("ERROR open compatibility csv failed.");
+            stop_acq(s, &addr);
+            fclose(f);
+            closesocket(s);
+            WSACleanup();
+            ev_close();
+            return 1;
+        }
+        setvbuf(f_compat, NULL, _IONBF, 0);
+        fprintf(f_compat, "idx,t_qpc,t_s,ch1,ch2,ch3,ch4,ch5,ch6,ch7,ch8,atrito,err\n");
+        compat_decimation = calculate_decimation(rate_hz, compat_rate_hz);
+        ev_logf("COMPAT enabled rate=%.3f decimation=%d out=%s",
+                compat_rate_hz, compat_decimation, compat_out_path);
+    }
+    if(encoder_enabled){
+        encoder_state_config_t encoder_config;
+        encoder_state_config_default(&encoder_config);
+        encoder_config.radius_mm = encoder_radius_mm;
+        encoder_config.max_physical_speed_mm_s = encoder_max_speed_mm_s;
+        encoder_config.stale_stop_s = 0.10;
+        encoder_config.failure_timeout_s = 3.0;
+        if(!encoder_state_init(&encoder_state, &encoder_config, qpc_freq, NULL)){
+            fprintf(stderr, "Falha inicializando estado do encoder externo.\n");
+            ev_logf("ERROR encoder state init failed.");
+            stop_acq(s, &addr);
+            if(f_compat) fclose(f_compat);
+            fclose(f);
+            closesocket(s);
+            WSACleanup();
+            ev_close();
+            return 1;
+        }
+        ensure_out_dir_for_path(encoder_state_out_path);
+        f_encoder = _fsopen(encoder_state_out_path, "w", _SH_DENYNO);
+        if(!f_encoder){
+            fprintf(stderr, "Falha abrindo CSV de estado do encoder: %s\n", encoder_state_out_path);
+            ev_logf("ERROR open encoder state csv failed.");
+            stop_acq(s, &addr);
+            if(f_compat) fclose(f_compat);
+            fclose(f);
+            closesocket(s);
+            WSACleanup();
+            ev_close();
+            return 1;
+        }
+        setvbuf(f_encoder, NULL, _IONBF, 0);
+        fprintf(f_encoder,
+                "idx,t_qpc,t_s,angle_deg,accepted,status,health,unwrapped_deg,relative_deg,relative_mm,progress_mm,speed_mm_s,disk_rpm,direction,stationary,reversal,extreme_relative_mm,accepted_age_s\n");
+        ev_logf("ENCODER_STATE enabled out=%s mode=%s radius_mm=%.6f max_speed_mm_s=%.6f target_mm=%.6f stale_stop_s=%.3f failure_timeout_s=%.3f",
+                encoder_state_out_path,
+                encoder_reciprocating_shadow ? "RECIPROCATING_SHADOW" : "CONTINUOUS",
+                encoder_radius_mm, encoder_max_speed_mm_s,
+                encoder_target_mm, encoder_config.stale_stop_s,
+                encoder_config.failure_timeout_s);
+        if(encoder_control_port != 0){
+            memset(&encoder_control_addr, 0, sizeof(encoder_control_addr));
+            encoder_control_addr.sin_family = AF_INET;
+            encoder_control_addr.sin_port = htons(encoder_control_port);
+            encoder_control_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            encoder_control_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+            if(encoder_control_socket == INVALID_SOCKET){
+                fprintf(stderr, "Falha criando enlace UDP local do encoder.\n");
+                ev_logf("ERROR ENCODER_CONTROL socket=%d", WSAGetLastError());
+                stop_acq(s, &addr);
+                fclose(f_encoder);
+                if(f_compat) fclose(f_compat);
+                fclose(f);
+                closesocket(s);
+                WSACleanup();
+                ev_close();
+                return 1;
+            }
+            ev_logf("ENCODER_CONTROL enabled host=127.0.0.1 port=%u session=%llu packet_version=%u packet_size=%u",
+                    (unsigned)encoder_control_port,
+                    (unsigned long long)encoder_session_id,
+                    (unsigned)ENCODER_CONTROL_VERSION,
+                    (unsigned)sizeof(encoder_control_packet_t));
+        }
+    }
+
     if(use_ipc){
         puts("READY");
         fflush(stdout);
@@ -1013,6 +1450,8 @@ int main(int argc, char **argv){
         char line[64];
         if(!fgets(line, sizeof(line), stdin)){
             ev_logf("IPC START read failed.");
+            if(f_encoder) fclose(f_encoder);
+            if(f_compat) fclose(f_compat);
             fclose(f);
             closesocket(s);
             WSACleanup();
@@ -1022,6 +1461,8 @@ int main(int argc, char **argv){
         trim(line);
         if(_stricmp(line, "START") != 0){
             ev_logf("IPC START invalid token: %s", line);
+            if(f_encoder) fclose(f_encoder);
+            if(f_compat) fclose(f_compat);
             fclose(f);
             closesocket(s);
             WSACleanup();
@@ -1032,7 +1473,6 @@ int main(int argc, char **argv){
     }
 
     int total_samples = (int)(duration_s * rate_hz + 0.5);
-    int64_t qpc_freq = qpc_freq_ticks();
     int64_t dt_ticks = (int64_t)((double)qpc_freq / rate_hz + 0.5);
     int64_t start_ticks = 0;
     int64_t next_ticks = 0;
@@ -1068,6 +1508,10 @@ int main(int argc, char **argv){
     DWORD next_progress_log_ms = GetTickCount() + 1000;
     int n_have = 0;
     int n_null = 0;
+    double deadline_lag_sum_ms = 0.0;
+    double deadline_lag_max_ms = 0.0;
+    int deadline_lag_count = 0;
+    timeBeginPeriod(1);
     while(idx < total_samples){
         ipc_cmd_t ipc_cmd = ipc_poll_command(use_ipc);
         if(ipc_cmd == IPC_CMD_STOP){
@@ -1086,6 +1530,14 @@ int main(int argc, char **argv){
             if(paused_ticks < 0) paused_ticks = 0;
             start_ticks += paused_ticks;
             next_ticks += paused_ticks;
+            if(!encoder_reciprocating_shadow){
+                if(encoder_direction_lock.movement_qpc != 0){
+                    encoder_direction_lock.movement_qpc += paused_ticks;
+                }
+                if(encoder_has_previous_progress){
+                    encoder_previous_qpc += paused_ticks;
+                }
+            }
             paused = 0;
             ev_logf("RESUME received at idx=%d paused_ticks=%lld.", idx, (long long)paused_ticks);
         }
@@ -1102,14 +1554,21 @@ int main(int argc, char **argv){
 
         int64_t now = qpc_now_ticks();
         if(now >= next_ticks){
+            double deadline_lag_ms = 1000.0 * (double)(now - next_ticks) / (double)qpc_freq;
+            deadline_lag_sum_ms += deadline_lag_ms;
+            if(deadline_lag_ms > deadline_lag_max_ms) deadline_lag_max_ms = deadline_lag_ms;
+            deadline_lag_count++;
             sample_t sm;
             int have = ring_pop(&ring, &sm);
             double t_s = (double)idx / rate_hz;
             int64_t t_qpc = start_ticks + (int64_t)idx * dt_ticks;
+            double encoder_angle_deg = 0.0;
+            int encoder_angle_valid = 0;
+            int encoder_raw_saturated = 0;
+            char ch_buf[DEFAULT_CHANNELS][32] = {{0}};
 
             if(have){
                 n_have++;
-                char ch_buf[DEFAULT_CHANNELS][32];
                 double ch0_value = 0.0;
                 int ch0_valid = 0;
                 for(int ch = 0; ch < DEFAULT_CHANNELS; ++ch){
@@ -1120,6 +1579,11 @@ int main(int argc, char **argv){
                             if(v < 0.0) v += 360.0;
                         }
                         _snprintf(ch_buf[ch], sizeof(ch_buf[ch]), "%.6f", v);
+                        if(ch == ENCODER_CHANNEL - 1){
+                            encoder_angle_deg = v;
+                            encoder_angle_valid = 1;
+                            encoder_raw_saturated = sm.ch[ch] <= -32760 || sm.ch[ch] >= 32760;
+                        }
                         if(ch == 0){
                             ch0_value = v;
                             ch0_valid = 1;
@@ -1132,23 +1596,148 @@ int main(int argc, char **argv){
                         }
                     }
                 }
-                if(force_normal_n > 0.0 && ch0_valid){
-                    double atrito = ch0_value / force_normal_n;
-                    fprintf(f, "%d,%lld,%.6f,%s,%s,%s,%s,%s,%s,%s,%s,%.6f,0\n",
-                            idx, (long long)t_qpc, t_s,
-                            ch_buf[0], ch_buf[1], ch_buf[2], ch_buf[3],
-                            ch_buf[4], ch_buf[5], ch_buf[6], ch_buf[7],
-                            atrito);
-                }else{
-                    fprintf(f, "%d,%lld,%.6f,%s,%s,%s,%s,%s,%s,%s,%s,NULL,0\n",
-                            idx, (long long)t_qpc, t_s,
-                            ch_buf[0], ch_buf[1], ch_buf[2], ch_buf[3],
-                            ch_buf[4], ch_buf[5], ch_buf[6], ch_buf[7]);
+                {
+                    int has_atrito = force_normal_n > 0.0 && ch0_valid;
+                    double atrito = has_atrito ? ch0_value / force_normal_n : 0.0;
+                    write_data_csv_row(f, idx, t_qpc, t_s, ch_buf, has_atrito, atrito);
+                    if(f_compat && (idx % compat_decimation) == 0){
+                        double compat_t_s = (double)compat_idx / compat_rate_hz;
+                        write_data_csv_row(f_compat, compat_idx, t_qpc, compat_t_s,
+                                           ch_buf, has_atrito, atrito);
+                        compat_idx++;
+                    }
                 }
             }else{
                 n_null++;
-                fprintf(f, "%d,%lld,%.6f,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,1\n",
-                        idx, (long long)t_qpc, t_s);
+                write_null_csv_row(f, idx, t_qpc, t_s);
+                if(f_compat && (idx % compat_decimation) == 0){
+                    double compat_t_s = (double)compat_idx / compat_rate_hz;
+                    write_null_csv_row(f_compat, compat_idx, t_qpc, compat_t_s);
+                    compat_idx++;
+                }
+            }
+            if(encoder_enabled){
+                unsigned encoder_flags = 0;
+                double encoder_progress_mm = 0.0;
+                encoder_sample_status_t encoder_status;
+                if(encoder_angle_valid) encoder_flags |= ENCODER_INPUT_HAS_VALUE;
+                if(encoder_raw_saturated) encoder_flags |= ENCODER_INPUT_SATURATED;
+                encoder_status = encoder_state_update_angle(
+                    &encoder_state, t_qpc, encoder_angle_deg,
+                    encoder_flags, &encoder_output);
+                if(encoder_control_socket != INVALID_SOCKET){
+                    encoder_control_packet_t packet;
+                    int sent;
+                    encoder_control_sequence++;
+                    if(encoder_control_packet_build(
+                           &packet, encoder_session_id, encoder_control_sequence,
+                           t_qpc, &encoder_output)){
+                        sent = sendto(
+                            encoder_control_socket, (const char *)&packet,
+                            (int)sizeof(packet), 0,
+                            (const struct sockaddr *)&encoder_control_addr,
+                            (int)sizeof(encoder_control_addr));
+                        if(sent == (int)sizeof(packet)) encoder_control_sent++;
+                        else encoder_control_send_errors++;
+                    }else{
+                        encoder_control_send_errors++;
+                    }
+                }
+                if(!encoder_reciprocating_shadow){
+                    int previous_direction = encoder_direction_lock.locked_direction;
+                    (void)update_continuous_direction_lock(
+                        &encoder_direction_lock, &encoder_output, t_qpc, qpc_freq);
+                    if(previous_direction == 0 && encoder_direction_lock.locked_direction != 0){
+                        double lock_wait_s = encoder_direction_lock.movement_qpc != 0
+                            ? (double)(t_qpc - encoder_direction_lock.movement_qpc) / (double)qpc_freq
+                            : 0.0;
+                        ev_logf("ENCODER_DIRECTION_LOCK idx=%d direction=%d relative_mm=%.9f filtered_relative_mm=%.9f lock_wait_s=%.6f",
+                                idx, encoder_direction_lock.locked_direction,
+                                encoder_output.relative_mm,
+                                encoder_direction_lock.filtered_relative_mm,
+                                lock_wait_s);
+                    }
+                }
+                if(encoder_reciprocating_shadow && encoder_output.initialized){
+                    encoder_progress_mm = encoder_output.path_distance_mm;
+                }else if(encoder_output.initialized){
+                    encoder_progress_mm = continuous_direction_progress(
+                        &encoder_direction_lock, &encoder_output);
+                }
+                fprintf(f_encoder,
+                        "%d,%lld,%.6f,%s,%d,%s,%s,%.10g,%.10g,%.10g,%.10g,%.10g,%.10g,%d,%d,%d,%.10g,%.10g\n",
+                        idx, (long long)t_qpc, t_s,
+                        encoder_angle_valid ? ch_buf[ENCODER_CHANNEL - 1] : "NULL",
+                        encoder_output.accepted,
+                        encoder_sample_status_name(encoder_status),
+                        encoder_health_name(encoder_output.health),
+                        encoder_output.unwrapped_deg,
+                        encoder_output.relative_deg,
+                        encoder_output.relative_mm,
+                        encoder_progress_mm,
+                        encoder_output.speed_mm_s,
+                        encoder_output.disk_rpm,
+                        (int)encoder_output.direction,
+                        encoder_output.stationary,
+                        encoder_output.reversal_confirmed,
+                        encoder_output.extreme_relative_mm,
+                        encoder_output.accepted_age_s);
+                if(!encoder_reciprocating_shadow && !encoder_target_emitted && encoder_output.accepted &&
+                   encoder_direction_lock.locked_direction != 0 &&
+                   encoder_has_previous_progress &&
+                   encoder_previous_progress_mm < encoder_target_mm &&
+                   encoder_progress_mm >= encoder_target_mm){
+                    int64_t crossing_qpc = t_qpc;
+                    double crossing_t_s;
+                    (void)encoder_interpolate_crossing_qpc(
+                        encoder_previous_qpc, encoder_previous_progress_mm,
+                        t_qpc, encoder_progress_mm, encoder_target_mm,
+                        &crossing_qpc);
+                    crossing_t_s = (double)(crossing_qpc - start_ticks) / (double)qpc_freq;
+                    encoder_target_emitted = 1;
+                    printf("ENCODER_TARGET_REACHED t_qpc=%lld t_s=%.9f target_mm=%.9f progress_mm=%.9f direction=%d\n",
+                           (long long)crossing_qpc, crossing_t_s, encoder_target_mm,
+                           encoder_progress_mm, encoder_direction_lock.locked_direction);
+                    fflush(stdout);
+                    ev_logf("ENCODER_TARGET_REACHED idx=%d t_qpc=%lld t_s=%.9f target_mm=%.9f progress_mm=%.9f direction=%d",
+                            idx, (long long)crossing_qpc, crossing_t_s,
+                            encoder_target_mm, encoder_progress_mm,
+                            encoder_direction_lock.locked_direction);
+                }
+                if(!encoder_reciprocating_shadow && !encoder_failure_emitted &&
+                   !encoder_target_emitted && encoder_target_mm > 0.0 &&
+                   encoder_direction_lock.fault != CONT_DIRECTION_FAULT_NONE){
+                    const char *reason = continuous_direction_fault_name(encoder_direction_lock.fault);
+                    encoder_failure_emitted = 1;
+                    printf("ENCODER_FAILED t_qpc=%lld t_s=%.9f accepted_age_s=%.9f status=%s reason=%s relative_mm=%.9f filtered_relative_mm=%.9f\n",
+                           (long long)t_qpc, t_s, encoder_output.accepted_age_s,
+                           encoder_sample_status_name(encoder_status), reason,
+                           encoder_output.relative_mm,
+                           encoder_direction_lock.filtered_relative_mm);
+                    fflush(stdout);
+                    ev_logf("ENCODER_FAILED idx=%d t_qpc=%lld t_s=%.9f accepted_age_s=%.9f status=%s reason=%s relative_mm=%.9f filtered_relative_mm=%.9f",
+                            idx, (long long)t_qpc, t_s,
+                            encoder_output.accepted_age_s,
+                            encoder_sample_status_name(encoder_status), reason,
+                            encoder_output.relative_mm,
+                            encoder_direction_lock.filtered_relative_mm);
+                }
+                if(!encoder_failure_emitted && encoder_output.health == ENCODER_HEALTH_FAILED){
+                    encoder_failure_emitted = 1;
+                    printf("ENCODER_FAILED t_qpc=%lld t_s=%.9f accepted_age_s=%.9f status=%s reason=ENCODER_HEALTH_FAILED\n",
+                           (long long)t_qpc, t_s, encoder_output.accepted_age_s,
+                           encoder_sample_status_name(encoder_status));
+                    fflush(stdout);
+                    ev_logf("ENCODER_FAILED idx=%d t_qpc=%lld t_s=%.9f accepted_age_s=%.9f status=%s reason=ENCODER_HEALTH_FAILED",
+                            idx, (long long)t_qpc, t_s,
+                            encoder_output.accepted_age_s,
+                            encoder_sample_status_name(encoder_status));
+                }
+                if(encoder_output.accepted){
+                    encoder_previous_progress_mm = encoder_progress_mm;
+                    encoder_previous_qpc = t_qpc;
+                    encoder_has_previous_progress = 1;
+                }
             }
             idx++;
             next_ticks += dt_ticks;
@@ -1158,8 +1747,11 @@ int main(int argc, char **argv){
         {
             DWORD now_ms = GetTickCount();
             if((LONG)(now_ms - next_progress_log_ms) >= 0){
-                ev_logf("PROGRESS idx=%d/%d have=%d null=%d ring=%d overrun=%d paused=%d",
-                        idx, total_samples, n_have, n_null, ring.count, ring.overrun, paused);
+                int64_t active_ticks = qpc_now_ticks() - start_ticks;
+                double active_s = active_ticks > 0 ? (double)active_ticks / (double)qpc_freq : 0.0;
+                double effective_rate = active_s > 0.0 ? (double)idx / active_s : 0.0;
+                ev_logf("PROGRESS idx=%d/%d have=%d null=%d ring=%d overrun=%d paused=%d effective_rate_hz=%.3f",
+                        idx, total_samples, n_have, n_null, ring.count, ring.overrun, paused, effective_rate);
                 next_progress_log_ms = now_ms + 1000;
             }
         }
@@ -1171,12 +1763,47 @@ int main(int argc, char **argv){
     }
 
     stop_acq(s, &addr);
-    ev_logf("END idx=%d/%d stop=%d have=%d null=%d ring_overrun=%d",
-            idx, total_samples, stop_requested, n_have, n_null, ring.overrun);
+    timeEndPeriod(1);
+    {
+        int64_t active_ticks = qpc_now_ticks() - start_ticks;
+        double active_s = active_ticks > 0 ? (double)active_ticks / (double)qpc_freq : 0.0;
+        double effective_rate = active_s > 0.0 ? (double)idx / active_s : 0.0;
+        double loss_pct = idx > 0 ? 100.0 * (double)n_null / (double)idx : 0.0;
+        double lag_mean_ms = deadline_lag_count > 0
+            ? deadline_lag_sum_ms / (double)deadline_lag_count : 0.0;
+        ev_logf("END idx=%d/%d compat_idx=%d stop=%d have=%d null=%d loss_pct=%.6f ring_overrun=%d effective_rate_hz=%.3f deadline_lag_mean_ms=%.6f deadline_lag_max_ms=%.6f",
+                idx, total_samples, compat_idx, stop_requested, n_have, n_null, loss_pct,
+                ring.overrun, effective_rate, lag_mean_ms, deadline_lag_max_ms);
+    }
+    if(encoder_enabled){
+        encoder_quality_counters_t encoder_quality;
+        encoder_state_get_quality(&encoder_state, &encoder_quality);
+        ev_logf("ENCODER_END target_reached=%d direction=%d input=%llu accepted=%llu missing=%llu quarantine=%llu saturated=%llu non_monotonic=%llu impossible_jump=%llu reversals=%llu max_gap_s=%.9f",
+                encoder_target_emitted, encoder_direction_lock.locked_direction,
+                (unsigned long long)encoder_quality.input_samples,
+                (unsigned long long)encoder_quality.accepted_samples,
+                (unsigned long long)encoder_quality.missing_samples,
+                (unsigned long long)encoder_quality.quarantine_samples,
+                (unsigned long long)encoder_quality.saturated_samples,
+                (unsigned long long)encoder_quality.non_monotonic_samples,
+                (unsigned long long)encoder_quality.impossible_jump_samples,
+                (unsigned long long)encoder_quality.reversals,
+                encoder_quality.max_accepted_gap_s);
+        if(encoder_control_socket != INVALID_SOCKET){
+            ev_logf("ENCODER_CONTROL_END session=%llu sequence=%llu sent=%llu send_errors=%llu",
+                    (unsigned long long)encoder_session_id,
+                    (unsigned long long)encoder_control_sequence,
+                    (unsigned long long)encoder_control_sent,
+                    (unsigned long long)encoder_control_send_errors);
+        }
+    }
     ring_free(&ring);
+    if(encoder_control_socket != INVALID_SOCKET) closesocket(encoder_control_socket);
     closesocket(s);
     WSACleanup();
     fclose(f);
+    if(f_compat) fclose(f_compat);
+    if(f_encoder) fclose(f_encoder);
     ev_close();
     return 0;
 }

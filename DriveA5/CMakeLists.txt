@@ -38,7 +38,12 @@ target_link_libraries(a5_cli PRIVATE modbus ws2_32)
 add_executable(a5_pos_cli src/a5_pos_cli.c)
 target_link_libraries(a5_pos_cli PRIVATE modbus ws2_32)
 
-add_executable(a5_speed_logger src/a5_speed_logger.c)
+add_executable(a5_speed_logger
+  src/a5_speed_logger.c
+  ../EncoderCore/src/encoder_control_protocol.c
+  ../EncoderCore/src/recip_encoder_controller.c
+)
+target_include_directories(a5_speed_logger PRIVATE ../EncoderCore/include)
 target_link_libraries(a5_speed_logger PRIVATE modbus ws2_32)
 
 add_executable(merge_logs src/merge_logs.c)

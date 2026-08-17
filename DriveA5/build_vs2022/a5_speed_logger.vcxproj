@@ -87,6 +87,7 @@
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
+      <AdditionalIncludeDirectories>C:\Users\nicol\Desktop\DevReciproc\DriveA5\..\EncoderCore\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>%(AdditionalOptions) /external:I "C:/Users/nicol/Desktop/DevReciproc/DriveA5/vcpkg/installed/x64-windows/include/modbus"</AdditionalOptions>
       <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
@@ -108,10 +109,10 @@
     </ClCompile>
     <ResourceCompile>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_DEBUG;_WINDOWS;CMAKE_INTDIR=\"Debug\"</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>C:\Users\nicol\Desktop\DevReciproc\DriveA5\vcpkg\installed\x64-windows\include\modbus;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\nicol\Desktop\DevReciproc\DriveA5\..\EncoderCore\include;C:\Users\nicol\Desktop\DevReciproc\DriveA5\vcpkg\installed\x64-windows\include\modbus;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Midl>
-      <AdditionalIncludeDirectories>C:\Users\nicol\Desktop\DevReciproc\DriveA5\vcpkg\installed\x64-windows\include\modbus;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\nicol\Desktop\DevReciproc\DriveA5\..\EncoderCore\include;C:\Users\nicol\Desktop\DevReciproc\DriveA5\vcpkg\installed\x64-windows\include\modbus;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
       <HeaderFileName>%(Filename).h</HeaderFileName>
       <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
@@ -155,6 +156,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
+      <AdditionalIncludeDirectories>C:\Users\nicol\Desktop\DevReciproc\DriveA5\..\EncoderCore\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>%(AdditionalOptions) /external:I "C:/Users/nicol/Desktop/DevReciproc/DriveA5/vcpkg/installed/x64-windows/include/modbus"</AdditionalOptions>
       <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
       <BasicRuntimeChecks>Default</BasicRuntimeChecks>
@@ -177,10 +179,10 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     </ClCompile>
     <ResourceCompile>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;CMAKE_INTDIR=\"Release\"</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>C:\Users\nicol\Desktop\DevReciproc\DriveA5\vcpkg\installed\x64-windows\include\modbus;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\nicol\Desktop\DevReciproc\DriveA5\..\EncoderCore\include;C:\Users\nicol\Desktop\DevReciproc\DriveA5\vcpkg\installed\x64-windows\include\modbus;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Midl>
-      <AdditionalIncludeDirectories>C:\Users\nicol\Desktop\DevReciproc\DriveA5\vcpkg\installed\x64-windows\include\modbus;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\nicol\Desktop\DevReciproc\DriveA5\..\EncoderCore\include;C:\Users\nicol\Desktop\DevReciproc\DriveA5\vcpkg\installed\x64-windows\include\modbus;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
       <HeaderFileName>%(Filename).h</HeaderFileName>
       <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
@@ -224,6 +226,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">
     <ClCompile>
+      <AdditionalIncludeDirectories>C:\Users\nicol\Desktop\DevReciproc\DriveA5\..\EncoderCore\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>%(AdditionalOptions) /external:I "C:/Users/nicol/Desktop/DevReciproc/DriveA5/vcpkg/installed/x64-windows/include/modbus"</AdditionalOptions>
       <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
       <BasicRuntimeChecks>Default</BasicRuntimeChecks>
@@ -246,10 +249,10 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     </ClCompile>
     <ResourceCompile>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;CMAKE_INTDIR=\"MinSizeRel\"</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>C:\Users\nicol\Desktop\DevReciproc\DriveA5\vcpkg\installed\x64-windows\include\modbus;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\nicol\Desktop\DevReciproc\DriveA5\..\EncoderCore\include;C:\Users\nicol\Desktop\DevReciproc\DriveA5\vcpkg\installed\x64-windows\include\modbus;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Midl>
-      <AdditionalIncludeDirectories>C:\Users\nicol\Desktop\DevReciproc\DriveA5\vcpkg\installed\x64-windows\include\modbus;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\nicol\Desktop\DevReciproc\DriveA5\..\EncoderCore\include;C:\Users\nicol\Desktop\DevReciproc\DriveA5\vcpkg\installed\x64-windows\include\modbus;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
       <HeaderFileName>%(Filename).h</HeaderFileName>
       <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
@@ -293,6 +296,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">
     <ClCompile>
+      <AdditionalIncludeDirectories>C:\Users\nicol\Desktop\DevReciproc\DriveA5\..\EncoderCore\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>%(AdditionalOptions) /external:I "C:/Users/nicol/Desktop/DevReciproc/DriveA5/vcpkg/installed/x64-windows/include/modbus"</AdditionalOptions>
       <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
       <BasicRuntimeChecks>Default</BasicRuntimeChecks>
@@ -314,10 +318,10 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     </ClCompile>
     <ResourceCompile>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;CMAKE_INTDIR=\"RelWithDebInfo\"</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>C:\Users\nicol\Desktop\DevReciproc\DriveA5\vcpkg\installed\x64-windows\include\modbus;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\nicol\Desktop\DevReciproc\DriveA5\..\EncoderCore\include;C:\Users\nicol\Desktop\DevReciproc\DriveA5\vcpkg\installed\x64-windows\include\modbus;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Midl>
-      <AdditionalIncludeDirectories>C:\Users\nicol\Desktop\DevReciproc\DriveA5\vcpkg\installed\x64-windows\include\modbus;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\nicol\Desktop\DevReciproc\DriveA5\..\EncoderCore\include;C:\Users\nicol\Desktop\DevReciproc\DriveA5\vcpkg\installed\x64-windows\include\modbus;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
       <HeaderFileName>%(Filename).h</HeaderFileName>
       <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
@@ -418,6 +422,8 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="C:\Users\nicol\Desktop\DevReciproc\DriveA5\src\a5_speed_logger.c" />
+    <ClCompile Include="C:\Users\nicol\Desktop\DevReciproc\EncoderCore\src\encoder_control_protocol.c" />
+    <ClCompile Include="C:\Users\nicol\Desktop\DevReciproc\EncoderCore\src\recip_encoder_controller.c" />
   </ItemGroup>
   <ItemGroup />
   <ItemGroup>

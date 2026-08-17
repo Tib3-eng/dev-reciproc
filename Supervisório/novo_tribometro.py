@@ -1460,8 +1460,10 @@ def _cleanup_run_folder_on_abort():
 def _write_recip_offset_abort_info(reason, result=None):
     """Preserva no _I o diagnostico quando a fase preliminar bloqueia o ensaio."""
     data = result or {}
+    primary_failure = str(data.get("primary_failure", "") or "").strip()
     try:
-        with open(caminho_arquivo_1, "w", encoding="utf-8") as f:
+        with open(caminho_arquivo_1, "w", encoding="utf-8", newline="") as raw_info:
+            f = orch.InfoCsvWriter(raw_info)
             f.write("campo,valor,valor2\n")
             f.write("Reciprocating,sim,\n")
             f.write(f"Offset dinamico CH1 [N],{float(data.get('offset_n', 0.0)):.10g},\n")
@@ -1469,8 +1471,12 @@ def _write_recip_offset_abort_info(reason, result=None):
             f.write(f"Ciclos estabilizacao correcao dinamica,{data.get('warmup_cycles', 1)},\n")
             f.write(f"RPM disco correcao dinamica,{data.get('rpm_disk_target', 1)},\n")
             f.write(f"RPM Drive correcao dinamica,{data.get('rpm_drive', max(1, int(round(RELACAO_MECANICA))))},\n")
-            f.write(f"Amostras validas correcao dinamica,{data.get('valid_samples', 0)},\n")
-            f.write(f"Perda correcao dinamica [%],{float(data.get('loss_pct', 100.0)):.6f},\n")
+            if primary_failure:
+                f.write("Amostras validas correcao dinamica,NAO_APLICAVEL (movimento nao iniciado),\n")
+                f.write("Perda correcao dinamica [%],NAO_APLICAVEL (movimento nao iniciado),\n")
+            else:
+                f.write(f"Amostras validas correcao dinamica,{data.get('valid_samples', 0)},\n")
+                f.write(f"Perda correcao dinamica [%],{float(data.get('loss_pct', 100.0)):.6f},\n")
             f.write(f"Validacao correcao dinamica,REPROVADA: {str(reason).replace(',', ';')},\n")
     except Exception as e:
         log_msg(f"Falha preservando diagnostico da correcao dinamica no _I: {e}")
@@ -1852,7 +1858,7 @@ aux = 2000
 freq = 50.0
 # Janela fixa do modo monitoramento para os graficos 1 e 2.
 MONITOR_WINDOW_MIN = 1.0
-MONITOR_MAX_SAMPLES = 4000
+MONITOR_WINDOW_S = 60.0
 # running: estado geral do ensaio.
 running = False
 # ip: endereco de referencia para rotinas legadas de hardware.
@@ -2898,7 +2904,13 @@ def _tail_dlg_csv_for_graphs(dlg_csv_path, run_token=None):
         time.sleep(0.05)
 
     try:
-        log_msg(f"DLG tail: start token={run_token}.")
+        source_rate = float(getattr(orch, "DEFAULT_DLG_RATE_HZ", 200.0))
+        visual_rate = float(getattr(orch, "DEFAULT_DRIVE_RATE_HZ", 50.0))
+        visual_decimation = max(1, int(round(source_rate / visual_rate)))
+        log_msg(
+            f"DLG tail: start token={run_token}, visualizacao={visual_rate:.0f} Hz "
+            f"(fonte={source_rate:.0f} Hz, fator={visual_decimation})."
+        )
         n_rows = 0
         n_short = 0
         n_err = 0
@@ -2929,8 +2941,13 @@ def _tail_dlg_csv_for_graphs(dlg_csv_path, run_token=None):
                     continue
 
                 try:
+                    source_idx = int(parts[0])
                     t_s = float(parts[2])
                 except Exception:
+                    continue
+                # A decimacao existe somente na visualizacao. O dlg.csv
+                # tecnico permanece completo na taxa principal do DLG.
+                if (source_idx % visual_decimation) != 0:
                     continue
 
                 err = parts[-1].strip()
@@ -2980,7 +2997,7 @@ def _tail_dlg_csv_for_graphs(dlg_csv_path, run_token=None):
                         )
                     )
 
-                # Mantem historico completo do ensaio para permitir:
+                # Mantem todo o historico visual decimado para permitir:
                 # - alternar manual/automatico no eixo X sem perder o passado;
                 # - voltar ao modo automatico e replotar toda a serie.
         log_msg(f"DLG tail: stop token={run_token} rows={n_rows}.")
@@ -3050,8 +3067,8 @@ def _tail_monitor_csv_for_graphs(dlg_csv_path, monitor_token):
                 for i in range(8):
                     graSamps[i].append(vals[i])
 
-                # Mantem apenas historico suficiente para 1 min + margem.
-                while len(sampsTimestamp) > MONITOR_MAX_SAMPLES:
+                # Janela temporal: permanece em 1 minuto mesmo se a taxa mudar.
+                while sampsTimestamp and (t_s - sampsTimestamp[0]) > MONITOR_WINDOW_S:
                     sampsTimestamp.pop(0)
                     for i in range(8):
                         if graSamps[i]:
@@ -3558,6 +3575,140 @@ def _tail_turn_csv_for_graph3(turn_csv_path, turn_proc=None):
         log_msg(f"Distancia: erro lendo arquivo _P ({e}).")
 
 
+def _tail_realtime_continuous_encoder(
+    dlg_csv_path,
+    encoder_state_csv_path,
+    raio_mm,
+    dist_interval_mm,
+    run_token=None,
+):
+    """Atualiza os graficos continuos pelo CH3, sem consultar drive.csv."""
+    if raio_mm <= 0.0 or dist_interval_mm <= 0.0:
+        log_msg("Encoder RT: raio/intervalo invalido.")
+        return
+    circumference = 2.0 * math.pi * raio_mm
+
+    def new_acc():
+        return {"n": 0, "sum": 0.0, "min": None, "max": None}
+
+    def add(acc, value):
+        if value is None:
+            return
+        acc["n"] += 1
+        acc["sum"] += value
+        acc["min"] = value if acc["min"] is None else min(acc["min"], value)
+        acc["max"] = value if acc["max"] is None else max(acc["max"], value)
+
+    def emit(append_fn, x_value, acc, segment_mm, crossing_t, previous_crossing_t):
+        mean = acc["sum"] / acc["n"] if acc["n"] else float("nan")
+        minimum = acc["min"] if acc["min"] is not None else float("nan")
+        maximum = acc["max"] if acc["max"] is not None else float("nan")
+        dt = crossing_t - previous_crossing_t
+        speed = segment_mm / dt if dt > 0.0 else float("nan")
+        # As listas graficas legadas armazenam RPM de motor e o renderer faz
+        # a volta para mm/s. Este valor e apenas equivalente de apresentacao;
+        # nenhuma leitura do Drive participa do calculo.
+        equivalent_motor_rpm = (
+            speed * 60.0 * RELACAO_MECANICA / circumference
+            if math.isfinite(speed) else float("nan")
+        )
+        append_fn(float(x_value), mean, minimum, maximum, equivalent_motor_rpm)
+
+    started = time.time()
+    while _is_running() and _run_token_alive(run_token) and (
+        not os.path.exists(dlg_csv_path) or not os.path.exists(encoder_state_csv_path)
+    ):
+        if time.time() - started > 15.0:
+            log_msg("Encoder RT: timeout aguardando CSVs do DLG/encoder.")
+            return
+        time.sleep(0.05)
+
+    acc_dist = new_acc()
+    acc_turn = new_acc()
+    next_dist = float(dist_interval_mm)
+    next_turn = 1.0
+    prev_progress = None
+    prev_t = None
+    dist_cross_t = None
+    turn_cross_t = None
+    have_d = have_e = False
+    dcols = ecols = None
+    try:
+        with open(dlg_csv_path, "r", encoding="utf-8") as fdlg, \
+             open(encoder_state_csv_path, "r", encoding="utf-8") as fenc:
+            fdlg.readline()
+            fenc.readline()
+            while _is_running() and _run_token_alive(run_token):
+                if not have_d:
+                    line, complete = _read_complete_tail_line(fdlg)
+                    if complete:
+                        dcols = line.strip().split(",")
+                        have_d = True
+                if not have_e:
+                    line, complete = _read_complete_tail_line(fenc)
+                    if complete:
+                        ecols = line.strip().split(",")
+                        have_e = True
+                if not have_d or not have_e:
+                    time.sleep(0.005)
+                    continue
+                try:
+                    idx_d = int(dcols[0])
+                    idx_e = int(ecols[0])
+                except Exception:
+                    have_d = have_e = False
+                    continue
+                if idx_d < idx_e:
+                    have_d = False
+                    continue
+                if idx_e < idx_d:
+                    have_e = False
+                    continue
+                have_d = have_e = False
+                try:
+                    t_s = float(ecols[2])
+                    accepted = int(ecols[4]) == 1
+                    progress = float(ecols[10])
+                except Exception:
+                    continue
+                atrito = None
+                try:
+                    if int(dcols[-1]) == 0:
+                        ch1 = float(dcols[3]) - recip_dynamic_offset_n
+                        if cof_force_normal_n > 0.0:
+                            atrito = ch1 / cof_force_normal_n
+                except Exception:
+                    atrito = None
+                if accepted:
+                    add(acc_dist, atrito)
+                    add(acc_turn, atrito)
+                if accepted and prev_progress is not None and prev_t is not None and progress > prev_progress:
+                    while progress >= next_dist and prev_progress < next_dist:
+                        fraction = (next_dist - prev_progress) / (progress - prev_progress)
+                        crossing_t = prev_t + fraction * (t_s - prev_t)
+                        emit(_append_dist_point, next_dist, acc_dist, dist_interval_mm, crossing_t, dist_cross_t)
+                        dist_cross_t = crossing_t
+                        next_dist += dist_interval_mm
+                        acc_dist = new_acc()
+                    next_turn_mm = next_turn * circumference
+                    while progress >= next_turn_mm and prev_progress < next_turn_mm:
+                        fraction = (next_turn_mm - prev_progress) / (progress - prev_progress)
+                        crossing_t = prev_t + fraction * (t_s - prev_t)
+                        emit(_append_turn_point, next_turn, acc_turn, circumference, crossing_t, turn_cross_t)
+                        turn_cross_t = crossing_t
+                        next_turn += 1.0
+                        next_turn_mm = next_turn * circumference
+                        acc_turn = new_acc()
+                if accepted:
+                    if prev_progress is None:
+                        dist_cross_t = t_s
+                        turn_cross_t = t_s
+                    prev_progress = progress
+                    prev_t = t_s
+    except Exception as exc:
+        log_msg(f"Encoder RT: erro no processamento continuo ({exc}).")
+
+
 def _tail_realtime_dist_from_logs(
     dlg_csv_path,
     drive_csv_path,
@@ -3842,8 +3993,9 @@ def _tail_realtime_dist_from_logs(
                 if atr_ok and pos_ok:
                     acc_dist["n_valid"] += 1
                     acc_turn["n_valid"] += 1
-                    acc_dist["atr_sum"] += atr
-                    acc_turn["atr_sum"] += atr
+                    mean_value = abs(atr) if reciprocating else atr
+                    acc_dist["atr_sum"] += mean_value
+                    acc_turn["atr_sum"] += mean_value
                     if acc_dist["atr_min"] is None or atr < acc_dist["atr_min"]:
                         acc_dist["atr_min"] = atr
                     if acc_turn["atr_min"] is None or atr < acc_turn["atr_min"]:
@@ -3930,6 +4082,163 @@ def _tail_realtime_dist_from_logs(
                         prev_t_valid = True
     except Exception as e:
         log_msg(f"Distancia RT: erro no agregador em tempo real ({e}).")
+
+
+def _tail_realtime_reciprocating_encoder(
+    dlg_csv_path,
+    encoder_state_csv_path,
+    dist_interval_mm,
+    target_speed_schedule=None,
+    run_token=None,
+):
+    """Atualiza distancia/strokes reciprocantes sem ler telemetria do Drive."""
+    if dist_interval_mm <= 0.0:
+        log_msg("Encoder reciprocante RT: intervalo de distancia invalido.")
+        return
+    target_speed_schedule = list(target_speed_schedule or [])
+
+    def target_at_time(t_s):
+        elapsed = 0.0
+        for speed, duration in target_speed_schedule:
+            elapsed += float(duration)
+            if t_s < elapsed:
+                return float(speed)
+        return float(target_speed_schedule[-1][0]) if target_speed_schedule else float("nan")
+
+    def new_acc(t_s=None):
+        return {"t0": t_s, "t1": t_s, "n": 0, "sum_abs": 0.0, "min": None, "max": None}
+
+    def add(acc, t_s, value):
+        if acc["t0"] is None:
+            acc["t0"] = t_s
+        acc["t1"] = t_s
+        if value is None:
+            return
+        acc["n"] += 1
+        acc["sum_abs"] += abs(value)
+        acc["min"] = value if acc["min"] is None else min(acc["min"], value)
+        acc["max"] = value if acc["max"] is None else max(acc["max"], value)
+
+    def force_stats(acc):
+        return (
+            acc["sum_abs"] / acc["n"] if acc["n"] else float("nan"),
+            acc["min"] if acc["min"] is not None else float("nan"),
+            acc["max"] if acc["max"] is not None else float("nan"),
+        )
+
+    started = time.time()
+    while _is_running() and _run_token_alive(run_token) and (
+        not os.path.exists(dlg_csv_path) or not os.path.exists(encoder_state_csv_path)
+    ):
+        if time.time() - started > 15.0:
+            log_msg("Encoder reciprocante RT: timeout aguardando CSVs.")
+            return
+        time.sleep(0.05)
+
+    have_d = have_e = False
+    dcols = ecols = None
+    origin = None
+    last_pos = None
+    stroke_number = 1
+    stroke_target = target_at_time(0.0)
+    stroke_acc = new_acc()
+    dist_acc = new_acc()
+    base_distance = 0.0
+    local_progress = 0.0
+    next_distance = float(dist_interval_mm)
+    previous_progress = None
+    previous_t = None
+    previous_cross_t = None
+    try:
+        with open(dlg_csv_path, "r", encoding="utf-8") as fdlg, \
+             open(encoder_state_csv_path, "r", encoding="utf-8") as fenc:
+            fdlg.readline()
+            fenc.readline()
+            while _is_running() and _run_token_alive(run_token):
+                if not have_d:
+                    line, complete = _read_complete_tail_line(fdlg)
+                    if complete:
+                        dcols = line.strip().split(",")
+                        have_d = True
+                if not have_e:
+                    line, complete = _read_complete_tail_line(fenc)
+                    if complete:
+                        ecols = line.strip().split(",")
+                        have_e = True
+                if not have_d or not have_e:
+                    time.sleep(0.005)
+                    continue
+                try:
+                    idx_d = int(dcols[0])
+                    idx_e = int(ecols[0])
+                except Exception:
+                    have_d = have_e = False
+                    continue
+                if idx_d < idx_e:
+                    have_d = False
+                    continue
+                if idx_e < idx_d:
+                    have_e = False
+                    continue
+                have_d = have_e = False
+                try:
+                    t_s = float(ecols[2])
+                    accepted = int(ecols[4]) == 1
+                    position = float(ecols[9])
+                    reversal = int(ecols[15]) == 1
+                except Exception:
+                    continue
+                force = None
+                try:
+                    if int(dcols[-1]) == 0 and accepted and cof_force_normal_n > 0.0:
+                        force = (float(dcols[3]) - recip_dynamic_offset_n) / cof_force_normal_n
+                except Exception:
+                    force = None
+                add(stroke_acc, t_s, force)
+                add(dist_acc, t_s, force)
+                if not accepted:
+                    continue
+                if origin is None:
+                    origin = position
+                    last_pos = position
+                    previous_progress = 0.0
+                    previous_t = t_s
+                    previous_cross_t = t_s
+                    continue
+                local_progress = max(local_progress, abs(position - origin))
+                progress = base_distance + local_progress
+                while progress >= next_distance and previous_progress < next_distance:
+                    fraction = (
+                        (next_distance - previous_progress) / (progress - previous_progress)
+                        if progress > previous_progress else 1.0
+                    )
+                    crossing_t = previous_t + fraction * (t_s - previous_t)
+                    mean, minimum, maximum = force_stats(dist_acc)
+                    duration = crossing_t - previous_cross_t
+                    speed = dist_interval_mm / duration if duration > 0.0 else float("nan")
+                    _append_dist_point(next_distance, mean, minimum, maximum, speed)
+                    next_distance += dist_interval_mm
+                    previous_cross_t = crossing_t
+                    dist_acc = new_acc(crossing_t)
+                previous_progress = max(previous_progress, progress)
+                previous_t = t_s
+                last_pos = position
+                if reversal:
+                    mean, minimum, maximum = force_stats(stroke_acc)
+                    duration = stroke_acc["t1"] - stroke_acc["t0"] if stroke_acc["t0"] is not None else 0.0
+                    speed = local_progress / duration if duration > 0.0 else float("nan")
+                    _append_turn_point(
+                        float(stroke_number), mean, minimum, maximum,
+                        speed, stroke_target,
+                    )
+                    base_distance += local_progress
+                    origin = position
+                    local_progress = 0.0
+                    stroke_number += 1
+                    stroke_target = target_at_time(t_s)
+                    stroke_acc = new_acc(t_s)
+    except Exception as exc:
+        log_msg(f"Encoder reciprocante RT: erro no processamento ({exc}).")
 # start_acquisition():
 # - Funcao central de inicio de ensaio.
 # - Etapas principais:
@@ -4288,12 +4597,19 @@ def start_acquisition():
         if not offset_result.get("valid"):
             label_ensaio_estado.config(text="Correcao dinamica invalida", fg="red")
             _write_recip_offset_abort_info(offset_result.get("reason", "desconhecido"), offset_result)
+            primary_failure = str(offset_result.get("primary_failure", "") or "").strip()
+            if primary_failure:
+                failure_details = f"Motivo: {primary_failure}"
+            else:
+                failure_details = (
+                    f"Motivo: {offset_result.get('reason', 'desconhecido')}\n"
+                    f"Amostras validas: {offset_result.get('valid_samples', 0)}\n"
+                    f"Perda: {offset_result.get('loss_pct', 100.0):.3f}%"
+                )
             messagebox.showerror(
                 "Correcao dinamica",
                 "A fase preliminar foi reprovada. O ensaio oficial nao foi iniciado.\n\n"
-                f"Motivo: {offset_result.get('reason', 'desconhecido')}\n"
-                f"Amostras validas: {offset_result.get('valid_samples', 0)}\n"
-                f"Perda: {offset_result.get('loss_pct', 100.0):.3f}%"
+                f"{failure_details}"
             )
             return
         recip_dynamic_offset_n = float(offset_result["offset_n"])
@@ -4302,16 +4618,43 @@ def start_acquisition():
             f"validas={offset_result['valid_samples']}, perda={offset_result['loss_pct']:.3f}%."
         )
 
+    # Prepara a tabela antes de usa-la nos metadados e no deadline. Em uma
+    # execucao nova, estas listas globais ainda nao possuem valor; consulta-las
+    # antes deste ponto interrompia o callback logo apos a tara/correcao.
+    label_ensaio_estado.config(text="Preparando ensaio", fg="#0078D4")
+    root.update_idletasks()
+    lista_velocidades_digitadas = []
+    lista_duracao = []
+    lista_distancias_digitadas = []
+    for i in range(11):
+        texto_vel = lista_entries_velocidade[i].get().strip()
+        texto_dist = lista_entries_distancia[i].get().strip()
+        texto_dur = lista_labels_duracao[i].cget("text").strip()
+        if texto_vel and texto_dur not in ["xxxx", "Erro", ""]:
+            try:
+                lista_velocidades_digitadas.append(float(texto_vel.replace(',', '.')))
+                lista_duracao.append(float(texto_dur.replace(',', '.')) * 60.0)
+                lista_distancias_digitadas.append(float(texto_dist.replace(',', '.')))
+            except ValueError:
+                pass
+
     # Carrega os dados de calibracao CH1 apos a tara, para registrar
     # os valores efetivamente usados neste ensaio.
     ch1_fit = _load_ch1_fit_data(repo_root, exe_info.get("dlg_exe"))
+    continuous_target_info_mm = _calc_expected_distance_mm_from_table()
+    continuous_theoretical_s = sum(lista_duracao)
+    continuous_deadline_s = max(
+        continuous_theoretical_s * 1.5,
+        continuous_theoretical_s + 30.0,
+    )
     
     try:
         # -----------------------------------------------------------------------------
-        # MUDANCA CONSCIENTE: metadados agora em CSV (info_ensaio.csv) com 2-3 colunas.
+        # MUDANCA CONSCIENTE: metadados em CSV com 3 colunas e separador ';'.
         # Formato:
-        #   campo,valor,valor2
-        with open(caminho_arquivo_1, 'w', encoding='utf-8') as f:
+        #   campo;valor;valor2
+        with open(caminho_arquivo_1, 'w', encoding='utf-8', newline='') as raw_info:
+            f = orch.InfoCsvWriter(raw_info)
             f.write("campo,valor,valor2\n")
 
             # Tabela da esquerda (dados principais)
@@ -4340,6 +4683,16 @@ def start_acquisition():
             f.write(f"Intervalo distancia [mm],{DIST_INTERVAL_MM},\n")
             coluna_forca = float(ent_forca.get().strip().replace(',','.'))
             f.write(f"Força normal [N],{coluna_forca},\n")
+            f.write(f"Taxa aquisicao DLG [Hz],{float(getattr(orch, 'DEFAULT_DLG_RATE_HZ', 200.0)):.10g},\n")
+            f.write("Telemetria periodica Drive,desabilitada; sem requisicoes P0B-09/P0B-00,\n")
+            f.write(f"Taxa registro comandos Drive [Hz],{float(getattr(orch, 'DEFAULT_DRIVE_RATE_HZ', 50.0)):.10g},\n")
+            f.write("Trilha DLG compatibilidade,nao gerada no pipeline por encoder externo,\n")
+            if not reciprocante_var.get():
+                f.write("Fonte coluna pos,encoder externo CH3 - posicao relativa [mm],\n")
+                f.write("Fonte coluna rpm,encoder externo CH3 - RPM calculado do disco,\n")
+                f.write("Fonte processamento continuo,DLG 200 Hz + encoder externo; drive.csv registra apenas comandos,\n")
+                f.write(f"Distancia alvo encoder continuo [mm],{continuous_target_info_mm:.10g},\n")
+                f.write(f"Deadline continuo [s],{continuous_deadline_s:.10g},\n")
             f.write("Dados de calibração,Fit CH1,\n")
             if ch1_fit:
                 f.write(f"Slope (fit),{ch1_fit['slope']:.10g},\n")
@@ -4392,6 +4745,14 @@ def start_acquisition():
             f.write(f"Reciprocating,{'sim' if reciprocante_var.get() else 'não'},\n")
             f.write(f"Tolerancia reciprocante [counts],{RECIP_STOP_TOL_COUNTS},\n")
             f.write(f"Filtro borda stroke [%],{RECIP_EDGE_FILTER_PCT},\n")
+            if reciprocante_var.get():
+                f.write("Controle encoder externo reciprocante,ativo e autoritativo,\n")
+                f.write("Fonte inversao e termino,encoder externo CH3 no DLG a 200 Hz,\n")
+                f.write("Dependencia de posicao/RPM do Drive,removida,\n")
+                f.write("Metodo atrito medio _DP,media do modulo; minimo e maximo assinados,\n")
+            else:
+                f.write("Controle encoder externo reciprocante,nao aplicavel,\n")
+                f.write("Metodo atrito medio _DP,media aritmetica assinada,\n")
             f.write(f"Offset dinamico CH1 [N],{offset_result['offset_n']:.10g},\n")
             f.write(f"Ciclos correcao dinamica,{offset_result['cycles']},\n")
             f.write(f"Ciclos estabilizacao correcao dinamica,{offset_result['warmup_cycles']},\n")
@@ -4400,6 +4761,38 @@ def start_acquisition():
             f.write(f"Amostras validas correcao dinamica,{offset_result['valid_samples']},\n")
             f.write(f"Perda correcao dinamica [%],{offset_result['loss_pct']:.6f},\n")
             f.write(f"Validacao correcao dinamica,{offset_result['reason']},\n")
+            dynamic_shadow = offset_result.get("encoder_shadow_summary", {}) or {}
+            dynamic_encoder_quality = offset_result.get("encoder_capture_quality", {}) or {}
+            dynamic_stop_diagnostics = offset_result.get("encoder_stop_diagnostics", {}) or {}
+            f.write(f"Sentido encoder aprendido na correcao dinamica,{offset_result.get('encoder_forward_sign', 0)},\n")
+            f.write("Metodo sentido encoder,deslocamento liquido sustentado de 0.5 mm,\n")
+            for label, key in (
+                ("Conclusao controle encoder correcao dinamica", "complete"),
+                ("Falha controle encoder correcao dinamica", "fault"),
+                ("Strokes controle encoder correcao dinamica", "endpoint_count"),
+                ("Curso fisico medio correcao dinamica [mm]", "physical_course_mean_mm"),
+                ("Curso fisico minimo correcao dinamica [mm]", "physical_course_min_mm"),
+                ("Curso fisico maximo correcao dinamica [mm]", "physical_course_max_mm"),
+                ("Erro medio extremo correcao dinamica [mm]", "endpoint_abs_error_mean_mm"),
+                ("Erro maximo extremo correcao dinamica [mm]", "endpoint_abs_error_max_mm"),
+                ("Latencia media encoder correcao dinamica [ms]", "latency_mean_ms"),
+                ("Latencia maxima encoder correcao dinamica [ms]", "latency_max_ms"),
+            ):
+                f.write(f"{label},{dynamic_shadow.get(key, 'NULL')},\n")
+            for label, key in (
+                ("Amostras encoder aceitas correcao dinamica", "accepted_samples"),
+                ("Amostras encoder ausentes correcao dinamica", "missing_samples"),
+                ("Amplitude relativa encoder correcao dinamica [mm]", "relative_span_mm"),
+                ("Incremento absoluto mediano CH3 [mm]", "increment_abs_median_mm"),
+                ("Incremento absoluto P95 CH3 [mm]", "increment_abs_p95_mm"),
+                ("Variacao total bruta CH3 [mm]", "raw_total_variation_mm"),
+                ("Inflacao variacao bruta / percurso nominal", "raw_variation_ratio"),
+            ):
+                f.write(f"{label},{dynamic_encoder_quality.get(key, 'NULL')},\n")
+            f.write("Diagnostico parada correcao dinamica,DadosDev/recip_offset_stop_diagnostics.csv,\n")
+            f.write(f"Linhas diagnostico parada correcao dinamica,{dynamic_stop_diagnostics.get('rows', 'NULL')},\n")
+            f.write(f"Linhas completas diagnostico parada correcao dinamica,{dynamic_stop_diagnostics.get('complete_rows', 'NULL')},\n")
+            f.write("Metodo velocidade controle encoder,regressao linear causal de PosEncExt nos 250 ms anteriores ao gatilho externo,\n")
             if not entry_curso.get().strip() or not reciprocante_var.get():
                 f.write(f"Curso [mm],0.00,\n")
             else:
@@ -4421,38 +4814,6 @@ def start_acquisition():
         messagebox.showerror("Erro de Arquivo", f"Nao foi possivel gravar o arquivo de Entrada\n{e}")
         return
     
-    ########## PREENCHER AS LISTAS COM AS VELOCIDADES E DURACAO OBTIDAS
-    lista_velocidades_digitadas = []
-    lista_duracao = []
-    lista_distancias_digitadas = []
-    # Percorre os 11 itens da interface
-    for i in range(11):
-        
-        # --- PARTE DA VELOCIDADE (Vem de um Entry -> usa .get()) ---
-        texto_vel = lista_entries_velocidade[i].get().strip()
-        texto_dist = lista_entries_distancia[i].get().strip()
-        
-        # --- PARTE DA DURACAO (Vem de um Label -> usa .cget("text")) ---
-        texto_dur = lista_labels_duracao[i].cget("text").strip()
-
-        # Só processa se tiver velocidade digitada E se a duração calculada for válida
-        if texto_vel and texto_dur not in ["xxxx", "Erro", ""]:
-            try:
-                # Converte a Velocidade
-                valor_vel = float(texto_vel.replace(',', '.'))
-                # Converte a Duração (que já foi calculada em minutos no Label)
-                # Se você precisar converter para segundos aqui, multiplique por 60
-                valor_dur = (float(texto_dur.replace(',', '.')) * 60)
-
-                # Adiciona nas novas listas
-                lista_velocidades_digitadas.append(valor_vel)
-                lista_duracao.append(valor_dur)
-                lista_distancias_digitadas.append(float(texto_dist.replace(',', '.')))
-                
-            except ValueError:
-                pass # Ignora linhas com letras ou erros
-
-
     # ---------------------------------------------------------------------------------
     # INTEGRACAO COM LOGGERS EM C (MODO HEADLESS)
     # - Usa as listas lista_velocidades_digitadas + lista_duracao
@@ -4535,6 +4896,10 @@ def start_acquisition():
             # No reciprocante, a distancia encerra o ensaio. O tempo inclui
             # margem apenas como watchdog para paradas e inversoes.
             run_duration_s = max(dur_total * 1.5, dur_total + 30.0)
+        else:
+            # No continuo, a distancia do encoder externo encerra o ensaio.
+            # O tempo e apenas um deadline independente de seguranca.
+            run_duration_s = max(dur_total * 1.5, dur_total + 30.0)
         # Em modo automatico, eixo X de Temperatura/CoF segue duracao total prevista.
         if dur_total > 0:
             x_auto_total_min = float(dur_total) / 60.0
@@ -4544,6 +4909,8 @@ def start_acquisition():
         # Caminhos padrao (gerados por salvar_arquivo)
         out_paths = {
             "dlg_csv": caminho_dlg_csv,
+            "dlg_compat_csv": os.path.join(caminho_pasta, "dlg_compat_50hz.csv"),
+            "encoder_state_csv": os.path.join(caminho_pasta, "encoder_state.csv"),
             "drive_csv": caminho_drive_csv,
             "turn_dist_csv": caminho_turn_dist_csv,
             "turn_vp_csv": caminho_turn_volta_csv,
@@ -4590,8 +4957,15 @@ def start_acquisition():
                 reciprocating_total_mm=recip_total_mm,
                 reciprocating_tolerance_counts=RECIP_STOP_TOL_COUNTS,
                 reciprocating_edge_filter_pct=RECIP_EDGE_FILTER_PCT,
+                reciprocating_shadow_enabled=False,
+                reciprocating_encoder_control_enabled=reciprocating_enabled,
+                reciprocating_shadow_forward_sign=int(offset_result.get("encoder_forward_sign", 0)),
+                reciprocating_shadow_stop_compensation=reciprocating_enabled,
+                drive_command_only=True,
+                strict_drive_setup=True,
                 dynamic_offset_n=recip_dynamic_offset_n,
                 target_speed_schedule=list(zip(lista_velocidades_digitadas, lista_duracao)),
+                continuous_target_mm=(0.0 if reciprocating_enabled else p_dist_target_mm),
             )
         except Exception as e:
             _set_run_finalizing(False)
@@ -4616,8 +4990,8 @@ def start_acquisition():
         is_paused = False
         tempo_pause_inicio = 0
         graph_log(
-            "RUN start token={0} rate_hz={1} dur_total_s={2:.3f} watchdog_s={3:.3f} relacao={4:.6f} dist_target_mm={5:.6f} turn_target={6:.6f} interval_mm={7:.6f} reciprocating={8} course_mm={9:.6f} recip_tol_counts={10} recip_edge_pct={11:.6f}".format(
-                run_token, rate_hz, dur_total, run_duration_s, RELACAO_MECANICA, p_dist_target_mm, p_turn_target, DIST_INTERVAL_MM,
+            "RUN start token={0} dlg_rate_hz={1} drive_rate_hz={2} dur_total_s={3:.3f} watchdog_s={4:.3f} relacao={5:.6f} dist_target_mm={6:.6f} turn_target={7:.6f} interval_mm={8:.6f} reciprocating={9} course_mm={10:.6f} recip_tol_counts={11} recip_edge_pct={12:.6f}".format(
+                run_token, rate_hz, external_run_state.drive_rate_hz, dur_total, run_duration_s, RELACAO_MECANICA, p_dist_target_mm, p_turn_target, DIST_INTERVAL_MM,
                 reciprocating_enabled, recip_course_mm, RECIP_STOP_TOL_COUNTS, RECIP_EDGE_FILTER_PCT
             )
         )
@@ -4645,7 +5019,10 @@ def start_acquisition():
                 merge_rc = orch.wait_and_merge(state_snapshot)
                 if merge_rc != 0:
                     failure_rc = merge_rc
-                    failure_msg = _extract_a5_failure_message(caminho_pasta)
+                    if not state_snapshot.reciprocating and state_snapshot.continuous_encoder_message:
+                        failure_msg = state_snapshot.continuous_encoder_message
+                    else:
+                        failure_msg = _extract_a5_failure_message(caminho_pasta)
                 if os.path.exists(caminho_merge_csv):
                     log_msg(f"Merge gerado: {caminho_merge_csv} (rc={merge_rc})")
                 else:
@@ -4681,7 +5058,8 @@ def start_acquisition():
                     log_msg(f"Aviso: nao foi possivel finalizar move de CSVs tecnicos ({e}).")
                 if caminho_arquivo_1:
                     try:
-                        with open(caminho_arquivo_1, "a", encoding="utf-8", newline="") as f_info:
+                        with open(caminho_arquivo_1, "a", encoding="utf-8", newline="") as raw_info:
+                            f_info = orch.InfoCsvWriter(raw_info)
                             f_info.write(
                                 f"Amostras quarentena PosEncExt,{state_snapshot.encoder_quarantine_samples},\n"
                             )
@@ -4689,21 +5067,112 @@ def start_acquisition():
                                 "Fracao quarentena PosEncExt [%],"
                                 f"{state_snapshot.encoder_quarantine_fraction * 100.0:.6f},\n"
                             )
+                            if not state_snapshot.reciprocating:
+                                f_info.write(
+                                    f"Status termino encoder continuo,{state_snapshot.continuous_encoder_status},\n"
+                                )
+                                target_t_s = state_snapshot.continuous_encoder_target_t_s
+                                f_info.write(
+                                    f"Tempo alvo encoder continuo [s],{target_t_s if target_t_s is not None else 'NULL'},\n"
+                                )
+                                f_info.write(
+                                    f"Evento encoder continuo,{state_snapshot.continuous_encoder_message or 'NULL'},\n"
+                                )
                     except Exception as e:
                         log_msg(f"Aviso: nao foi possivel registrar a quarentena no _I ({e}).")
                 if state_snapshot.reciprocating and caminho_arquivo_1:
                     try:
-                        with open(caminho_arquivo_1, "a", encoding="utf-8", newline="") as f_info:
+                        shadow = orch.load_reciprocating_shadow_summary(state_snapshot)
+                        stop_diagnostics = state_snapshot.reciprocating_stop_diagnostics or {}
+                        with open(caminho_arquivo_1, "a", encoding="utf-8", newline="") as raw_info:
+                            f_info = orch.InfoCsvWriter(raw_info)
                             f_info.write(f"Pos-captura reciprocante,{state_snapshot.reciprocating_postroll_status},\n")
                             endpoint = state_snapshot.reciprocating_final_encoder_idx
                             f_info.write(f"Indice final pelo encoder externo,{endpoint if endpoint is not None else 'NULL'},\n")
+                            endpoint_t_s = state_snapshot.reciprocating_final_encoder_t_s
+                            f_info.write(f"Tempo final pelo encoder externo [s],{endpoint_t_s if endpoint_t_s is not None else 'NULL'},\n")
                             f_info.write("Troca de velocidade reciprocante,somente na inversao entre strokes,\n")
+                            f_info.write(
+                                f"Controle encoder externo reciprocante,{'ativo' if state_snapshot.reciprocating_encoder_control_enabled else 'inativo'},\n"
+                            )
+                            f_info.write("Controle encoder atua no Drive,sim; inversao e termino,\n")
+                            f_info.write("Telemetria periodica Drive,desabilitada,\n")
+                            f_info.write(f"Sessao controle encoder,{state_snapshot.reciprocating_shadow_session or 'NULL'},\n")
+                            f_info.write(f"Porta local controle encoder,{state_snapshot.reciprocating_shadow_port or 'NULL'},\n")
+                            f_info.write(f"Tolerancia controle encoder [mm],{state_snapshot.reciprocating_shadow_tolerance_mm:.10g},\n")
+                            f_info.write(f"Distancia total controle encoder [mm],{state_snapshot.reciprocating_shadow_total_mm:.10g},\n")
+                            f_info.write(f"Timeout stroke controle encoder [s],{state_snapshot.reciprocating_shadow_stroke_timeout_s:.10g},\n")
+                            f_info.write(f"Sentido encoder usado no ensaio oficial,{state_snapshot.reciprocating_shadow_forward_sign},\n")
+                            f_info.write(
+                                "Compensacao de parada controle encoder,"
+                                f"{'ativa' if state_snapshot.reciprocating_shadow_stop_compensation else 'inativa'},\n"
+                            )
+                            f_info.write(
+                                "Modelo parada controle encoder,"
+                                "distancia_mm=slope_s*abs(velocidade_mm_s)+margem_mm,\n"
+                            )
+                            f_info.write(
+                                "Slope parada controle encoder [s],"
+                                f"{state_snapshot.reciprocating_shadow_stop_slope_s:.12g},\n"
+                            )
+                            f_info.write(
+                                "Margem parada controle encoder [mm],"
+                                f"{state_snapshot.reciprocating_shadow_stop_margin_mm:.10g},\n"
+                            )
+                            f_info.write(
+                                "Janela velocidade parada controle encoder [s],"
+                                f"{state_snapshot.reciprocating_shadow_stop_velocity_window_s:.10g},\n"
+                            )
+                            f_info.write(
+                                "Limite antecipacao/fracao curso controle encoder,"
+                                f"{state_snapshot.reciprocating_shadow_stop_max_course_fraction:.10g},\n"
+                            )
+                            f_info.write("Acao do controle encoder sobre o Drive,habilitada,\n")
+                            for label, key in (
+                                ("Pacotes validos controle encoder", "valid"),
+                                ("Pacotes rejeitados controle encoder", "rejected"),
+                                ("Lacunas de sequencia controle encoder", "sequence_gaps"),
+                                ("Latencia media controle encoder [ms]", "latency_mean_ms"),
+                                ("Latencia maxima controle encoder [ms]", "latency_max_ms"),
+                                ("Pacotes com latencia acima de 20 ms", "latency_over_20ms"),
+                                ("Pacotes com latencia acima de 50 ms", "latency_over_50ms"),
+                                ("Pacotes com latencia acima de 100 ms", "latency_over_100ms"),
+                                ("Inversoes comandadas pelo encoder", "reverse_events"),
+                                ("Inversoes fisicas confirmadas", "physical_reversals"),
+                                ("Conclusao controle encoder", "complete"),
+                                ("Falha controle encoder", "fault"),
+                                ("Curso fisico medio controle encoder [mm]", "physical_course_mean_mm"),
+                                ("Curso fisico minimo controle encoder [mm]", "physical_course_min_mm"),
+                                ("Curso fisico maximo controle encoder [mm]", "physical_course_max_mm"),
+                                ("Erro medio extremo fisico [mm]", "endpoint_abs_error_mean_mm"),
+                                ("Erro maximo extremo fisico [mm]", "endpoint_abs_error_max_mm"),
+                            ):
+                                f_info.write(f"{label},{shadow.get(key, 'NULL')},\n")
+                            processed = state_snapshot.reciprocating_processing_summary or {}
+                            for label, key in (
+                                ("Strokes processados pelo encoder", "strokes"),
+                                ("Curso processado medio [mm]", "course_mean_mm"),
+                                ("Curso processado minimo [mm]", "course_min_mm"),
+                                ("Curso processado maximo [mm]", "course_max_mm"),
+                                ("Erro medio assinado do curso [mm]", "course_error_mean_mm"),
+                                ("Erro absoluto medio do curso [mm]", "course_abs_error_mean_mm"),
+                                ("Erro absoluto maximo do curso [mm]", "course_abs_error_max_mm"),
+                                ("Velocidade media dos strokes [mm/s]", "speed_mean_mm_s"),
+                                ("Velocidade minima dos strokes [mm/s]", "speed_min_mm_s"),
+                                ("Velocidade maxima dos strokes [mm/s]", "speed_max_mm_s"),
+                            ):
+                                value = processed.get(key)
+                                f_info.write(f"{label},{value if value is not None else 'NULL'},\n")
+                            f_info.write("Diagnostico parada ensaio,DadosDev/recip_stop_diagnostics.csv,\n")
+                            f_info.write(f"Linhas diagnostico parada ensaio,{stop_diagnostics.get('rows', 'NULL')},\n")
+                            f_info.write(f"Linhas completas diagnostico parada ensaio,{stop_diagnostics.get('complete_rows', 'NULL')},\n")
+                            f_info.write("Uso diagnostico parada,registra a atuacao real do encoder e os extremos fisicos,\n")
                     except Exception as e:
                         log_msg(f"Aviso: nao foi possivel registrar a pos-captura no _I ({e}).")
                 graph_log("RUN end token={0} failure_rc={1} failure_msg={2}".format(run_token, failure_rc, failure_msg))
                 try:
                     if failure_rc:
-                        label_ensaio_estado.config(text="Falha Drive", fg="red")
+                        label_ensaio_estado.config(text="Falha no ensaio", fg="red")
                     else:
                         label_ensaio_estado.config(text="Finalizado", fg="green")
                     _set_targets_stopped()
@@ -4746,7 +5215,7 @@ def start_acquisition():
                         try:
                             _save_graficos_tab_image(caminho_graficos_png)
                             if failure_rc:
-                                msg = failure_msg or f"Logger do Drive encerrou com rc={failure_rc}."
+                                msg = failure_msg or f"O ensaio encerrou com rc={failure_rc}."
                                 messagebox.showerror("Falha no ensaio", msg)
                         finally:
                             try:
@@ -4768,15 +5237,26 @@ def start_acquisition():
         # Grafico 3 em tempo real:
         # agrega por idx diretamente de dlg.csv+drive.csv no Python,
         # por intervalos de distancia configurados.
-        threading.Thread(
-            target=_tail_realtime_dist_from_logs,
-            args=(
-                caminho_dlg_csv, caminho_drive_csv, RELACAO_MECANICA, raio_mm,
-                DIST_INTERVAL_MM, 1.0, run_token, reciprocating_enabled,
-                list(zip(lista_velocidades_digitadas, lista_duracao)),
-            ),
-            daemon=True
-        ).start()
+        if reciprocating_enabled:
+            threading.Thread(
+                target=_tail_realtime_reciprocating_encoder,
+                args=(
+                    caminho_dlg_csv, state_snapshot.encoder_state_csv,
+                    DIST_INTERVAL_MM,
+                    list(zip(lista_velocidades_digitadas, lista_duracao)),
+                    run_token,
+                ),
+                daemon=True
+            ).start()
+        else:
+            threading.Thread(
+                target=_tail_realtime_continuous_encoder,
+                args=(
+                    caminho_dlg_csv, state_snapshot.encoder_state_csv,
+                    raio_mm, DIST_INTERVAL_MM, run_token,
+                ),
+                daemon=True,
+            ).start()
 
         # Thread para atualizar velocidade atual (modo externo)
         threading.Thread(
@@ -4850,6 +5330,17 @@ def pause_acquisition():
     if USE_EXTERNAL_RUNNER:
         if external_run_state is None:
             messagebox.showwarning("Pausar", "Ensaio externo não está ativo.")
+            return
+        if (
+            getattr(external_run_state, "reciprocating", False) and
+            getattr(external_run_state, "reciprocating_encoder_control_enabled", False)
+        ):
+            messagebox.showinfo(
+                "Pausa indisponível",
+                "No modo reciprocante controlado pelo encoder externo, a pausa "
+                "é bloqueada para não perder a referência dos extremos. Use "
+                "Parar para encerrar o ensaio com segurança."
+            )
             return
 
         if not is_paused:
@@ -4949,7 +5440,7 @@ def stop_acquisition():
                     try:
                         # stop_run(state) tenta parada graciosa por IPC ("STOP"),
                         # aguarda flush/fechamento e so entao usa terminate/kill.
-                        orch.stop_run(state_snapshot)
+                        orch.stop_run(state_snapshot, manual=True)
                     except Exception as e:
                         log_msg(f"Erro ao solicitar parada externa: {e}")
                 threading.Thread(target=_stop_external, daemon=True).start()
@@ -5669,6 +6160,42 @@ def _reload_final_reciprocating_graph_data():
         graph_log(f"GRAPH final reload failed: {e}")
 
 
+def _reload_final_continuous_graph_data():
+    """Recarrega _DP/_VP externos para o PNG continuo usar o resultado final."""
+    if "reciprocante_var" in globals() and reciprocante_var.get():
+        return
+    if not caminho_turn_dist_csv or not caminho_turn_volta_csv:
+        return
+    try:
+        with open(caminho_turn_dist_csv, "r", newline="", encoding="utf-8-sig") as f:
+            dist_rows = list(csv.DictReader(f, delimiter=";"))
+        with open(caminho_turn_volta_csv, "r", newline="", encoding="utf-8-sig") as f:
+            turn_rows = list(csv.DictReader(f, delimiter=";"))
+        radius = float(ent_raio.get().strip().replace(",", "."))
+        circumference = 2.0 * math.pi * radius
+        def equivalent_motor_rpm(speed):
+            return float(speed) * 60.0 * RELACAO_MECANICA / circumference
+
+        p_strokes.clear(); p_atrito_ef.clear(); p_atrito_max.clear(); p_atrito_min.clear(); p_coluna_velocidade.clear()
+        for row in dist_rows:
+            p_strokes.append(float(row["distancia_mm"]))
+            p_atrito_ef.append(float(row["atrito_med"]))
+            p_atrito_max.append(float(row["atrito_max"]))
+            p_atrito_min.append(float(row["atrito_min"]))
+            p_coluna_velocidade.append(equivalent_motor_rpm(row["velocidade_media_mm_s"]))
+
+        p_turn_strokes.clear(); p_turn_atrito_ef.clear(); p_turn_atrito_max.clear(); p_turn_atrito_min.clear(); p_turn_coluna_velocidade.clear()
+        for row in turn_rows:
+            p_turn_strokes.append(float(row["volta_n"]))
+            p_turn_atrito_ef.append(float(row["atrito_med"]))
+            p_turn_atrito_max.append(float(row["atrito_max"]))
+            p_turn_atrito_min.append(float(row["atrito_min"]))
+            p_turn_coluna_velocidade.append(equivalent_motor_rpm(row["velocidade_media_mm_s"]))
+        _bump_graph_data_revision()
+    except Exception as e:
+        graph_log(f"GRAPH continuous final reload failed: {e}")
+
+
 def _save_graficos_tab_image(path=None):
     """
     Salva uma imagem PNG da figura 2x2 da aba "graficos".
@@ -5692,6 +6219,7 @@ def _save_graficos_tab_image(path=None):
     graph_snapshot_rendering = True
     try:
         _reload_final_reciprocating_graph_data()
+        _reload_final_continuous_graph_data()
         update_graficos_tab(None)
         try:
             canvas_graficos.draw()

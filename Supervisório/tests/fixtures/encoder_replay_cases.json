@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "description": "Casos compactos para paridade futura do nucleo causal do encoder.",
+  "cases": {
+    "wrap_forward": {
+      "radius_mm": 10.0,
+      "max_target_speed_mm_s": 100.0,
+      "samples": [[0.000, 358.0], [0.005, 359.0], [0.010, 0.0], [0.015, 1.0]],
+      "expected_unwrapped_deg": [358.0, 359.0, 360.0, 361.0]
+    },
+    "wrap_reverse": {
+      "radius_mm": 10.0,
+      "max_target_speed_mm_s": 100.0,
+      "samples": [[0.000, 2.0], [0.005, 1.0], [0.010, 0.0], [0.015, 359.0], [0.020, 358.0]],
+      "expected_unwrapped_deg": [2.0, 1.0, 0.0, -1.0, -2.0]
+    },
+    "jitter_stationary": {
+      "radius_mm": 10.0,
+      "max_target_speed_mm_s": 20.0,
+      "samples": [[0.000, 45.000], [0.005, 45.002], [0.010, 44.999], [0.015, 45.001], [0.020, 45.000]],
+      "expected_motion_valid": false
+    },
+    "quarantine_gap": {
+      "radius_mm": 10.0,
+      "max_target_speed_mm_s": 20.0,
+      "samples": [[0.000, 10.0, 0], [0.005, 10.5, 0], [0.010, 200.0, 1], [0.015, 11.5, 0], [0.020, 12.0, 0]],
+      "expected_operational_valid_rows": 4,
+      "expected_offline_valid_rows": 4,
+      "expected_quarantine_rows": 1
+    },
+    "missing_samples": {
+      "radius_mm": 10.0,
+      "max_target_speed_mm_s": 20.0,
+      "samples": [[0.000, 10.0], [0.005, 10.5], [0.010, null], [0.015, null], [0.020, 12.0]],
+      "expected_valid_rows": 3,
+      "expected_max_valid_gap_s": 0.015
+    },
+    "impossible_jump": {
+      "radius_mm": 10.0,
+      "max_target_speed_mm_s": 20.0,
+      "samples": [[0.000, 10.0], [0.005, 10.5], [0.010, 150.0], [0.015, 11.5]],
+      "expected_rejected_glitches": 1,
+      "expected_valid_rows": 3
+    },
+    "direction_change": {
+      "radius_mm": 10.0,
+      "course_mm": 1.0,
+      "max_target_speed_mm_s": 20.0,
+      "samples": [[0.000, 0.0], [0.005, 1.0], [0.010, 2.0], [0.015, 3.0], [0.020, 4.0], [0.025, 3.5], [0.030, 3.0], [0.035, 2.0]],
+      "expected_completed_strokes": 1,
+      "expected_first_direction": 1
+    }
+  }
+}

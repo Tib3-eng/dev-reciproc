@@ -4,6 +4,12 @@
     <ClCompile Include="C:\Users\nicol\Desktop\DevReciproc\DLG4000\src\dlg_logger_ipc.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="C:\Users\nicol\Desktop\DevReciproc\EncoderCore\src\encoder_state.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\nicol\Desktop\DevReciproc\EncoderCore\src\encoder_control_protocol.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <CustomBuild Include="C:\Users\nicol\Desktop\DevReciproc\DLG4000\CMakeLists.txt" />

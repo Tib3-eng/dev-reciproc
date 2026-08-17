@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "description": "Baselines reais externos ao Git; SHA-256 impede usar outro ensaio por engano.",
+  "datasets": {
+    "continuous_modbus_loss": {
+      "mode": "continuous",
+      "override_relative_path": "continuous_modbus_loss",
+      "repo_globs": [
+        "ReprocessaEncoder*/Reprocessa__Ensaio"
+      ],
+      "desktop_repository_paths": [],
+      "info_file": "2026-08-06-XM19_ACO-2-1_I.csv",
+      "test_file": "2026-08-06-XM19_ACO-2-1_T.csv",
+      "sha256": {
+        "2026-08-06-XM19_ACO-2-1_I.csv": "329db3622e2957bb18dc9e9f628a00d37742b32d3a67dc848609e7e390044760",
+        "2026-08-06-XM19_ACO-2-1_T.csv": "74076adf8d34efca07424a04723b08c3cc0913829855c02cfe59b82708cb028f"
+      },
+      "parameters": {
+        "radius_mm": 10.0,
+        "max_target_speed_mm_s": 20.0,
+        "programmed_distance_mm": 70000.0
+      },
+      "expected": {
+        "source_rows": 174990,
+        "quarantine_rows": 17161,
+        "sample_rate_hz": 50.0,
+        "external_distance_mm": 70304.983177,
+        "external_turns": 1118.938560,
+        "reverse_fraction": 0.01312,
+        "global_speed_mm_s": 20.088,
+        "reprocessed_dp_rows": 17576,
+        "reprocessed_vp_rows": 1118,
+        "legacy_drive_dp_final_mm": 4476.0,
+        "legacy_drive_vp_rows": 71
+      }
+    },
+    "reciprocating_multispeed": {
+      "mode": "reciprocating",
+      "override_relative_path": "reciprocating_multispeed",
+      "repo_globs": [],
+      "desktop_repository_paths": [
+        "2026-08-05 - PoD - TesteEncoder_2-1"
+      ],
+      "info_file": "2026-08-05-TesteEncoder-2-1_I.csv",
+      "test_file": "2026-08-05-TesteEncoder-2-1_T.csv",
+      "sha256": {
+        "2026-08-05-TesteEncoder-2-1_I.csv": "1d9f1256e243c33462f67c9ad11c92b347517ad5f4812510309d7ebdea442c2d",
+        "2026-08-05-TesteEncoder-2-1_T.csv": "2931307313476eee6d811fb8fa2b64a7210ab94c1a36919848d815354a839923"
+      },
+      "parameters": {
+        "radius_mm": 12.0,
+        "course_mm": 10.0,
+        "max_target_speed_mm_s": 10.0,
+        "programmed_distance_mm": 1920.0
+      },
+      "expected": {
+        "source_rows": 15815,
+        "sample_rate_hz": 50.0,
+        "drive_reverse_events": 183,
+        "drive_completed_strokes": 184,
+        "current_m_rows": 184,
+        "offline_external_distance_mm": 1921.916350,
+        "offline_detected_strokes_total": 198,
+        "offline_emitted_strokes": 192,
+        "offline_emitted_distance_mm": 1915.848790,
+        "offline_short_strokes_emitted_below_75pct": 9,
+        "offline_short_strokes_total_below_75pct": 15
+      }
+    }
+  }
+}

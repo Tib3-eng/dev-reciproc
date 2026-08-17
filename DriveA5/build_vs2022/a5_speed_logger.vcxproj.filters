@@ -4,6 +4,12 @@
     <ClCompile Include="C:\Users\nicol\Desktop\DevReciproc\DriveA5\src\a5_speed_logger.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="C:\Users\nicol\Desktop\DevReciproc\EncoderCore\src\encoder_control_protocol.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\nicol\Desktop\DevReciproc\EncoderCore\src\recip_encoder_controller.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <CustomBuild Include="C:\Users\nicol\Desktop\DevReciproc\DriveA5\CMakeLists.txt" />

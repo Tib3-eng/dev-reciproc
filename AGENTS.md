@@ -115,9 +115,9 @@ SupervisÃ³rio (Python/Tk):
 - start_external_run nao aborta apenas por `DATA_TIMEOUT` inicial do DLG; o cronometro so inicia com amostra valida e o supervisÃ³rio decide abortar por timeout de validacao.
 - start_external_run no supervisÃ³rio usa bind UDP fixo (41402) no logger DLG; evitar bind efemero no pipeline principal para reduzir casos de ensaio sem ACQDATA.
 - Se o cronometro nao iniciar por falta de amostras validas do DLG no tempo limite, o supervisÃ³rio aborta o ensaio externo e encerra subprocessos (evita corrida com dlg.csv todo em erro).
-- Taxa padrao de aquisicao no pipeline externo (DLG + Drive) ajustada para 50 Hz; manter ambas iguais para sincronismo.
+- Pipeline principal: DLG/encoder a 200 Hz; Drive registra comandos a 50 Hz sem leituras periodicas P0B-09/P0B-00. Nao gerar dlg_compat_50hz no fluxo principal.
 - wait_and_merge has fallback merge in Python if merge_logs fails or resultado_ensaio.csv is missing.
-- wait_and_merge reconstrói o arquivo _P por distancia em Python ao final de todo ensaio para garantir consistencia do arquivo final com os CSVs completos.
+- wait_and_merge reconstroi os arquivos processados por distancia em Python ao final de todo ensaio para garantir consistencia com os CSVs completos.
 - Rebuild offline em Python usa a mesma regra de wrap/backstep do C (sem `%` direto no delta) para evitar sobrecontagem de voltas por jitter.
 - Outputs go to Desktop\\Repositorio\\<AAAA-MM-DD - PoD - NomeEnsaio_Estudo-Repeticao> with arquivos finais nomeados por padrao:
   <data>-<nome_ensaio>-<estudo>-<repeticao>_I.csv (info), _P.csv (atrito por distancia), _T.csv (resultado ensaio).
@@ -145,7 +145,13 @@ SupervisÃ³rio (Python/Tk):
 - No reciprocante, o offset e aplicado apenas aos dados processados/exibidos (CH1/atrito em _T, _DP, _M e graficos); DadosDev/dlg.csv permanece bruto. _M usa media do modulo, RMS permanece em ATRITO_EFETIVO e max/min preservam sinal.
 - O arquivo _T grava `PosEncExt` filtrada e, imediatamente ao lado, `PosEncExt_Quarentena` (0=amostra aceita, 1=trecho reconstruido). O filtro operacional usa rastreamento angular por predicao, innovation gate e histerese de 5 amostras; somente transicoes fisicamente incompativeis sao isoladas e reconstruidas entre ancoras confiaveis. O CH3 bruto permanece em DadosDev/dlg.csv.
 - No reciprocante, cada velocidade alvo fica travada durante todo o stroke. Mudancas de etapa que vencerem durante o movimento ficam pendentes e so sao aplicadas na inversao seguinte; `_M` registra `VELOCIDADE_MEDIA` e a `VELOCIDADE_ALVO` digitada para cada stroke.
+- No programa principal, o reciprocante usa o encoder externo como autoridade unica para inversao, termino, posicao, velocidade e distancia. `a5_speed_logger --recip-encoder-control --command-only` recebe pacotes UDP locais a 200 Hz e o Drive atua apenas por comandos Modbus.
+- O controle reciprocante externo exige amostra valida antes do movimento, aprende/valida sentido em 0.5 mm, aborta sem movimento em 3 s, usa extremos fixos, para no gatilho, espera 20 ms e inverte. Pausa e bloqueada neste modo para preservar extremos; STOP permanece disponivel.
+- Barreira de partida reciprocante: `DATA_OK` do DLG pode anteceder o primeiro pacote UDP causal. Depois de START, `a5_speed_logger` mantem o Drive parado e espera ate 3 s por pacote CH3 aceito/inicializado/saudavel; somente entao inicia o cronometro e envia RUN. STOP/PAUSE cancelam a espera. Timeout registra `FATAL RECIP_ENCODER_NO_ORIGIN` e o supervisor mostra essa causa primaria sem classificar a captura inexistente como perda/ciclos invalidos.
+- Modelo operacional de antecipacao: `0.13199835832212273 * abs(v_mm_s) + 0.27025001630016243`, OLS causal 250 ms e clamp em 45% do curso. O erro de extremo e medido no extremo fisico confirmado, nao no gatilho antecipado.
+- `_T`, `_DP`, `_M` e graficos reciprocantes sao gerados de `dlg.csv + encoder_state.csv` a 200 Hz, sem abrir telemetria do Drive. `drive.csv` principal tem `idx,t_qpc,t_s,cmd_rpm,cmd_err`.
 - Ao concluir a distancia reciprocante, o motor para imediatamente, mas Drive e DLG permanecem em pos-captura por ate 2 s. O orquestrador encerra quando CH3 apresenta o ultimo extremo e estabiliza; DadosDev preserva a cauda e `_T` e recortado no extremo externo detectado.
+- O ultimo extremo reciprocante sem reversao e confirmado na cauda do CH3 a partir do QPC de RECIP_ENCODER_DONE: mediana causal 9, movimento >=0.2 mm, janela estavel 250 ms, faixa <=0.15 mm e |OLS| <=0.25 mm/s. `_T`/`_M` terminam no primeiro extremo causal aprovado; DadosDev preserva a cauda.
 - Graficos reciprocantes usam processamento por stroke no lugar de volta. A velocidade media e curso efetivo dividido pela duracao do stroke, sem media assinada de RPM nem reconversao de mm/s; o PNG final recarrega `_M`/`_DP` reconstruidos.
 - Na correcao dinamica, o orquestrador encerra os loggers ao completar os strokes do ciclo extra + ciclos validos, sem aguardar o watchdog. DadosDev/recip_dynamic_offset.csv marca as amostras usadas; _I registra offset, ciclos, RPM do disco/Drive, amostras validas, perda e validacao.
 - Inicio de novo ensaio fica bloqueado enquanto tara, processos externos, merge/finalizacao ou salvamento dos arquivos finais do ensaio anterior ainda estiverem em andamento.
@@ -153,7 +159,10 @@ SupervisÃ³rio (Python/Tk):
 - Busca do arquivo de calibracao CH1 prioriza `calib_CH1.json`/`out\\calib_CH1.json`; arquivos genericos (`calib.json`/`calib`) so sao aceitos quando o payload indicar CH1.
 - novo_tribometro captures run state snapshot to avoid race with global external_run_state.
 - Todo ensaio exige a calibracao angular aprovada do encoder em `%LOCALAPPDATA%\LATRIB\calibrations\encoder_external_ch3.json`; ausencia, schema/preset incompativel, saturacao ou quality.accepted=false bloqueiam antes da tara e de qualquer movimento.
-- O dlg_logger_ipc aplica ao CH3 o preset e o fit do JSON angular e normaliza em [0,360), mas preserva a aquisicao sem filtro temporal em DadosDev/dlg.csv. No `_T.csv`, o supervisor aplica o rastreador de transicao em `PosEncExt` e grava `PosEncExt_Quarentena` ao lado; `_DP` e `_M` permanecem inalterados. O `_I.csv` registra caminho, SHA-256, schema, data, fit, zero, preset, taxa, referencia, relacao, split 7/3, metricas, perdas, saturacoes e estatisticas de quarentena; nao registra modelo do encoder.
+- O dlg_logger_ipc aplica ao CH3 o preset e o fit do JSON angular e normaliza em [0,360), mas preserva a aquisicao sem filtro temporal em DadosDev/dlg.csv. No `_T.csv`, o supervisor grava `PosEncExt` e `PosEncExt_Quarentena`; `_DP` e `_M` usam somente amostras aceitas do encoder. O `_I.csv` registra caminho, SHA-256, schema, data, fit, zero, preset, taxa, referencia, relacao, split 7/3, metricas, perdas, saturacoes e estatisticas de quarentena; nao registra modelo do encoder.
+- Tarefa 5A concluida: `encoder_control_protocol` define pacote binario v1 de 92 bytes com sessao, sequencia, QPC, estado causal em mm, saude/status e CRC-32. `dlg_logger_ipc` publica por UDP somente em 127.0.0.1 quando recebe porta+sessao explicitas. `a5_speed_logger --self-test-encoder-link` valida loopback/sessao/sequencia/stale sem hardware; esse caminho e autoritativo nas inversoes reais do programa principal.
+- `recip_encoder_controller` e autoritativo no programa principal: extremos fixos, uma inversao por stroke, confirmacao da reversao fisica, conclusao somente no extremo, tolerancia diagnostica, timeout de encoder/curso e falha em 2x o curso. O modulo decide e `a5_speed_logger` executa Modbus; P0B-09 nao participa.
+- Modo continuo migrado para CH3 externo: DLG/EncoderCore a 200 Hz gera encoder_state.csv, _T, _DP e _VP sem usar posicao/RPM do Drive. A direcao usa mediana causal de 51 amostras e deslocamento liquido desde a origem; trava depois de 5 confirmacoes acima de 1 mm, falha se nao travar em 3 s apos detectar 0.2 mm de movimento ou se ficar 1 mm incompativel com o sentido. O progresso e monotono contra jitter, interpola o alvo e usa gate fisico com 2x da maior velocidade entre alvo digitado e RPM inteiro efetivo. Essa logica e exclusiva do continuo; nao alterar o reciprocante ao corrigi-la.
 
 DriveA5 (Modbus RTU / libmodbus):
 - a5_cli: RUN/STOP, set RPM (P06-03), read P0B-09. Try FC03, fallback FC04.
@@ -173,7 +182,7 @@ DriveA5 (Modbus RTU / libmodbus):
 - a5_pos_cli logs position checks to out/a5_pos_log.csv (raw + logical P0B-07, error, dev, cmd) and caches P05-02 (units/rev) when readable.
 - Standard test: 10 rpm, 120 s, ~200 Hz. CSV: t_s,pos,rev.
 - Revolution count: detect robust wrap (prev > 60000 and pos < 5000).
-- a5_speed_logger: headless logger para modo velocidade (RPM) com schedule CSV (rpm,duration_s). Loga P0B-09 (posicao) e P0B-00 (actual motor speed) em 50 Hz: idx,t_qpc,t_s,pos,rpm,pos_err,rpm_err,pos_mod. Se P05-02 estiver disponivel, escala posicao para 0..(P05-02-1); caso contrario usa bruto 0..65535.
+- a5_speed_logger: headless logger para modo velocidade (RPM) com schedule CSV (rpm,duration_s). O modo legado/mapeador loga P0B-09 e P0B-00; o programa principal usa `--command-only` e nao faz essas leituras periodicas.
 - a5_speed_logger --setup: escreve P02-00=0, P06-00=0, P06-01=3, P06-02=0, P03-02=0, P0C-09=1 e P31-00=0 para usar P06-03 como unica fonte de velocidade (evita offset por A+B).
 - a5_speed_logger fim de ensaio: envia parada imediata reforcada (RPM=0 + CTRL RDY + P31-00=0 com retry curto).
 - a5_speed_logger usa deadline real (QPC/wall-time) para disparar STOP no tempo alvo, mesmo se o loop de aquisicao estiver atrasado.
@@ -190,11 +199,25 @@ DriveA5 (Modbus RTU / libmodbus):
 - Reciprocante inicial usa paradas secas sem rampa. Tolerancia de parada fica persistida no supervisorio em "configuracoes adicionais".
 - Alternativa registrada caso a conversao geometrica do curso nao funcione em bancada: calibrar empiricamente com volta lenta, lendo arquivo com tempo/RPM/posicao e usando a posicao real de parada como alvo final.
 - a5_speed_logger escreve `a5_speed_events.log` ao lado do `drive.csv` com startup, START, pause/resume, progresso por segundo, erros de leitura e encerramento.
-- merge_logs: junta dlg.csv + drive.csv por indice de linha e gera CSV de resultado com colunas: idx,t_s,ch1..ch8,atrito,pos,rpm,dlg_err,drive_pos_err,drive_rpm_err.
-- Atrito por distancia (tempo real e final) e processado em Python no supervisorio com alinhamento por idx entre `dlg.csv` e `drive.csv`.
-- Regra de distancia em Python usa unwrap orientado por direcao (RPM com deadband) e reconstrucao guiada por RPM/dt para tolerar gaps grandes entre amostras validas, mantendo guarda de plausibilidade.
-- o arquivo _P por distancia e sempre reconstruido no final por `wait_and_merge` usando os CSVs completos.
-- No supervisorio (agregacao em Python), `P0B-09` usa 1 ciclo por volta de motor e converte para distancia do pino por `dist_inc = (voltas_motor / i) * (2*pi*raio)` (i = D2/D1).
+- Modo sombra reciprocante historico: permanece somente no MapeiaParadaReciprocante e em diagnosticos que pedirem `action_enabled=0`. No programa principal, o mesmo enlace UDP/EncoderCore atua com `action_enabled=1`; P0B-09 nao controla o movimento.
+- O sentido do encoder reciprocante e aprendido na correcao dinamica por deslocamento liquido de 0.5 mm e reutilizado no ensaio oficial. A maquina sombra usa mediana causal 15, banda de extremo 0.2 mm, histerese de reversao 0.25 mm, extremos fixos e percurso por strokes concluidos. Nunca usar `path_distance_mm` bruto para terminar o reciprocante: ruido limitado inflou 480 mm para 5403.8 mm no teste de 13-08-2026.
+- Antecipacao de parada reciprocante esta ativa no programa principal (`action_enabled=1`): `trigger = physical_target - direction * min(0.13199835832212273*abs(v_OLS_250ms)+0.27025001630016243, 0.45*course)`. Logs registram alvo fisico, gatilho, velocidade, antecipacao e clamp; `_I` registra o modelo. Atuacao real validada de 1 a 3 mm/s; validar gradualmente 5, 10, 15 e 20 mm/s.
+- merge_logs e formato com drive_pos_err/drive_rpm_err ficam apenas para compatibilidade legada. O programa principal gera `_T` diretamente do DLG/encoder com encoder_pos_err/encoder_rpm_err.
+- No programa principal, atrito por distancia (tempo real e final) usa `dlg.csv + encoder_state.csv`, alinhados por indice do mesmo pipeline DLG; `drive.csv` nao participa.
+- No reciprocante, `_DP.atrito_med` e a media do modulo para impedir cancelamento entre sentidos; `_DP.atrito_min` e `_DP.atrito_max` preservam o sinal. No continuo, `atrito_med` permanece assinado.
+- Regras baseadas em P0B-09/RPM e alinhamento `dlg.csv + drive.csv` permanecem somente nos caminhos legados e nas ferramentas de diagnostico/mapeamento.
+
+Stopping response mapper (MapeiaParadaReciprocante):
+- `mapa_parada.py` is a separate friendly-menu program; packaged executable is `MapeiaParadaReciprocante/dist/mapa_parada_reciprocante.exe` and embeds dlg_logger_ipc, a5_speed_logger, merge_logs and modbus-5.dll.
+- Hardware sequence is gradual: speeds [1,2,5,10,15,20] mm/s and courses [50,30,15,4] mm. The C Drive logger remains the actuation/deadline owner; CH3 external encoder is diagnostic/measurement.
+- Mapping calls a5_speed_logger with `--strict-setup`: reinforced STOP before/after setup, readback of all seven speed parameters, three consecutive valid P0B-09 reads and P0B-34=0 are required before READY.
+- DLG must be valid before Drive START. Gates stop the whole matrix for DLG loss >1%, encoder shadow fault, missing strict preflight, sustained latency (mean >20 ms or >2% packets above 100 ms), negative incompatible stopping distance, stopping distance >= course or physical course >=2x configured.
+- Statistical insufficiency is non-fatal: it invalidates that condition and blocks shorter courses at the same speed, then allows the next speed to restart at 50 mm. Encoder latency between 0.5% and 2% above 100 ms is a recorded warning.
+- Each condition currently uses 6 strokes and discards the first complete cycle. Because the last physical extreme is not confirmed until reversal, accepted conditions leave 3 raw useful stops (2 in one direction, 1 in the other); modeling balances this as one mean per condition+direction.
+- Completed study 2026-08-13: `out/stopping_curve/pilot_v1_c50`; 24 conditions executed safely, 22 accepted, 66 raw stops and 44 direction-balanced model points. Conditions 15 mm/s x 4 mm and 20 mm/s x 4 mm were excluded only for fewer than 3 complete stops after warmup.
+- Observed range: external speed 0.994..20.806 mm/s and stopping distance 0.030..2.800 mm. Selected leave-one-condition-out model: `stopping_mm = 0.1319983583 * abs(external_speed_mm_s)`; CV RMSE 0.1296 mm. Balanced-point P95 CV margin is +0.21995 mm. For future per-stroke actuation use the raw-stop one-sided P95 +0.27025 mm (raw maximum +0.33931 mm), subject to independent validation.
+- Course response surface did not improve condition-held-out validation once actual external speed was used. Course still affects whether short strokes reach target speed; do not extrapolate the rejected 15/4 and 20/4 conditions.
+- Mapping artifacts: `pontos_parada_consolidados.csv` (raw), `pontos_modelo_balanceados.csv`, `modelo_parada.json`, and `RELATORIO_MAPA_PARADA.md`. The selected model is enabled in the main reciprocating controller, validated at 1..3 mm/s, and still requires gradual validation at 5/10/15/20 mm/s.
 Field notes (DriveA5, based on recent tests):
 - Relative mode (P11-04=0) is more consistent than absolute, but still drifts if completion threshold is loose.
 - P05-21 (positioning completion threshold) around 20 caused ~20 count residual; lowering to 5 or 2 is recommended for tighter closure.
@@ -213,7 +236,7 @@ Investigation notes - DriveA5 communication saga (2026-03-19)
 - Ajuste 4 testado: politica por deadline de slot, priorizando posicao e tentando RPM apenas no tempo restante. Resultado: nao melhorou a posicao de forma relevante e piorou muito a disponibilidade de RPM.
 - Ajuste 5 testado: modo temporario somente posicao a 50 Hz. Resultado: ganho marginal em `pos_err`/`valid_pos`, insuficiente para justificar a perda total de RPM.
 - Diagnostico importante obtido nos logs de slot: a folga do slot ficou baixa/quase nula; portanto o problema nao era "tempo sobrando mal aproveitado". O gargalo aparente esta na propria transacao Modbus/serial de `P0B-09` em ambiente real.
-- Conclusao operacional desta saga: as mudancas exploratorias acima nao devem ser tratadas como novo baseline do projeto sem revalidacao forte. O ponto seguro continua sendo o ultimo commit estavel anterior a essa rodada de experimentos.
+- Conclusao operacional desta saga: a telemetria periodica P0B-09/P0B-00 foi retirada do pipeline principal. O baseline atual e o pipeline CH3/EncoderCore a 200 Hz validado em bancada; as tentativas Modbus acima sao apenas historico e nao devem ser reintroduzidas.
 - Proxima frente recomendada fora do software: investigar adaptador RS485/Ethernet, cabo, EMC/roteamento no laboratorio, aterramento/shield e comportamento do conversor serial sob ruido do drive/carga.
 
 Operational constraints
@@ -226,13 +249,15 @@ Operational constraints
 CSV conventions
 - ASCII logs and CSV only.
 - Fixed headers and units. Use "NULL" rows only for real losses.
-- `resultado_ensaio.csv` and o arquivo _P por distancia use `;` as column delimiter.
+- Arquivos finais `_T`, `_DP`, `_VP`, `_M` e `_I` usam `;` como delimitador.
+- `_I.csv` usa sempre tres colunas `campo;valor;valor2` separadas por `;`. ReprocessaEncoder detecta automaticamente esse formato e o legado separado por `,`.
 - Arquivos finais do grafico 3: _DP.csv (distancia) e _VP.csv (volta), ambos com `;` como delimitador.
 - No modo reciprocante, _VP.csv e substituido por _M.csv, processado por stroke. _M.csv usa `TEMPO_(min);STROKE;ATRITO_EFETIVO;ATRITO_MEDIO;ATRITO_MAX;POS_MAX;ATRITO_MIN;POS_MIN;LINHAS;VELOCIDADE_MEDIA;VELOCIDADE_ALVO;ERRO_CURSO_MM`.
+- No reciprocante, `_DP.atrito_med` e `_M.ATRITO_MEDIO` usam media do modulo; min/max preservam sinal. No continuo, a media de `_DP`/`_VP` permanece assinada.
 - No _M.csv, o filtro de borda e configuravel no supervisorio em percentual por borda: 1% remove 1% do inicio e 1% do fim de cada stroke. O filtro se aplica a RMS, media, maximo e minimo; POS_MAX/POS_MIN sao em mm dentro do stroke.
-- _DP.csv e _VP.csv incluem `t_s_inicio`: tempo da primeira linha alinhada DLG+Drive que entrou naquele intervalo/volta, para correlacionar os dois processamentos; _M.csv usa `TEMPO_(min)` no inicio do stroke.
+- _DP.csv e _VP.csv incluem `t_s_inicio`: tempo da primeira amostra DLG/encoder que entrou naquele intervalo/volta; _M.csv usa `TEMPO_(min)` no inicio do stroke.
 - Ao finalizar o ensaio, o supervisor salva _G.png com a figura 2x2 da aba "graficos".
-- o arquivo _P por distancia inclui `velocidade_media_mm_s` por intervalo, derivada de `rpm_medio_intervalo` com `v = |rpm| * (2*pi*raio) / (60*i)`.
+- `_DP.velocidade_media_mm_s` vem da distancia exata dividida pelo intervalo entre cruzamentos do encoder externo; nao reconverter RPM do Drive no pipeline principal.
 - Write outputs into out/ subfolders (gitignored) when creating artifacts.
 - Supervisor (novo_tribometro.py) grava em: Desktop\\Repositorio\\<AAAA-MM-DD - PoD - NomeEnsaio_Estudo-Repeticao>.
   Arquivos finais: <data>-<nome_ensaio>-<estudo>-<repeticao>_I.csv, _DP.csv, _VP.csv (continuo) ou _M.csv (reciprocante), _T.csv, _G.png.

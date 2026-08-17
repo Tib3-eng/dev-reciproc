@@ -28,11 +28,15 @@ Fora de escopo:
 """
 
 import csv
+import bisect
 import math
 import os
+import secrets
 import shutil
+import socket
 import subprocess
 import sys
+import threading
 import time
 from itertools import zip_longest
 from dataclasses import dataclass
@@ -43,7 +47,10 @@ from typing import List, Tuple, Optional
 # -------------------------------
 # Configuracoes padrao (podem ser sobrescritas por quem chama o modulo)
 # -------------------------------
-DEFAULT_RATE_HZ = 50.0
+DEFAULT_DLG_RATE_HZ = 200.0
+DEFAULT_DRIVE_RATE_HZ = 50.0
+# Nome legado mantido para chamadores que representam a taxa do DLG.
+DEFAULT_RATE_HZ = DEFAULT_DLG_RATE_HZ
 DEFAULT_DLG_IP = "192.168.1.100"
 DEFAULT_DLG_PORT = 41401
 DEFAULT_BIND_IP = ""
@@ -52,8 +59,125 @@ DEFAULT_BIND_PORT = 41402
 # Filtro operacional do encoder externo. O CH3 ja chega convertido para graus;
 # estes limites atuam somente sobre transicoes fisicamente incompativeis.
 ENCODER_TRANSITION_MIN_GATE_DEG = 3.0
-ENCODER_TRANSITION_CONFIRM_SAMPLES = 5
-ENCODER_TRANSITION_VELOCITY_HISTORY = 15
+ENCODER_TRANSITION_CONFIRM_S = 0.100
+ENCODER_TRANSITION_VELOCITY_HISTORY_S = 0.300
+
+# Modelo validado no modo sombra e agora usado pelo controle reciprocante
+# baseado exclusivamente no encoder externo do DLG.
+RECIP_SHADOW_STOP_MODEL_SLOPE_S = 0.13199835832212273
+RECIP_SHADOW_STOP_MARGIN_MM = 0.27025001630016243
+RECIP_SHADOW_STOP_VELOCITY_WINDOW_S = 0.250
+RECIP_SHADOW_STOP_MAX_COURSE_FRACTION = 0.45
+
+# Confirmacao do ultimo extremo reciprocante apos o comando de parada. Nao ha
+# reversao no ultimo stroke, portanto a conclusao usa movimento residual seguido
+# de estabilidade do proprio CH3. Os limites estao em milimetros no disco.
+RECIP_FINAL_MEDIAN_SAMPLES = 9
+RECIP_FINAL_MIN_OBSERVATION_S = 0.450
+RECIP_FINAL_STABLE_WINDOW_S = 0.250
+RECIP_FINAL_STABLE_MIN_SPAN_S = 0.225
+RECIP_FINAL_STABLE_RANGE_MM = 0.150
+RECIP_FINAL_MAX_SPEED_MM_S = 0.250
+RECIP_FINAL_MIN_EXCURSION_MM = 0.200
+
+# Trava causal de sentido do modo continuo. A mediana curta elimina a oscilacao
+# eletrica das transicoes; a decisao usa deslocamento liquido desde a origem.
+# Estes parametros nao participam do controle reciprocante.
+CONT_DIRECTION_MEDIAN_SAMPLES = 51
+CONT_DIRECTION_MOTION_MM = 0.2
+CONT_DIRECTION_LOCK_MM = 1.0
+CONT_DIRECTION_CONFIRM_SAMPLES = 5
+CONT_DIRECTION_LOCK_TIMEOUT_S = 3.0
+CONT_DIRECTION_INCONSISTENT_MM = 1.0
+
+
+class _ContinuousDirectionTracker:
+    """Reconstrucao Python equivalente a trava causal do logger C."""
+
+    def __init__(self):
+        self._recent = []
+        self.direction = 0
+        self.candidate_direction = 0
+        self.candidate_samples = 0
+        self.filtered_relative_mm = 0.0
+        self.movement_t_s = None
+        self.lock_t_s = None
+        self.max_progress_mm = 0.0
+        self.fault = None
+
+    def update(self, t_s, relative_mm, accepted):
+        if self.fault is not None:
+            return self.max_progress_mm if self.direction else 0.0
+        if accepted and relative_mm is not None:
+            self._recent.append(float(relative_mm))
+            if len(self._recent) > CONT_DIRECTION_MEDIAN_SAMPLES:
+                del self._recent[0]
+            ordered = sorted(self._recent)
+            self.filtered_relative_mm = ordered[len(ordered) // 2]
+            if (
+                self.movement_t_s is None and
+                abs(self.filtered_relative_mm) >= CONT_DIRECTION_MOTION_MM
+            ):
+                self.movement_t_s = float(t_s)
+            if self.direction == 0:
+                if abs(self.filtered_relative_mm) >= CONT_DIRECTION_LOCK_MM:
+                    sign = 1 if self.filtered_relative_mm >= 0.0 else -1
+                    if self.candidate_direction == sign:
+                        self.candidate_samples += 1
+                    else:
+                        self.candidate_direction = sign
+                        self.candidate_samples = 1
+                    if self.candidate_samples >= CONT_DIRECTION_CONFIRM_SAMPLES:
+                        self.direction = sign
+                        self.lock_t_s = float(t_s)
+                else:
+                    self.candidate_direction = 0
+                    self.candidate_samples = 0
+            if (
+                self.direction != 0 and
+                self.direction * self.filtered_relative_mm <= -CONT_DIRECTION_INCONSISTENT_MM
+            ):
+                self.fault = "DIRECTION_INCONSISTENT"
+            if self.direction != 0:
+                directional_mm = self.direction * float(relative_mm)
+                self.max_progress_mm = max(self.max_progress_mm, directional_mm, 0.0)
+        if (
+            self.direction == 0 and self.movement_t_s is not None and
+            float(t_s) - self.movement_t_s >= CONT_DIRECTION_LOCK_TIMEOUT_S
+        ):
+            self.fault = "DIRECTION_LOCK_TIMEOUT"
+        return self.max_progress_mm if self.direction else 0.0
+
+
+class InfoCsvWriter:
+    """Escreve as tres colunas do _I com separador ';'.
+
+    ``write`` aceita as linhas internas historicas ``campo,valor,valor2`` para
+    manter a montagem dos metadados centralizada. A primeira e a ultima virgula
+    delimitam as colunas; virgulas dentro do valor central sao preservadas.
+    """
+
+    def __init__(self, stream):
+        self._writer = csv.writer(stream, delimiter=";", lineterminator="\n")
+
+    def writerow(self, field, value="", value2=""):
+        self._writer.writerow([field, value, value2])
+
+    def write(self, text):
+        for line in str(text).splitlines():
+            first = line.find(",")
+            last = line.rfind(",")
+            if first < 0:
+                self.writerow(line)
+            elif first == last:
+                self.writerow(line[:first], line[first + 1:])
+            else:
+                self.writerow(
+                    line[:first],
+                    line[first + 1:last],
+                    line[last + 1:],
+                )
+        return len(str(text))
 
 
 @dataclass
@@ -64,6 +188,8 @@ class RunState:
     turn_proc: Optional[subprocess.Popen]
     # Caminhos de arquivos de saida do ensaio.
     dlg_csv: str
+    dlg_compat_csv: str
+    encoder_state_csv: str
     drive_csv: str
     turn_dist_csv: str
     turn_vp_csv: str
@@ -77,6 +203,7 @@ class RunState:
     # Parametros de execucao aplicados neste ensaio.
     duration_s: float
     rate_hz: float
+    drive_rate_hz: float
     force_normal_n: float
     relacao: float
     raio_mm: float = 0.0
@@ -86,8 +213,32 @@ class RunState:
     reciprocating_total_mm: float = 0.0
     reciprocating_tolerance_counts: int = 0
     reciprocating_edge_filter_pct: float = 0.0
+    reciprocating_shadow_enabled: bool = False
+    reciprocating_encoder_control_enabled: bool = False
+    drive_command_only: bool = False
+    reciprocating_shadow_port: int = 0
+    reciprocating_shadow_session: int = 0
+    reciprocating_shadow_tolerance_mm: float = 0.0
+    reciprocating_shadow_total_mm: float = 0.0
+    reciprocating_shadow_stroke_timeout_s: float = 0.0
+    reciprocating_shadow_forward_sign: int = 0
+    reciprocating_shadow_stop_compensation: bool = False
+    reciprocating_shadow_stop_slope_s: float = 0.0
+    reciprocating_shadow_stop_margin_mm: float = 0.0
+    reciprocating_shadow_stop_velocity_window_s: float = 0.0
+    reciprocating_shadow_stop_max_course_fraction: float = 0.0
+    reciprocating_shadow_summary: Optional[dict] = None
+    reciprocating_stop_diagnostics: Optional[dict] = None
+    reciprocating_processing_summary: Optional[dict] = None
     target_speed_schedule: Optional[List[Tuple[float, float]]] = None
+    continuous_target_mm: float = 0.0
+    continuous_encoder_status: str = "nao_aplicavel"
+    continuous_encoder_target_t_s: Optional[float] = None
+    continuous_encoder_message: str = ""
+    encoder_monitor_thread: Optional[threading.Thread] = None
+    manual_stop_requested: bool = False
     reciprocating_final_encoder_idx: Optional[int] = None
+    reciprocating_final_encoder_t_s: Optional[float] = None
     reciprocating_postroll_status: str = "nao_aplicavel"
     encoder_quarantine_samples: int = 0
     encoder_quarantine_fraction: float = 0.0
@@ -95,6 +246,579 @@ class RunState:
     dynamic_offset_n: float = 0.0
     # Estado logico de pausa observado pelo orquestrador.
     paused: bool = False
+
+
+def _processing_dlg_csv(state: RunState) -> str:
+    """DLG alinhado por indice com o Drive para o pipeline legado."""
+    compat = getattr(state, "dlg_compat_csv", "") or ""
+    return compat if compat else state.dlg_csv
+
+
+def _processing_rate_hz(state: RunState) -> float:
+    """Taxa comum usada no merge e nos processamentos por indice."""
+    rate = getattr(state, "drive_rate_hz", 0.0) or 0.0
+    if rate > 0.0:
+        return float(rate)
+    return float(getattr(state, "rate_hz", DEFAULT_DRIVE_RATE_HZ) or DEFAULT_DRIVE_RATE_HZ)
+
+
+def _event_fields(line: str) -> dict:
+    fields = {}
+    for token in str(line).replace(",", " ").split()[1:]:
+        if "=" in token:
+            key, value = token.split("=", 1)
+            fields[key.strip()] = value.strip()
+    return fields
+
+
+def _detect_reciprocating_stationary_endpoint(
+    post_angles: List[Tuple[int, float, float]],
+    radius_mm: float,
+) -> Optional[Tuple[int, float, float]]:
+    """Detecta o extremo final quando o ultimo stroke termina sem reversao.
+
+    As amostras chegam como angulo ja desenrolado. Uma mediana causal curta
+    remove as oscilacoes de transicao; a decisao exige excursao depois do
+    gatilho e uma janela sustentada de estabilidade junto ao extremo atingido.
+    """
+    if len(post_angles) < RECIP_FINAL_MEDIAN_SAMPLES or radius_mm <= 0.0:
+        return None
+    mm_per_degree = (2.0 * math.pi * float(radius_mm)) / 360.0
+    filtered = []
+    window = []
+    for idx, t_s, angle_deg in post_angles:
+        window.append(float(angle_deg))
+        if len(window) > RECIP_FINAL_MEDIAN_SAMPLES:
+            del window[0]
+        ordered = sorted(window)
+        median_angle = ordered[len(ordered) // 2]
+        filtered.append((int(idx), float(t_s), median_angle * mm_per_degree))
+
+    # Procura a primeira confirmacao causal. Assim um replay com toda a cauda
+    # retorna o mesmo extremo que teria sido escolhido durante a aquisicao, sem
+    # desloca-lo para um minimo/maximo posterior produzido por jitter parado.
+    for end_pos, current in enumerate(filtered):
+        if current[1] - filtered[0][1] < RECIP_FINAL_MIN_OBSERVATION_S:
+            continue
+        prefix = filtered[:end_pos + 1]
+        values = [item[2] for item in prefix]
+        upward_excursion = max(values) - values[0]
+        downward_excursion = values[0] - min(values)
+        direction = 1 if upward_excursion >= downward_excursion else -1
+        if max(upward_excursion, downward_excursion) < RECIP_FINAL_MIN_EXCURSION_MM:
+            continue
+
+        stable_start = current[1] - RECIP_FINAL_STABLE_WINDOW_S
+        recent = [item for item in prefix if item[1] >= stable_start]
+        if len(recent) < 2:
+            continue
+        if recent[-1][1] - recent[0][1] < RECIP_FINAL_STABLE_MIN_SPAN_S:
+            continue
+        recent_values = [item[2] for item in recent]
+        if max(recent_values) - min(recent_values) > RECIP_FINAL_STABLE_RANGE_MM:
+            continue
+        mean_t = sum(item[1] for item in recent) / len(recent)
+        mean_value = sum(recent_values) / len(recent_values)
+        denominator = sum((item[1] - mean_t) ** 2 for item in recent)
+        slope_mm_s = (
+            sum(
+                (item[1] - mean_t) * (item[2] - mean_value)
+                for item in recent
+            ) / denominator
+            if denominator > 0.0 else 0.0
+        )
+        if abs(slope_mm_s) > RECIP_FINAL_MAX_SPEED_MM_S:
+            continue
+
+        endpoint = (
+            max(prefix, key=lambda item: item[2])
+            if direction > 0 else
+            min(prefix, key=lambda item: item[2])
+        )
+        recent_center = sorted(recent_values)[len(recent_values) // 2]
+        if abs(recent_center - endpoint[2]) <= RECIP_FINAL_STABLE_RANGE_MM:
+            return endpoint
+    return None
+
+
+def _reciprocating_startup_failure_reason(event_path: str) -> Optional[str]:
+    """Traduz uma falha primaria anterior ao movimento sem listar efeitos em cascata."""
+    if not event_path or not os.path.isfile(event_path):
+        return None
+    try:
+        with open(event_path, "r", encoding="ascii", errors="replace") as stream:
+            for line in stream:
+                if "FATAL RECIP_ENCODER_NO_ORIGIN" in line:
+                    fields = _event_fields(line)
+                    timeout_s = fields.get("timeout_s", "3.000")
+                    try:
+                        timeout_text = f"{float(timeout_s):g}"
+                    except Exception:
+                        timeout_text = "3"
+                    return (
+                        "Encoder externo não entregou origem válida em "
+                        f"{timeout_text} s; motor não foi ligado"
+                    )
+    except Exception:
+        return None
+    return None
+
+
+def _reserve_loopback_udp_port() -> int:
+    """Escolhe uma porta UDP local; a sessao aleatoria rejeita datagramas antigos."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def load_reciprocating_shadow_summary(state: RunState) -> dict:
+    """Le o resumo final do receptor sombra sem alterar o resultado do ensaio."""
+    if not state or not (
+        getattr(state, "reciprocating_shadow_enabled", False) or
+        getattr(state, "reciprocating_encoder_control_enabled", False)
+    ):
+        return {}
+    rep_dir = os.path.dirname(getattr(state, "merge_csv", "") or "")
+    candidates = [
+        os.path.join(rep_dir, "a5_speed_events.log"),
+        os.path.join(rep_dir, "DadosDev", "a5_speed_events.log"),
+    ]
+    summary = {}
+    legacy_trigger_indices = []
+    shadow_reverse_indices = []
+    legacy_done_idx = None
+    shadow_complete_idx = None
+    for path in candidates:
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "r", encoding="ascii", errors="replace") as stream:
+                for line in stream:
+                    if "RECIP_SHADOW_END " in line:
+                        summary = _event_fields(line)
+                    elif "RECIP_STOP_TRIGGER " in line:
+                        fields = _event_fields(line)
+                        try:
+                            legacy_trigger_indices.append(int(fields["idx"]))
+                        except Exception:
+                            pass
+                    elif "RECIP_SHADOW_REVERSE " in line:
+                        fields = _event_fields(line)
+                        try:
+                            shadow_reverse_indices.append(int(fields["idx"]))
+                        except Exception:
+                            pass
+                    elif "RECIP_DONE " in line:
+                        fields = _event_fields(line)
+                        try:
+                            legacy_done_idx = int(fields["idx"])
+                        except Exception:
+                            pass
+                    elif "RECIP_SHADOW_COMPLETE " in line:
+                        fields = _event_fields(line)
+                        try:
+                            shadow_complete_idx = int(fields["idx"])
+                        except Exception:
+                            pass
+        except Exception:
+            continue
+        if summary:
+            break
+    pair_count = min(len(legacy_trigger_indices), len(shadow_reverse_indices))
+    rate_hz = float(getattr(state, "drive_rate_hz", DEFAULT_DRIVE_RATE_HZ) or DEFAULT_DRIVE_RATE_HZ)
+    reverse_delta_ms = [
+        1000.0 * (shadow_reverse_indices[i] - legacy_trigger_indices[i]) / rate_hz
+        for i in range(pair_count)
+    ]
+    summary.update({
+        "legacy_stop_triggers": str(len(legacy_trigger_indices)),
+        "shadow_reverse_events_parsed": str(len(shadow_reverse_indices)),
+        "comparison_pairs": str(pair_count),
+        "reverse_delta_mean_ms": (
+            f"{sum(reverse_delta_ms) / pair_count:.6f}" if pair_count else "NULL"
+        ),
+        "reverse_delta_min_ms": (
+            f"{min(reverse_delta_ms):.6f}" if pair_count else "NULL"
+        ),
+        "reverse_delta_max_ms": (
+            f"{max(reverse_delta_ms):.6f}" if pair_count else "NULL"
+        ),
+        "completion_delta_ms": (
+            f"{1000.0 * (shadow_complete_idx - legacy_done_idx) / rate_hz:.6f}"
+            if legacy_done_idx is not None and shadow_complete_idx is not None
+            else "NULL"
+        ),
+    })
+    state.reciprocating_shadow_summary = summary
+    return summary
+
+
+def analyze_encoder_state_capture(path: str, expected_path_mm: float) -> dict:
+    """Extrai qualidade observada do CH3; nao participa das decisoes de controle."""
+    positions = []
+    accepted = 0
+    missing = 0
+    if not path or not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", newline="", encoding="ascii", errors="replace") as stream:
+            for row in csv.DictReader(stream):
+                if str(row.get("accepted", "0")) == "1":
+                    try:
+                        positions.append(float(row["relative_mm"]))
+                        accepted += 1
+                    except Exception:
+                        missing += 1
+                else:
+                    missing += 1
+    except Exception:
+        return {}
+    increments = [abs(current - previous) for previous, current in zip(positions, positions[1:])]
+    ordered = sorted(increments)
+    p95 = ordered[min(len(ordered) - 1, int(0.95 * len(ordered)))] if ordered else 0.0
+    total_variation = sum(increments)
+    return {
+        "accepted_samples": accepted,
+        "missing_samples": missing,
+        "relative_span_mm": (max(positions) - min(positions)) if positions else 0.0,
+        "increment_abs_median_mm": _median(increments) if increments else 0.0,
+        "increment_abs_p95_mm": p95,
+        "raw_total_variation_mm": total_variation,
+        "raw_variation_ratio": (
+            total_variation / float(expected_path_mm)
+            if expected_path_mm > 0.0 else 0.0
+        ),
+    }
+
+
+def build_reciprocating_stop_diagnostics(
+    state: RunState,
+    output_path: Optional[str] = None,
+    phase: str = "ensaio_oficial",
+    velocity_window_s: float = 0.250,
+    event_path: Optional[str] = None,
+) -> dict:
+    """Consolida, por stroke, dados para estudar a distancia de parada.
+
+    O arquivo e exclusivamente diagnostico. A velocidade e a inclinacao
+    linear de PosEncExt nos ``velocity_window_s`` anteriores ao gatilho que
+    realmente comandou a parada (externo no pipeline atual).
+    """
+    if not state or not (
+        getattr(state, "reciprocating_shadow_enabled", False) or
+        getattr(state, "reciprocating_encoder_control_enabled", False)
+    ):
+        return {}
+    rep_dir = os.path.dirname(getattr(state, "merge_csv", "") or "")
+    if not rep_dir:
+        return {}
+
+    def _existing(*paths):
+        for path in paths:
+            if path and os.path.isfile(path):
+                return path
+        return ""
+
+    event_path = _existing(
+        event_path,
+        os.path.join(os.path.dirname(getattr(state, "drive_csv", "") or ""), "a5_speed_events.log"),
+        os.path.join(rep_dir, "a5_speed_events.log"),
+        os.path.join(rep_dir, "DadosDev", "a5_speed_events.log"),
+    )
+    drive_path = _existing(
+        getattr(state, "drive_csv", ""),
+        os.path.join(rep_dir, "DadosDev", "drive.csv"),
+    )
+    if getattr(state, "reciprocating_encoder_control_enabled", False):
+        drive_path = ""
+    encoder_path = _existing(
+        getattr(state, "encoder_state_csv", ""),
+        os.path.join(rep_dir, "DadosDev", "encoder_state.csv"),
+    )
+    if not event_path or not encoder_path:
+        return {}
+
+    def _number(value, cast=float, default=None):
+        try:
+            if value is None or str(value).strip().upper() in ("", "NULL"):
+                return default
+            return cast(value)
+        except Exception:
+            return default
+
+    events = {
+        "legacy": [], "completion": [], "external": [], "physical": [],
+    }
+    try:
+        with open(event_path, "r", encoding="ascii", errors="replace") as stream:
+            for line in stream:
+                fields = _event_fields(line)
+                if "RECIP_STOP_TRIGGER " in line:
+                    events["legacy"].append(fields)
+                elif "RECIP_REVERSE " in line or "RECIP_DONE " in line:
+                    events["completion"].append(fields)
+                elif "RECIP_SHADOW_REVERSE " in line or "RECIP_SHADOW_COMPLETE " in line:
+                    events["external"].append(fields)
+                elif "RECIP_SHADOW_PHYSICAL_REVERSAL " in line:
+                    events["physical"].append(fields)
+    except Exception:
+        return {}
+    for values in events.values():
+        values.sort(key=lambda item: _number(item.get("idx"), int, 2**31 - 1))
+
+    drive_qpc = {}
+    if drive_path:
+        try:
+            with open(drive_path, "r", newline="", encoding="ascii", errors="replace") as stream:
+                for row in csv.DictReader(stream):
+                    idx = _number(row.get("idx"), int)
+                    qpc = _number(row.get("t_qpc"), int)
+                    if idx is not None and qpc is not None:
+                        drive_qpc[idx] = qpc
+        except Exception:
+            drive_qpc = {}
+
+    samples = []
+    try:
+        with open(encoder_path, "r", newline="", encoding="ascii", errors="replace") as stream:
+            for row in csv.DictReader(stream):
+                if str(row.get("accepted", "0")).strip() != "1":
+                    continue
+                qpc = _number(row.get("t_qpc"), int)
+                t_s = _number(row.get("t_s"), float)
+                position = _number(row.get("relative_mm"), float)
+                if qpc is not None and t_s is not None and position is not None:
+                    samples.append((qpc, t_s, position))
+    except Exception:
+        return {}
+    samples.sort(key=lambda item: item[0])
+    if not samples:
+        return {}
+    qpcs = [item[0] for item in samples]
+    qpc_frequency = 0.0
+    if len(samples) >= 2 and samples[-1][1] > samples[0][1]:
+        qpc_frequency = (samples[-1][0] - samples[0][0]) / (samples[-1][1] - samples[0][1])
+    if qpc_frequency <= 0.0:
+        return {}
+    qpc_origin = samples[0][0]
+
+    def _interpolated_position(qpc):
+        if qpc is None:
+            return None
+        pos = bisect.bisect_left(qpcs, qpc)
+        if pos <= 0:
+            return samples[0][2]
+        if pos >= len(samples):
+            return samples[-1][2]
+        q0, _t0, p0 = samples[pos - 1]
+        q1, _t1, p1 = samples[pos]
+        if q1 <= q0:
+            return p0
+        fraction = (qpc - q0) / float(q1 - q0)
+        return p0 + fraction * (p1 - p0)
+
+    def _local_velocity(qpc):
+        if qpc is None:
+            return None, 0
+        start_qpc = qpc - int(round(velocity_window_s * qpc_frequency))
+        lo = bisect.bisect_left(qpcs, start_qpc)
+        hi = bisect.bisect_right(qpcs, qpc)
+        window = samples[lo:hi]
+        if len(window) < 3:
+            return None, len(window)
+        times = [(item[0] - qpc) / qpc_frequency for item in window]
+        positions = [item[2] for item in window]
+        mean_t = sum(times) / len(times)
+        mean_p = sum(positions) / len(positions)
+        denominator = sum((value - mean_t) ** 2 for value in times)
+        if denominator <= 0.0:
+            return None, len(window)
+        slope = sum(
+            (time_value - mean_t) * (position - mean_p)
+            for time_value, position in zip(times, positions)
+        ) / denominator
+        return slope, len(window)
+
+    schedule = list(getattr(state, "target_speed_schedule", None) or [])
+    radius = float(getattr(state, "raio_mm", 0.0) or 0.0)
+    ratio = float(getattr(state, "relacao", 0.0) or 0.0)
+    course = float(getattr(state, "reciprocating_course_mm", 0.0) or 0.0)
+
+    def _fmt(value, digits=9):
+        if value is None or not math.isfinite(float(value)):
+            return "NULL"
+        return f"{float(value):.{digits}f}"
+
+    rows = []
+    previous_extreme = 0.0
+    count = max(len(events["legacy"]), len(events["external"]))
+    for index in range(count):
+        legacy = events["legacy"][index] if index < len(events["legacy"]) else {}
+        completion = events["completion"][index] if index < len(events["completion"]) else {}
+        external = events["external"][index] if index < len(events["external"]) else {}
+        physical = events["physical"][index] if index < len(events["physical"]) else {}
+        legacy_idx = _number(legacy.get("idx"), int)
+        legacy_qpc = _number(legacy.get("qpc"), int)
+        if legacy_qpc is None and legacy_idx is not None:
+            legacy_qpc = drive_qpc.get(legacy_idx)
+        external_qpc = _number(external.get("qpc"), int)
+        physical_qpc = _number(physical.get("qpc"), int)
+        direction = _number(legacy.get("dir"), int)
+        if direction not in (-1, 1):
+            new_direction = _number(external.get("new_direction"), int)
+            direction = -new_direction if new_direction in (-1, 1) else None
+        legacy_position = _interpolated_position(legacy_qpc)
+        external_position = _number(external.get("position_mm"), float)
+        physical_extreme = _number(physical.get("extreme_mm"), float)
+        control_qpc = external_qpc if external_qpc is not None else legacy_qpc
+        velocity_signed, velocity_samples = _local_velocity(control_qpc)
+        segment = _number(completion.get("completed_segment"), int)
+        target_speed = None
+        if segment is not None and 0 <= segment < len(schedule):
+            target_speed = abs(_number(schedule[segment][0], float, 0.0))
+        if target_speed is None:
+            target_speed = _number(legacy.get("target_speed_mm_s"), float)
+        target_rpm = _number(legacy.get("target_rpm_abs"), int)
+        if target_rpm is None:
+            target_rpm = _number(completion.get("target_rpm_abs"), int)
+        if target_speed is None and target_rpm is not None and radius > 0.0 and ratio > 0.0:
+            target_speed = target_rpm * (2.0 * math.pi * radius) / (60.0 * ratio)
+        target_position = (
+            course if direction == 1 else 0.0 if direction == -1 else None
+        )
+        physical_course = None
+        if physical_extreme is not None:
+            physical_course = abs(physical_extreme - previous_extreme)
+            previous_extreme = physical_extreme
+        stop_distance = (
+            direction * (physical_extreme - legacy_position)
+            if direction in (-1, 1) and physical_extreme is not None and legacy_position is not None
+            else None
+        )
+        remaining_external = (
+            direction * (physical_extreme - external_position)
+            if direction in (-1, 1) and physical_extreme is not None and external_position is not None
+            else None
+        )
+        def _delta_ms(end, start):
+            return 1000.0 * (end - start) / qpc_frequency if end is not None and start is not None else None
+        rows.append({
+            "fase": phase,
+            "stroke": index + 1,
+            "curso_configurado_mm": _fmt(course),
+            "sentido": direction if direction is not None else "NULL",
+            "velocidade_alvo_mm_s": _fmt(target_speed),
+            "rpm_alvo_drive": target_rpm if target_rpm is not None else "NULL",
+            "janela_velocidade_externa_ms": _fmt(1000.0 * velocity_window_s, 3),
+            "amostras_velocidade_externa": velocity_samples,
+            "velocidade_externa_assinada_mm_s": _fmt(velocity_signed),
+            "velocidade_externa_modulo_mm_s": _fmt(abs(velocity_signed) if velocity_signed is not None else None),
+            "gatilho_legado_idx": legacy_idx if legacy_idx is not None else "NULL",
+            "gatilho_legado_qpc": legacy_qpc if legacy_qpc is not None else "NULL",
+            "gatilho_legado_t_s": _fmt((legacy_qpc - qpc_origin) / qpc_frequency if legacy_qpc is not None else None),
+            "gatilho_legado_pos_ext_mm": _fmt(legacy_position),
+            "alvo_fixo_mm": _fmt(target_position),
+            "distancia_ate_alvo_no_gatilho_legado_mm": _fmt(
+                direction * (target_position - legacy_position)
+                if direction in (-1, 1) and target_position is not None and legacy_position is not None else None
+            ),
+            "gatilho_externo_idx": _number(external.get("idx"), int, "NULL"),
+            "gatilho_externo_qpc": external_qpc if external_qpc is not None else "NULL",
+            "gatilho_externo_t_s": _fmt((external_qpc - qpc_origin) / qpc_frequency if external_qpc is not None else None),
+            "gatilho_externo_pos_mm": _fmt(external_position),
+            "defasagem_externo_legado_ms": _fmt(_delta_ms(external_qpc, legacy_qpc), 6),
+            "latencia_observacao_externo_ms": _fmt(_number(external.get("observation_latency_ms"), float), 6),
+            "extremo_fisico_idx": _number(physical.get("idx"), int, "NULL"),
+            "extremo_fisico_qpc": physical_qpc if physical_qpc is not None else "NULL",
+            "extremo_fisico_t_s": _fmt((physical_qpc - qpc_origin) / qpc_frequency if physical_qpc is not None else None),
+            "extremo_fisico_mm": _fmt(physical_extreme),
+            "curso_fisico_mm": _fmt(physical_course),
+            "distancia_parada_apos_gatilho_legado_mm": _fmt(stop_distance),
+            "tempo_parada_apos_gatilho_legado_ms": _fmt(_delta_ms(physical_qpc, legacy_qpc), 6),
+            "distancia_restante_apos_gatilho_externo_mm": _fmt(remaining_external),
+            "tempo_extremo_apos_gatilho_externo_ms": _fmt(_delta_ms(physical_qpc, external_qpc), 6),
+            "latencia_observacao_extremo_ms": _fmt(_number(physical.get("observation_latency_ms"), float), 6),
+        })
+    if output_path is None:
+        output_path = os.path.join(rep_dir, "recip_stop_diagnostics.csv")
+    try:
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "w", newline="", encoding="ascii") as stream:
+            writer = csv.DictWriter(stream, fieldnames=list(rows[0].keys()) if rows else [], delimiter=";", lineterminator="\n")
+            if rows:
+                writer.writeheader()
+                writer.writerows(rows)
+    except Exception:
+        return {}
+    complete = sum(1 for row in rows if row["extremo_fisico_mm"] != "NULL")
+    summary = {
+        "path": output_path,
+        "rows": len(rows),
+        "complete_rows": complete,
+        "velocity_method": "ols_posicao_externa_250ms_antes_gatilho_de_controle",
+        "diagnostic_only": True,
+    }
+    state.reciprocating_stop_diagnostics = summary
+    return summary
+
+
+def _monitor_continuous_encoder_events(state: RunState) -> None:
+    """Converte eventos causais do DLG em parada do ensaio continuo.
+
+    O calculo e a decisao do alvo ocorrem no processo C que recebe o CH3. Esta
+    thread apenas retransmite STOP aos dois loggers; ela nao calcula posicao a
+    partir de CSV nem participa do modo reciprocante.
+    """
+    stream = getattr(state.dlg_proc, "stdout", None)
+    if stream is None:
+        state.continuous_encoder_status = "falha_sem_stdout_dlg"
+        state.continuous_encoder_message = "stdout do DLG indisponivel"
+        _send_ipc(state.drive_proc, "STOP")
+        _send_ipc(state.dlg_proc, "STOP")
+        return
+    try:
+        for raw_line in iter(stream.readline, ""):
+            line = raw_line.strip()
+            if line.startswith("ENCODER_TARGET_REACHED"):
+                fields = _event_fields(line)
+                state.continuous_encoder_status = "alvo_atingido"
+                state.continuous_encoder_message = line
+                try:
+                    state.continuous_encoder_target_t_s = float(fields.get("t_s", "nan"))
+                except Exception:
+                    state.continuous_encoder_target_t_s = None
+                _send_ipc(state.drive_proc, "STOP")
+                _send_ipc(state.dlg_proc, "STOP")
+                return
+            if line.startswith("ENCODER_FAILED"):
+                fields = _event_fields(line)
+                reason = fields.get("reason", "ENCODER_HEALTH_FAILED")
+                status_by_reason = {
+                    "DIRECTION_LOCK_TIMEOUT": "falha_sentido_timeout",
+                    "DIRECTION_INCONSISTENT": "falha_sentido_incompativel",
+                    "ENCODER_HEALTH_FAILED": "falha_encoder_3s",
+                }
+                state.continuous_encoder_status = status_by_reason.get(
+                    reason, "falha_encoder"
+                )
+                state.continuous_encoder_message = line
+                _send_ipc(state.drive_proc, "STOP")
+                _send_ipc(state.dlg_proc, "STOP")
+                return
+    except Exception as exc:
+        state.continuous_encoder_status = "falha_monitor_encoder"
+        state.continuous_encoder_message = str(exc)
+        _send_ipc(state.drive_proc, "STOP")
+        _send_ipc(state.dlg_proc, "STOP")
+        return
+    if state.continuous_encoder_status == "aguardando_alvo":
+        if state.manual_stop_requested:
+            state.continuous_encoder_status = "parada_manual"
+            state.continuous_encoder_message = "ensaio interrompido manualmente"
+        else:
+            state.continuous_encoder_status = "deadline_sem_alvo"
+            state.continuous_encoder_message = "DLG encerrou antes da distancia alvo"
+        _send_ipc(state.drive_proc, "STOP")
 
 
 def sanitize_folder_name(name: str) -> str:
@@ -147,6 +871,8 @@ def build_output_paths(base_dir: str, nome_ensaio: str, estudo: str) -> dict:
         "folder": folder_path,
         "info_csv": os.path.join(folder_path, "info_ensaio.csv"),
         "dlg_csv": os.path.join(folder_path, "dlg.csv"),
+        "dlg_compat_csv": os.path.join(folder_path, "dlg_compat_50hz.csv"),
+        "encoder_state_csv": os.path.join(folder_path, "encoder_state.csv"),
         "drive_csv": os.path.join(folder_path, "drive.csv"),
         "turn_dist_csv": os.path.join(folder_path, "atrito_por_distancia.csv"),
         "turn_vp_csv": os.path.join(folder_path, "atrito_por_volta.csv"),
@@ -287,7 +1013,7 @@ def check_executables(repo_root: str) -> dict:
     Executaveis esperados:
     - dlg_logger_ipc.exe
     - a5_speed_logger.exe
-    - merge_logs.exe
+    - merge_logs.exe (opcional, apenas para compatibilidade legada)
 
     Parametros:
         repo_root: raiz do repositorio.
@@ -298,8 +1024,8 @@ def check_executables(repo_root: str) -> dict:
         - missing: lista de descricoes dos executaveis nao encontrados
     """
     dlg_exe = find_exe([
-        os.path.join(repo_root, "DLG4000", "bin", "dlg_logger_ipc.exe"),
         os.path.join(repo_root, "DLG4000", "bin", "Release", "dlg_logger_ipc.exe"),
+        os.path.join(repo_root, "DLG4000", "bin", "dlg_logger_ipc.exe"),
     ], "dlg_logger_ipc.exe")
 
     drive_exe = find_exe([
@@ -319,8 +1045,6 @@ def check_executables(repo_root: str) -> dict:
         missing.append("dlg_logger_ipc.exe (DLG4000/bin/Release)")
     if not drive_exe:
         missing.append("a5_speed_logger.exe (DriveA5/build/Release)")
-    if not merge_exe:
-        missing.append("merge_logs.exe (DriveA5/build/Release)")
     return {
         "dlg_exe": dlg_exe,
         "drive_exe": drive_exe,
@@ -376,6 +1100,20 @@ def start_external_run(
     reciprocating_edge_filter_pct: float = 0.0,
     dynamic_offset_n: float = 0.0,
     target_speed_schedule: Optional[List[Tuple[float, float]]] = None,
+    drive_rate_hz: float = DEFAULT_DRIVE_RATE_HZ,
+    continuous_target_mm: float = 0.0,
+    reciprocating_shadow_enabled: bool = False,
+    reciprocating_shadow_tolerance_mm: float = 0.5,
+    reciprocating_shadow_total_mm: float = 0.0,
+    reciprocating_shadow_forward_sign: int = 0,
+    reciprocating_shadow_stop_compensation: bool = False,
+    reciprocating_shadow_stop_slope_s: float = RECIP_SHADOW_STOP_MODEL_SLOPE_S,
+    reciprocating_shadow_stop_margin_mm: float = RECIP_SHADOW_STOP_MARGIN_MM,
+    reciprocating_shadow_stop_velocity_window_s: float = RECIP_SHADOW_STOP_VELOCITY_WINDOW_S,
+    reciprocating_shadow_stop_max_course_fraction: float = RECIP_SHADOW_STOP_MAX_COURSE_FRACTION,
+    strict_drive_setup: bool = False,
+    reciprocating_encoder_control_enabled: bool = False,
+    drive_command_only: bool = False,
 ) -> RunState:
     """
     Inicia o ensaio em modo externo (executaveis C sem interface).
@@ -396,7 +1134,9 @@ def start_external_run(
         out_paths: caminhos de saida (dlg_csv, drive_csv, turn_dist_csv, turn_vp_csv, merge_csv, schedule_csv).
         schedule: lista de etapas (rpm, duracao_s).
         duration_s: duracao total do ensaio.
-        rate_hz: taxa alvo de aquisicao.
+        rate_hz: taxa alvo de aquisicao completa do DLG.
+        drive_rate_hz: taxa do Drive e da trilha DLG compatível usada pelo
+            processamento legado baseado em indices.
         dlg_ip/dlg_port: destino UDP do DLG.
         bind_ip/bind_port: bind local para recebimento UDP.
         com_port/slave_id/baud/parity: parametros seriais do Drive.
@@ -426,6 +1166,16 @@ def start_external_run(
         else:
             fallback_name = "atrito_por_stroke.csv" if reciprocating else "atrito_por_volta.csv"
             out_paths["turn_vp_csv"] = os.path.join(base_folder, fallback_name)
+    base_folder = os.path.dirname(out_paths.get("dlg_csv", "")) or os.getcwd()
+    if "dlg_compat_csv" not in out_paths or not out_paths.get("dlg_compat_csv"):
+        out_paths["dlg_compat_csv"] = os.path.join(base_folder, "dlg_compat_50hz.csv")
+    if "encoder_state_csv" not in out_paths or not out_paths.get("encoder_state_csv"):
+        out_paths["encoder_state_csv"] = os.path.join(base_folder, "encoder_state.csv")
+    if rate_hz <= 0.0 or drive_rate_hz <= 0.0 or drive_rate_hz > rate_hz:
+        raise ValueError("Taxas invalidas: DLG deve ser >= Drive e ambas positivas.")
+    rate_ratio = rate_hz / drive_rate_hz
+    if abs(rate_ratio - round(rate_ratio)) > 1.0e-9:
+        raise ValueError("A taxa do DLG deve ser multiplo inteiro da taxa do Drive.")
     if reciprocating:
         current_motion = out_paths.get("turn_vp_csv", "")
         base_folder = os.path.dirname(current_motion) or os.path.dirname(out_paths.get("merge_csv", "")) or os.getcwd()
@@ -464,8 +1214,103 @@ def start_external_run(
         "--port", str(dlg_port),
         "--bind-ip", bind_ip,
         "--bind-port", str(bind_port),
-        "--ipc",
     ]
+    if abs(rate_hz - drive_rate_hz) > 1.0e-9 and not (
+        drive_command_only or reciprocating_encoder_control_enabled
+    ):
+        dlg_cmd.extend([
+            "--compat-out", out_paths["dlg_compat_csv"],
+            "--compat-rate", f"{drive_rate_hz:.6f}",
+        ])
+    else:
+        out_paths["dlg_compat_csv"] = out_paths["dlg_csv"]
+    encoder_speed_limits = [
+        abs(float(item[0])) for item in (target_speed_schedule or [])
+        if item and len(item) >= 1 and float(item[0]) != 0.0
+    ]
+    shadow_port = 0
+    shadow_session = 0
+    shadow_total_mm = 0.0
+    shadow_stroke_timeout_s = 0.0
+    encoder_recip_link_enabled = bool(
+        reciprocating and
+        (reciprocating_shadow_enabled or reciprocating_encoder_control_enabled)
+    )
+    if encoder_recip_link_enabled:
+        if int(reciprocating_shadow_forward_sign) not in (-1, 0, 1):
+            raise ValueError("Sentido preaprendido do encoder deve ser -1, 0 ou 1.")
+        if raio_mm <= 0.0 or reciprocating_course_mm <= 0.0:
+            raise ValueError("Modo sombra reciprocante exige raio e curso validos.")
+        if not encoder_speed_limits:
+            encoder_speed_limits = [
+                abs(float(rpm)) * (2.0 * math.pi * float(raio_mm)) /
+                (60.0 * float(relacao))
+                for rpm, _duration in schedule
+                if float(rpm) != 0.0 and float(relacao) > 0.0
+            ]
+        if not encoder_speed_limits:
+            raise ValueError("Modo sombra reciprocante exige velocidade valida.")
+        min_speed_mm_s = min(encoder_speed_limits)
+        expected_stroke_s = float(reciprocating_course_mm) / min_speed_mm_s
+        shadow_stroke_timeout_s = max(
+            expected_stroke_s * 2.0,
+            expected_stroke_s + 10.0,
+        )
+        shadow_total_mm = float(
+            reciprocating_shadow_total_mm
+            if reciprocating_shadow_total_mm > 0.0
+            else reciprocating_total_mm
+        )
+        if shadow_total_mm <= 0.0 or reciprocating_shadow_tolerance_mm < 0.0:
+            raise ValueError("Distancia/tolerancia do modo sombra reciprocante invalida.")
+        if reciprocating_shadow_stop_compensation:
+            if (
+                not math.isfinite(float(reciprocating_shadow_stop_slope_s))
+                or float(reciprocating_shadow_stop_slope_s) < 0.0
+                or not math.isfinite(float(reciprocating_shadow_stop_margin_mm))
+                or float(reciprocating_shadow_stop_margin_mm) < 0.0
+                or not math.isfinite(float(reciprocating_shadow_stop_velocity_window_s))
+                or float(reciprocating_shadow_stop_velocity_window_s) <= 0.0
+                or not math.isfinite(float(reciprocating_shadow_stop_max_course_fraction))
+                or not 0.0 < float(reciprocating_shadow_stop_max_course_fraction) < 1.0
+            ):
+                raise ValueError("Parametros da compensacao de parada do modo sombra invalidos.")
+        shadow_port = _reserve_loopback_udp_port()
+        shadow_session = secrets.randbits(63) or 1
+        # Margem para transitorios e ultrapassagens; o gate continua limitado
+        # pelas regras fisicas internas do EncoderCore.
+        shadow_max_speed_mm_s = max(5.0, max(encoder_speed_limits) * 2.0)
+        dlg_cmd.extend([
+            "--encoder-state-out", out_paths["encoder_state_csv"],
+            "--encoder-radius-mm", f"{raio_mm:.9f}",
+            "--encoder-max-speed-mm-s", f"{shadow_max_speed_mm_s:.9f}",
+            "--encoder-target-mm", "0",
+            "--encoder-control-port", str(shadow_port),
+            "--encoder-session", str(shadow_session),
+            "--encoder-reciprocating-shadow",
+        ])
+    if not reciprocating and continuous_target_mm > 0.0:
+        if raio_mm <= 0.0 or not encoder_speed_limits:
+            raise ValueError("Modo continuo pelo encoder exige raio e velocidade alvo validos.")
+        effective_speed_limits = [
+            abs(float(rpm)) * (2.0 * math.pi * float(raio_mm)) /
+            (60.0 * float(relacao))
+            for rpm, _duration in schedule
+            if float(rpm) != 0.0 and float(relacao) > 0.0
+        ]
+        # O Drive recebe RPM inteiro. O gate fisico precisa considerar essa
+        # velocidade efetivamente comandada, com 2x de margem para transitorios.
+        continuous_max_speed_mm_s = max(
+            5.0,
+            max(encoder_speed_limits + effective_speed_limits) * 2.0,
+        )
+        dlg_cmd.extend([
+            "--encoder-state-out", out_paths["encoder_state_csv"],
+            "--encoder-radius-mm", f"{raio_mm:.9f}",
+            "--encoder-max-speed-mm-s", f"{continuous_max_speed_mm_s:.9f}",
+            "--encoder-target-mm", f"{continuous_target_mm:.9f}",
+        ])
+    dlg_cmd.append("--ipc")
     dlg_proc = subprocess.Popen(
         dlg_cmd,
         stdin=subprocess.PIPE,
@@ -482,13 +1327,17 @@ def start_external_run(
         "--out", out_paths["drive_csv"],
         "--schedule", out_paths["schedule_csv"],
         "--duration", f"{duration_s:.6f}",
-        "--rate", f"{rate_hz:.6f}",
+        "--rate", f"{drive_rate_hz:.6f}",
         "--slave", str(slave_id),
         "--baud", str(baud),
         "--parity", parity,
         "--setup",
         "--ipc",
     ]
+    if drive_command_only or reciprocating_encoder_control_enabled:
+        drive_cmd.append("--command-only")
+    if strict_drive_setup:
+        drive_cmd.append("--strict-setup")
     if reciprocating:
         drive_cmd.extend([
             "--reciprocating",
@@ -498,6 +1347,28 @@ def start_external_run(
             "--recip-ratio", f"{relacao:.6f}",
             "--recip-tol-counts", str(int(reciprocating_tolerance_counts)),
         ])
+        if encoder_recip_link_enabled:
+            drive_cmd.extend([
+                (
+                    "--recip-encoder-control"
+                    if reciprocating_encoder_control_enabled
+                    else "--recip-encoder-shadow"
+                ),
+                "--recip-shadow-port", str(shadow_port),
+                "--recip-shadow-session", str(shadow_session),
+                "--recip-shadow-tol-mm", f"{reciprocating_shadow_tolerance_mm:.9f}",
+                "--recip-shadow-total-mm", f"{shadow_total_mm:.9f}",
+                "--recip-shadow-stroke-timeout-s", f"{shadow_stroke_timeout_s:.9f}",
+                "--recip-shadow-forward-sign", str(int(reciprocating_shadow_forward_sign)),
+            ])
+            if reciprocating_shadow_stop_compensation:
+                drive_cmd.extend([
+                    "--recip-shadow-stop-compensation",
+                    "--recip-shadow-stop-slope-s", f"{reciprocating_shadow_stop_slope_s:.12f}",
+                    "--recip-shadow-stop-margin-mm", f"{reciprocating_shadow_stop_margin_mm:.12f}",
+                    "--recip-shadow-stop-velocity-window-s", f"{reciprocating_shadow_stop_velocity_window_s:.9f}",
+                    "--recip-shadow-stop-max-course-fraction", f"{reciprocating_shadow_stop_max_course_fraction:.9f}",
+                ])
     drive_proc = subprocess.Popen(
         drive_cmd,
         stdin=subprocess.PIPE,
@@ -540,11 +1411,13 @@ def start_external_run(
                 pass
         raise
 
-    return RunState(
+    state = RunState(
         dlg_proc=dlg_proc,
         drive_proc=drive_proc,
         turn_proc=None,
         dlg_csv=out_paths["dlg_csv"],
+        dlg_compat_csv=out_paths["dlg_compat_csv"],
+        encoder_state_csv=out_paths["encoder_state_csv"],
         drive_csv=out_paths["drive_csv"],
         turn_dist_csv=out_paths["turn_dist_csv"],
         turn_vp_csv=out_paths["turn_vp_csv"],
@@ -556,6 +1429,7 @@ def start_external_run(
         merge_exe=merge_exe,
         duration_s=duration_s,
         rate_hz=rate_hz,
+        drive_rate_hz=drive_rate_hz,
         force_normal_n=force_normal_n,
         relacao=relacao,
         raio_mm=raio_mm,
@@ -565,9 +1439,48 @@ def start_external_run(
         reciprocating_total_mm=reciprocating_total_mm,
         reciprocating_tolerance_counts=int(reciprocating_tolerance_counts),
         reciprocating_edge_filter_pct=float(reciprocating_edge_filter_pct),
+        reciprocating_shadow_enabled=bool(reciprocating and reciprocating_shadow_enabled),
+        reciprocating_encoder_control_enabled=bool(
+            reciprocating and reciprocating_encoder_control_enabled
+        ),
+        drive_command_only=bool(
+            drive_command_only or reciprocating_encoder_control_enabled
+        ),
+        reciprocating_shadow_port=int(shadow_port),
+        reciprocating_shadow_session=int(shadow_session),
+        reciprocating_shadow_tolerance_mm=float(reciprocating_shadow_tolerance_mm),
+        reciprocating_shadow_total_mm=float(shadow_total_mm),
+        reciprocating_shadow_stroke_timeout_s=float(shadow_stroke_timeout_s),
+        reciprocating_shadow_forward_sign=int(reciprocating_shadow_forward_sign),
+        reciprocating_shadow_stop_compensation=bool(
+            encoder_recip_link_enabled and
+            reciprocating_shadow_stop_compensation
+        ),
+        reciprocating_shadow_stop_slope_s=float(reciprocating_shadow_stop_slope_s),
+        reciprocating_shadow_stop_margin_mm=float(reciprocating_shadow_stop_margin_mm),
+        reciprocating_shadow_stop_velocity_window_s=float(
+            reciprocating_shadow_stop_velocity_window_s
+        ),
+        reciprocating_shadow_stop_max_course_fraction=float(
+            reciprocating_shadow_stop_max_course_fraction
+        ),
         dynamic_offset_n=float(dynamic_offset_n),
         target_speed_schedule=list(target_speed_schedule or []),
+        continuous_target_mm=float(continuous_target_mm),
+        continuous_encoder_status=(
+            "aguardando_alvo" if not reciprocating and continuous_target_mm > 0.0
+            else "nao_aplicavel"
+        ),
     )
+    if state.continuous_encoder_status == "aguardando_alvo":
+        state.encoder_monitor_thread = threading.Thread(
+            target=_monitor_continuous_encoder_events,
+            args=(state,),
+            daemon=True,
+            name="continuous-encoder-events",
+        )
+        state.encoder_monitor_thread.start()
+    return state
 
 
 def run_reciprocating_offset_capture(
@@ -592,10 +1505,7 @@ def run_reciprocating_offset_capture(
     useful_strokes = useful_cycles * 2
     target_strokes = executed_cycles * 2
     movement_mm = float(target_strokes) * float(course_mm)
-    # O orquestrador encerra exatamente no numero de strokes desejado.
-    # O limite enviado ao C fica acima disso para RECIP_DONE nao cortar o
-    # ultimo ciclo no meio quando houver pequeno erro positivo de curso.
-    controller_total_mm = float(target_strokes) * 2.0 * float(course_mm)
+    controller_total_mm = movement_mm
     rpm_disk_target = 1.0
     rpm_drive = max(1, int(round(float(relacao) * rpm_disk_target)))
     rpm_disk_effective = float(rpm_drive) / float(relacao)
@@ -628,31 +1538,39 @@ def run_reciprocating_offset_capture(
         reciprocating_course_mm=course_mm,
         reciprocating_total_mm=controller_total_mm,
         reciprocating_tolerance_counts=tolerance_counts,
+        reciprocating_shadow_enabled=False,
+        reciprocating_encoder_control_enabled=True,
+        drive_command_only=True,
+        reciprocating_shadow_total_mm=movement_mm,
+        reciprocating_shadow_forward_sign=0,
+        reciprocating_shadow_stop_compensation=True,
+        target_speed_schedule=[(pin_speed_mm_s, watchdog_s)],
     )
 
     event_path = os.path.join(work_dir, "a5_speed_events.log")
 
     def _read_recip_events():
-        reverse_indices = []
-        done_idx = None
+        boundary_qpcs = []
+        done_qpc = None
         if not os.path.exists(event_path):
-            return reverse_indices, done_idx
+            return boundary_qpcs, done_qpc
         try:
             with open(event_path, "r", encoding="utf-8", errors="replace") as f:
                 for line in f:
-                    if "RECIP_REVERSE " in line:
-                        for part in line.replace(",", " ").split():
-                            if part.startswith("idx="):
-                                reverse_indices.append(int(part.split("=", 1)[1]))
-                                break
-                    if "RECIP_DONE " in line:
-                        for part in line.replace(",", " ").split():
-                            if part.startswith("idx="):
-                                done_idx = int(part.split("=", 1)[1])
-                                break
+                    if "RECIP_ENCODER_TRIGGER " in line:
+                        fields = _event_fields(line)
+                        qpc = fields.get("qpc")
+                        if qpc is not None:
+                            boundary_qpcs.append(int(qpc))
+                    elif "RECIP_ENCODER_DONE " in line:
+                        fields = _event_fields(line)
+                        qpc = fields.get("qpc")
+                        if qpc is not None:
+                            done_qpc = int(qpc)
+                            boundary_qpcs.append(done_qpc)
         except Exception:
             pass
-        return reverse_indices, done_idx
+        return boundary_qpcs, done_qpc
 
     started = time.time()
     target_seen = False
@@ -660,8 +1578,8 @@ def run_reciprocating_offset_capture(
         while state.drive_proc.poll() is None:
             if progress_cb:
                 progress_cb(time.time() - started, theoretical_s)
-            live_reverses, _ = _read_recip_events()
-            if len(live_reverses) >= target_strokes:
+            live_boundaries, _ = _read_recip_events()
+            if len(live_boundaries) >= target_strokes:
                 target_seen = True
                 # O ultimo RECIP_REVERSE confirma um stroke completo. Encerra
                 # imediatamente, sem aguardar o restante do watchdog.
@@ -682,8 +1600,35 @@ def run_reciprocating_offset_capture(
 
     drive_rc = state.drive_proc.returncode
     dlg_rc = state.dlg_proc.returncode
-    reverse_indices, done_idx = _read_recip_events()
-    reverse_indices = sorted(set(reverse_indices))
+    shadow_summary = load_reciprocating_shadow_summary(state)
+    encoder_capture_quality = analyze_encoder_state_capture(
+        state.encoder_state_csv, movement_mm
+    )
+    stop_diagnostics_path = os.path.join(work_dir, "recip_stop_diagnostics.csv")
+    stop_diagnostics = build_reciprocating_stop_diagnostics(
+        state,
+        output_path=stop_diagnostics_path,
+        phase="correcao_dinamica",
+    )
+    boundary_qpcs, done_qpc = _read_recip_events()
+    del done_qpc
+    boundary_qpcs = sorted(set(boundary_qpcs))
+    dlg_qpc_idx = []
+    if os.path.exists(state.dlg_csv):
+        with open(state.dlg_csv, "r", newline="", encoding="utf-8") as stream:
+            for row in csv.DictReader(stream):
+                try:
+                    dlg_qpc_idx.append((int(row["t_qpc"]), int(row["idx"])))
+                except Exception:
+                    continue
+    qpc_values = [item[0] for item in dlg_qpc_idx]
+    reverse_indices = []
+    for qpc in boundary_qpcs:
+        pos = bisect.bisect_left(qpc_values, qpc)
+        choices = [candidate for candidate in (pos - 1, pos) if 0 <= candidate < len(dlg_qpc_idx)]
+        if choices:
+            nearest = min(choices, key=lambda candidate: abs(qpc_values[candidate] - qpc))
+            reverse_indices.append(dlg_qpc_idx[nearest][1])
     capture_complete = len(reverse_indices) >= target_strokes
     capture_end_idx = reverse_indices[target_strokes - 1] if capture_complete else None
     retained_start_idx = reverse_indices[1] + 1 if len(reverse_indices) >= 2 else None
@@ -691,8 +1636,9 @@ def run_reciprocating_offset_capture(
     rows = []
     valid_by_idx = {}
     total_rows = 0
-    if os.path.exists(paths["dlg_csv"]):
-        with open(paths["dlg_csv"], "r", newline="", encoding="utf-8") as f:
+    processing_dlg_csv = state.dlg_csv
+    if os.path.exists(processing_dlg_csv):
+        with open(processing_dlg_csv, "r", newline="", encoding="utf-8") as f:
             reader = csv.reader(f)
             next(reader, None)
             for row in reader:
@@ -758,21 +1704,23 @@ def run_reciprocating_offset_capture(
         sum(valid_cycle_means) / len(valid_cycle_means)
         if len(valid_cycle_means) == useful_cycles else 0.0
     )
-    reasons = []
-    if drive_rc not in (None, 0):
-        reasons.append(f"Drive encerrou com codigo {drive_rc}")
-    if dlg_rc not in (None, 0):
-        reasons.append(f"DLG encerrou com codigo {dlg_rc}")
-    if not capture_complete:
-        reasons.append(f"ciclos incompletos ({len(reverse_indices)}/{target_strokes} strokes)")
-    if len(valid_cycle_means) != useful_cycles:
-        reasons.append(
-            f"ciclos sem CH1 valido ({len(valid_cycle_means)}/{useful_cycles})"
-        )
-    if not valid_count:
-        reasons.append("nenhuma amostra CH1 valida")
-    if loss_pct > max_loss_pct:
-        reasons.append(f"perda DLG {loss_pct:.3f}% acima de {max_loss_pct:.3f}%")
+    primary_failure = _reciprocating_startup_failure_reason(event_path)
+    reasons = [primary_failure] if primary_failure else []
+    if not primary_failure:
+        if drive_rc not in (None, 0):
+            reasons.append(f"Drive encerrou com codigo {drive_rc}")
+        if dlg_rc not in (None, 0):
+            reasons.append(f"DLG encerrou com codigo {dlg_rc}")
+        if not capture_complete:
+            reasons.append(f"ciclos incompletos ({len(reverse_indices)}/{target_strokes} strokes)")
+        if len(valid_cycle_means) != useful_cycles:
+            reasons.append(
+                f"ciclos sem CH1 valido ({len(valid_cycle_means)}/{useful_cycles})"
+            )
+        if not valid_count:
+            reasons.append("nenhuma amostra CH1 valida")
+        if loss_pct > max_loss_pct:
+            reasons.append(f"perda DLG {loss_pct:.3f}% acima de {max_loss_pct:.3f}%")
 
     capture_csv = os.path.join(dev_dir, "recip_dynamic_offset.csv")
     with open(capture_csv, "w", newline="", encoding="utf-8") as f:
@@ -785,14 +1733,24 @@ def run_reciprocating_offset_capture(
                 1 if sample_valid and in_retained_window else 0,
             ])
 
-    for name in ("a5_speed_events.log", "dlg_logger_events.log", "drive.csv", "schedule.csv"):
+    for name in ("a5_speed_events.log", "dlg_logger_events.log", "drive.csv", "schedule.csv", "encoder_state.csv"):
         src = os.path.join(work_dir, name)
         if os.path.exists(src):
             shutil.copy2(src, os.path.join(dev_dir, f"recip_offset_{name}"))
+    if os.path.exists(state.dlg_csv):
+        shutil.copy2(state.dlg_csv, os.path.join(dev_dir, "recip_offset_dlg_200hz.csv"))
+    if state.dlg_compat_csv != state.dlg_csv and os.path.exists(state.dlg_compat_csv):
+        shutil.copy2(state.dlg_compat_csv, os.path.join(dev_dir, "recip_offset_dlg_compat_50hz.csv"))
+    if os.path.exists(stop_diagnostics_path):
+        shutil.copy2(
+            stop_diagnostics_path,
+            os.path.join(dev_dir, "recip_offset_stop_diagnostics.csv"),
+        )
     shutil.rmtree(work_dir, ignore_errors=True)
     return {
         "valid": not reasons,
         "reason": "; ".join(reasons) if reasons else "aprovada",
+        "primary_failure": primary_failure or "",
         "offset_n": offset_n,
         "cycles": useful_cycles,
         "warmup_cycles": warmup_cycles,
@@ -808,6 +1766,10 @@ def run_reciprocating_offset_capture(
         "loss_pct": loss_pct,
         "theoretical_s": theoretical_s,
         "capture_csv": capture_csv,
+        "encoder_forward_sign": int(shadow_summary.get("forward_sign", "0") or 0),
+        "encoder_shadow_summary": shadow_summary,
+        "encoder_capture_quality": encoder_capture_quality,
+        "encoder_stop_diagnostics": stop_diagnostics,
     }
 
 
@@ -840,6 +1802,39 @@ def wait_and_merge(state: RunState) -> int:
         angle_unwrapped = None
         post_angles = []
         stop_sent_after_settle = False
+
+        def append_post_lines(lines, done_qpc=None):
+            nonlocal angle_last, angle_unwrapped
+            parsed = []
+            for line in lines:
+                cols = line.strip().split(",")
+                if len(cols) <= 5 or cols[5].strip().upper() == "NULL":
+                    continue
+                try:
+                    parsed.append((
+                        int(cols[0]), int(cols[1]), float(cols[2]), float(cols[5])
+                    ))
+                except Exception:
+                    continue
+            if done_qpc is not None and parsed and not post_angles:
+                start = min(
+                    range(len(parsed)),
+                    key=lambda pos: abs(parsed[pos][1] - int(done_qpc)),
+                )
+                parsed = parsed[start:]
+            for sample_idx, _sample_qpc, sample_t_s, angle in parsed:
+                if angle_last is None:
+                    angle_unwrapped = angle
+                else:
+                    delta = angle - angle_last
+                    if delta > 180.0:
+                        delta -= 360.0
+                    elif delta < -180.0:
+                        delta += 360.0
+                    angle_unwrapped += delta
+                angle_last = angle
+                post_angles.append((sample_idx, sample_t_s, angle_unwrapped))
+
         while state.dlg_proc.poll() is None and state.drive_proc.poll() is None:
             if os.path.exists(event_path):
                 try:
@@ -847,21 +1842,23 @@ def wait_and_merge(state: RunState) -> int:
                         fev.seek(event_pos)
                         chunk = fev.read()
                         event_pos = fev.tell()
-                    if motion_done_at is None and "RECIP_DONE " in chunk:
+                    if motion_done_at is None and (
+                        "RECIP_ENCODER_DONE " in chunk or "RECIP_DONE " in chunk
+                    ):
                         motion_done_at = time.monotonic()
+                        done_qpc = None
+                        for event_line in chunk.splitlines():
+                            if "RECIP_ENCODER_DONE " in event_line or "RECIP_DONE " in event_line:
+                                fields = _event_fields(event_line)
+                                try:
+                                    done_qpc = int(fields.get("qpc", ""))
+                                except Exception:
+                                    done_qpc = None
                         if os.path.exists(state.dlg_csv):
                             with open(state.dlg_csv, "r", encoding="ascii", errors="replace") as fdlg:
                                 existing = fdlg.readlines()
                                 dlg_pos = fdlg.tell()
-                            for line in reversed(existing):
-                                cols = line.strip().split(",")
-                                if len(cols) > 5 and cols[5].strip().upper() != "NULL":
-                                    try:
-                                        angle_last = float(cols[5])
-                                        angle_unwrapped = angle_last
-                                    except Exception:
-                                        pass
-                                    break
+                            append_post_lines(existing, done_qpc=done_qpc)
                 except Exception:
                     pass
 
@@ -871,38 +1868,17 @@ def wait_and_merge(state: RunState) -> int:
                         fdlg.seek(dlg_pos)
                         lines = fdlg.readlines()
                         dlg_pos = fdlg.tell()
-                    for line in lines:
-                        cols = line.strip().split(",")
-                        if len(cols) <= 5 or cols[5].strip().upper() == "NULL":
-                            continue
-                        angle = float(cols[5])
-                        if angle_last is None:
-                            angle_unwrapped = angle
-                        else:
-                            delta = angle - angle_last
-                            if delta > 180.0:
-                                delta -= 360.0
-                            elif delta < -180.0:
-                                delta += 360.0
-                            angle_unwrapped += delta
-                        angle_last = angle
-                        try:
-                            sample_idx = int(cols[0])
-                        except Exception:
-                            sample_idx = None
-                        post_angles.append((sample_idx, angle_unwrapped))
+                    append_post_lines(lines)
                 except Exception:
                     pass
 
                 elapsed = time.monotonic() - motion_done_at
-                recent = [item[1] for item in post_angles[-10:]]
-                all_angles = [item[1] for item in post_angles]
-                excursion = (max(all_angles) - min(all_angles)) if len(all_angles) >= 2 else 0.0
-                stable = len(recent) >= 10 and (max(recent) - min(recent)) <= 0.25
-                if elapsed >= 0.45 and excursion >= 0.5 and stable:
-                    direction = 1 if recent[-1] >= all_angles[0] else -1
-                    endpoint = max(post_angles, key=lambda item: item[1]) if direction > 0 else min(post_angles, key=lambda item: item[1])
+                endpoint = _detect_reciprocating_stationary_endpoint(
+                    post_angles, float(state.raio_mm)
+                )
+                if elapsed >= RECIP_FINAL_MIN_OBSERVATION_S and endpoint is not None:
                     state.reciprocating_final_encoder_idx = endpoint[0]
+                    state.reciprocating_final_encoder_t_s = endpoint[1]
                     state.reciprocating_postroll_status = "encoder_estavel"
                     _send_ipc(state.dlg_proc, "STOP")
                     _send_ipc(state.drive_proc, "STOP")
@@ -921,20 +1897,63 @@ def wait_and_merge(state: RunState) -> int:
             _send_ipc(state.drive_proc, "STOP")
         state.dlg_proc.wait()
         state.drive_proc.wait()
+    elif state.continuous_target_mm > 0.0:
+        while state.dlg_proc.poll() is None and state.drive_proc.poll() is None:
+            time.sleep(0.02)
+        if state.dlg_proc.poll() is None:
+            _send_ipc(state.dlg_proc, "STOP")
+        if state.drive_proc.poll() is None:
+            _send_ipc(state.drive_proc, "STOP")
+        state.dlg_proc.wait()
+        state.drive_proc.wait()
     else:
         state.dlg_proc.wait()
         state.drive_proc.wait()
     dlg_rc = state.dlg_proc.returncode
     drive_rc = state.drive_proc.returncode
+    if (
+        state.reciprocating_shadow_enabled or
+        state.reciprocating_encoder_control_enabled
+    ):
+        load_reciprocating_shadow_summary(state)
+        build_reciprocating_stop_diagnostics(state)
+
+    if state.reciprocating and state.reciprocating_encoder_control_enabled:
+        _rebuild_reciprocating_csv_from_logs(
+            state,
+            float(state.relacao),
+            float(state.raio_mm),
+            float(state.distance_interval_mm),
+        )
+        _move_dev_artifacts(state)
+        if drive_rc not in (None, 0):
+            return int(drive_rc)
+        if dlg_rc not in (None, 0):
+            return int(dlg_rc)
+        return 0
+
+    if not state.reciprocating and state.continuous_target_mm > 0.0:
+        if state.encoder_monitor_thread and state.encoder_monitor_thread.is_alive():
+            state.encoder_monitor_thread.join(timeout=0.5)
+        _build_continuous_encoder_outputs(state)
+        _move_dev_artifacts(state)
+        if drive_rc not in (None, 0):
+            return int(drive_rc)
+        if dlg_rc not in (None, 0):
+            return int(dlg_rc)
+        if state.continuous_encoder_status not in ("alvo_atingido", "parada_manual"):
+            return 4
+        return 0
 
     # Reprocessa sempre no final para garantir consistencia do arquivo final
     # com os CSVs completos (independente de glitch no tempo real).
     _rebuild_turn_csv_from_logs(state)
 
     merge_rc = -1
+    processing_dlg_csv = _processing_dlg_csv(state)
     merge_cmd = [
         state.merge_exe,
-        "--dlg", state.dlg_csv,
+        "--dlg", processing_dlg_csv,
         "--drive", state.drive_csv,
         "--out", state.merge_csv,
     ]
@@ -945,7 +1964,7 @@ def wait_and_merge(state: RunState) -> int:
 
     # Rede de seguranca: se merge em C falhar, gera resultado em Python.
     if merge_rc != 0 or not os.path.exists(state.merge_csv):
-        _merge_csv_fallback(state.dlg_csv, state.drive_csv, state.merge_csv)
+        _merge_csv_fallback(processing_dlg_csv, state.drive_csv, state.merge_csv)
         _append_external_encoder_position(state)
         _apply_dynamic_offset_to_merge(state)
         _crop_reciprocating_merge_at_encoder_endpoint(state)
@@ -983,6 +2002,7 @@ def _median(values: List[float]) -> float:
 def _filter_external_encoder_angles(
     raw_angles: List[Optional[float]],
     nominal_step_deg: float,
+    sample_rate_hz: float = DEFAULT_DRIVE_RATE_HZ,
 ) -> Tuple[List[Optional[float]], List[int]]:
     """Rastreador angular com innovation gate, histerese e quarentena.
 
@@ -995,6 +2015,11 @@ def _filter_external_encoder_angles(
     output: List[Optional[float]] = [None] * count
     quarantine = [0] * count
     nominal_step = max(0.0, float(nominal_step_deg))
+    rate_hz = max(1.0, float(sample_rate_hz))
+    confirm_samples = max(2, int(round(ENCODER_TRANSITION_CONFIRM_S * rate_hz)))
+    velocity_history_samples = max(
+        2, int(round(ENCODER_TRANSITION_VELOCITY_HISTORY_S * rate_hz))
+    )
     local_gate = max(
         ENCODER_TRANSITION_MIN_GATE_DEG,
         nominal_step * 3.0 + 0.75,
@@ -1011,7 +2036,7 @@ def _filter_external_encoder_angles(
     def remember_step(step: float) -> None:
         nonlocal velocity, velocity_history
         velocity_history.append(step)
-        velocity_history = velocity_history[-ENCODER_TRANSITION_VELOCITY_HISTORY:]
+        velocity_history = velocity_history[-velocity_history_samples:]
         velocity = _median(velocity_history)
 
     def close_quarantine(endpoint_idx: int, endpoint_angle: float) -> None:
@@ -1068,7 +2093,7 @@ def _filter_external_encoder_angles(
         else:
             stable_chain = [(idx, _nearest_unwrapped_angle(normalized, prediction))]
 
-        if len(stable_chain) >= ENCODER_TRANSITION_CONFIRM_SAMPLES:
+        if len(stable_chain) >= confirm_samples:
             endpoint_idx, endpoint_angle = stable_chain[-1]
             elapsed = max(1, endpoint_idx - last_idx)
             prediction = last_angle + velocity * elapsed
@@ -1095,7 +2120,7 @@ def _filter_external_encoder_angles(
 
 def _encoder_nominal_step_deg(state: RunState) -> float:
     """Maior passo angular esperado por amostra, a partir do ensaio."""
-    rate_hz = float(getattr(state, "rate_hz", DEFAULT_RATE_HZ) or DEFAULT_RATE_HZ)
+    rate_hz = _processing_rate_hz(state)
     radius_mm = float(getattr(state, "raio_mm", 0.0) or 0.0)
     schedule = getattr(state, "target_speed_schedule", None) or []
     speeds = [abs(float(item[0])) for item in schedule if item]
@@ -1138,6 +2163,7 @@ def _append_external_encoder_position(state: RunState) -> None:
                 filtered, quarantine = _filter_external_encoder_angles(
                     raw_angles,
                     _encoder_nominal_step_deg(state),
+                    _processing_rate_hz(state),
                 )
                 state.encoder_quarantine_samples = sum(quarantine)
                 state.encoder_quarantine_fraction = (
@@ -1163,8 +2189,9 @@ def _crop_reciprocating_merge_at_encoder_endpoint(state: RunState) -> None:
     """Remove apenas a cauda estatica final; DadosDev preserva a pos-captura completa."""
     if not state.reciprocating or not os.path.isfile(state.merge_csv):
         return
+    endpoint_t_s = getattr(state, "reciprocating_final_encoder_t_s", None)
     endpoint_idx = getattr(state, "reciprocating_final_encoder_idx", None)
-    if endpoint_idx is None:
+    if endpoint_t_s is None and endpoint_idx is None:
         return
     tmp_path = state.merge_csv + ".recip_crop_tmp"
     try:
@@ -1175,12 +2202,20 @@ def _crop_reciprocating_merge_at_encoder_endpoint(state: RunState) -> None:
             header = next(reader, None)
             if header:
                 writer.writerow(header)
+            names = {
+                name.strip().lower(): i for i, name in enumerate(header or [])
+            }
+            t_s_i = names.get("t_s", 1)
             for row in reader:
                 try:
-                    idx = int(row[0])
+                    beyond_endpoint = (
+                        float(row[t_s_i]) > float(endpoint_t_s) + 1.0e-9
+                        if endpoint_t_s is not None
+                        else int(row[0]) > int(endpoint_idx)
+                    )
                 except Exception:
                     continue
-                if idx > int(endpoint_idx):
+                if beyond_endpoint:
                     break
                 writer.writerow(row)
         os.replace(tmp_path, state.merge_csv)
@@ -1261,7 +2296,12 @@ def _move_dev_artifacts(state: RunState) -> None:
         (os.path.join(rep_dir, "graph_events.log"), os.path.join(dev_dir, "graph_events.log")),
         (os.path.join(rep_dir, "dlg_logger_events.log"), os.path.join(dev_dir, "dlg_logger_events.log")),
         (os.path.join(rep_dir, "a5_speed_events.log"), os.path.join(dev_dir, "a5_speed_events.log")),
+        (os.path.join(rep_dir, "recip_stop_diagnostics.csv"), os.path.join(dev_dir, "recip_stop_diagnostics.csv")),
     ])
+    if state.dlg_compat_csv and state.dlg_compat_csv != state.dlg_csv:
+        pairs.append((state.dlg_compat_csv, os.path.join(dev_dir, "dlg_compat_50hz.csv")))
+    if state.encoder_state_csv:
+        pairs.append((state.encoder_state_csv, os.path.join(dev_dir, "encoder_state.csv")))
 
     for src, dst in pairs:
         _move_file_best_effort(src, dst)
@@ -1321,6 +2361,10 @@ def finalize_dev_artifacts_after_run(state: RunState, retries: int = 20, sleep_s
         (state.dlg_csv, os.path.join(dev_dir, "dlg.csv")),
         (state.drive_csv, os.path.join(dev_dir, "drive.csv")),
     ]
+    if state.dlg_compat_csv and state.dlg_compat_csv != state.dlg_csv:
+        pending.append((state.dlg_compat_csv, os.path.join(dev_dir, "dlg_compat_50hz.csv")))
+    if state.encoder_state_csv:
+        pending.append((state.encoder_state_csv, os.path.join(dev_dir, "encoder_state.csv")))
 
     for _ in range(max(1, retries)):
         all_done = True
@@ -1334,7 +2378,7 @@ def finalize_dev_artifacts_after_run(state: RunState, retries: int = 20, sleep_s
         time.sleep(max(0.01, float(sleep_s)))
 
 
-def _rebuild_reciprocating_csv_from_logs(state: RunState, relacao: float, raio_mm: float, distance_interval_mm: float) -> None:
+def _rebuild_reciprocating_csv_from_drive_legacy(state: RunState, relacao: float, raio_mm: float, distance_interval_mm: float) -> None:
     """
     Regera _DP e _M para modo reciprocante usando deslocamento absoluto do encoder.
 
@@ -1429,7 +2473,7 @@ def _rebuild_reciprocating_csv_from_logs(state: RunState, relacao: float, raio_m
 
     def _read_aligned_samples():
         samples = []
-        with open(state.dlg_csv, "r", newline="", encoding="utf-8") as fdlg, \
+        with open(_processing_dlg_csv(state), "r", newline="", encoding="utf-8") as fdlg, \
              open(state.drive_csv, "r", newline="", encoding="utf-8") as fdrv:
             rd_d = csv.reader(fdlg)
             rd_r = csv.reader(fdrv)
@@ -1542,7 +2586,9 @@ def _rebuild_reciprocating_csv_from_logs(state: RunState, relacao: float, raio_m
         if s.get("atr_ok") and s.get("pos_ok"):
             atr = s["atr"]
             acc["n_valid"] += 1
-            acc["atr_sum"] += atr
+            # No reciprocante, sentidos opostos nao podem se cancelar na
+            # media por distancia. Minimo e maximo continuam assinados.
+            acc["atr_sum"] += abs(atr)
             acc["atr_min"] = atr if acc["atr_min"] is None else min(acc["atr_min"], atr)
             acc["atr_max"] = atr if acc["atr_max"] is None else max(acc["atr_max"], atr)
             if s.get("rpm_ok"):
@@ -1736,6 +2782,588 @@ def _rebuild_reciprocating_csv_from_logs(state: RunState, relacao: float, raio_m
             start_idx = boundary_idx + 1
 
 
+def _rebuild_reciprocating_csv_from_logs(
+    state: RunState,
+    relacao: float,
+    raio_mm: float,
+    distance_interval_mm: float,
+) -> None:
+    """Gera _T, _DP e _M reciprocantes apenas com DLG + encoder externo."""
+    del relacao  # A relacao mecanica nao participa mais da medicao.
+    del raio_mm
+    if not os.path.isfile(state.dlg_csv) or not os.path.isfile(state.encoder_state_csv):
+        raise RuntimeError("CSV completo do DLG ou estado do encoder externo ausente.")
+    interval_mm = float(distance_interval_mm)
+    if interval_mm <= 0.0:
+        raise RuntimeError("Intervalo de distancia invalido para o reciprocante.")
+
+    def as_float(value, default=None):
+        try:
+            text_value = str(value).strip()
+            if not text_value or text_value.upper() == "NULL":
+                return default
+            number = float(text_value)
+            return number if math.isfinite(number) else default
+        except Exception:
+            return default
+
+    def as_int(value, default=None):
+        try:
+            return int(str(value).strip())
+        except Exception:
+            return default
+
+    def fmt(value, digits=6):
+        return "NULL" if value is None else f"{float(value):.{digits}f}"
+
+    event_path = os.path.join(os.path.dirname(state.drive_csv), "a5_speed_events.log")
+    physical_events = []
+    segment_by_stroke = {}
+    done_event = None
+    if os.path.isfile(event_path):
+        with open(event_path, "r", encoding="ascii", errors="replace") as stream:
+            for line in stream:
+                fields = _event_fields(line)
+                if "RECIP_SHADOW_PHYSICAL_REVERSAL " in line:
+                    qpc = as_int(fields.get("qpc"))
+                    stroke = as_int(fields.get("stroke"))
+                    if qpc is not None and stroke is not None:
+                        physical_events.append({
+                            "qpc": qpc,
+                            "stroke": stroke,
+                            "extreme_mm": as_float(fields.get("extreme_mm")),
+                            "endpoint_error_mm": as_float(fields.get("endpoint_error_mm")),
+                        })
+                elif "RECIP_ENCODER_TRIGGER " in line:
+                    stroke = as_int(fields.get("stroke"))
+                    segment = as_int(fields.get("completed_segment"))
+                    if stroke is not None and segment is not None:
+                        segment_by_stroke[stroke] = segment
+                elif "RECIP_ENCODER_DONE " in line:
+                    done_event = {
+                        "qpc": as_int(fields.get("qpc")),
+                        "stroke": as_int(fields.get("strokes")),
+                        "segment": as_int(fields.get("completed_segment")),
+                    }
+                    if done_event["stroke"] is not None and done_event["segment"] is not None:
+                        segment_by_stroke[done_event["stroke"]] = done_event["segment"]
+
+    samples = []
+    offset_n = float(getattr(state, "dynamic_offset_n", 0.0) or 0.0)
+    last_angle = None
+    quarantine_count = 0
+    with open(state.dlg_csv, "r", newline="", encoding="utf-8") as fdlg, \
+         open(state.encoder_state_csv, "r", newline="", encoding="utf-8") as fenc:
+        rd_dlg = csv.DictReader(fdlg)
+        rd_enc = csv.DictReader(fenc)
+        for dlg_row, enc_row in zip_longest(rd_dlg, rd_enc):
+            if dlg_row is None or enc_row is None:
+                raise RuntimeError("DLG e encoder externo possuem quantidades diferentes de linhas.")
+            idx = as_int(dlg_row.get("idx"))
+            enc_idx = as_int(enc_row.get("idx"))
+            if idx is None or enc_idx != idx:
+                raise RuntimeError("DLG e encoder externo perderam alinhamento por indice.")
+            t_s = as_float(dlg_row.get("t_s"))
+            qpc = as_int(dlg_row.get("t_qpc"))
+            accepted = as_int(enc_row.get("accepted"), 0) == 1
+            dlg_ok = as_int(dlg_row.get("err"), 1) == 0
+            relative_mm = as_float(enc_row.get("relative_mm"))
+            disk_rpm = as_float(enc_row.get("disk_rpm"))
+            unwrapped = as_float(enc_row.get("unwrapped_deg"))
+            if accepted and unwrapped is not None:
+                last_angle = unwrapped % 360.0
+            isolated = 0 if accepted else 1
+            quarantine_count += isolated
+            channels = [as_float(dlg_row.get(f"ch{i}")) for i in range(1, 9)]
+            if channels[0] is not None:
+                channels[0] -= offset_n
+            atrito = as_float(dlg_row.get("atrito"))
+            if state.force_normal_n > 0.0 and channels[0] is not None:
+                atrito = channels[0] / state.force_normal_n
+            samples.append({
+                "idx": idx,
+                "qpc": qpc,
+                "t": t_s,
+                "accepted": accepted,
+                "dlg_ok": dlg_ok,
+                "pos": relative_mm,
+                "rpm": disk_rpm,
+                "angle": last_angle,
+                "isolated": isolated,
+                "channels": channels,
+                "atr": atrito,
+                "valid_force": dlg_ok and accepted and atrito is not None,
+            })
+    if not samples:
+        raise RuntimeError("Nenhuma amostra DLG disponivel para o reciprocante.")
+
+    first_valid = next(
+        (i for i, sample in enumerate(samples)
+         if sample["accepted"] and sample["pos"] is not None and sample["t"] is not None),
+        None,
+    )
+    if first_valid is None:
+        raise RuntimeError("Nenhuma amostra valida do encoder externo no reciprocante.")
+    qpcs = [sample["qpc"] if sample["qpc"] is not None else -1 for sample in samples]
+
+    def nearest_sample_index(qpc):
+        if qpc is None:
+            return None
+        pos = bisect.bisect_left(qpcs, qpc)
+        choices = [candidate for candidate in (pos - 1, pos) if 0 <= candidate < len(samples)]
+        if not choices:
+            return None
+        return min(choices, key=lambda candidate: abs(qpcs[candidate] - qpc))
+
+    boundaries = []
+    for event in sorted(physical_events, key=lambda item: item["stroke"]):
+        confirmation_index = nearest_sample_index(event["qpc"])
+        sample_index = confirmation_index
+        if confirmation_index is not None and event.get("extreme_mm") is not None:
+            search_start = max(
+                first_valid,
+                confirmation_index - int(max(20.0, float(getattr(state, "rate_hz", 200.0)))),
+            )
+            candidates = [
+                i for i in range(search_start, confirmation_index + 1)
+                if samples[i]["accepted"] and samples[i]["pos"] is not None
+            ]
+            if candidates:
+                sample_index = min(
+                    candidates,
+                    key=lambda i: abs(samples[i]["pos"] - event["extreme_mm"]),
+                )
+        if sample_index is not None and sample_index > first_valid:
+            boundaries.append({**event, "sample_index": sample_index})
+
+    final_idx = getattr(state, "reciprocating_final_encoder_idx", None)
+    final_sample_index = None
+    if final_idx is not None:
+        final_sample_index = next(
+            (i for i, sample in enumerate(samples) if sample["idx"] >= final_idx),
+            None,
+        )
+    if final_sample_index is None and done_event and done_event.get("qpc") is not None:
+        done_sample_index = nearest_sample_index(done_event["qpc"])
+        reversal_candidates = [
+            i for i in range((done_sample_index or first_valid) + 1, len(samples))
+            if as_int(samples[i].get("isolated"), 0) == 0 and
+               i > 0 and samples[i]["pos"] is not None and samples[i - 1]["pos"] is not None
+        ]
+        # A cauda ja foi limitada pelo detector de estabilizacao. O ultimo ponto
+        # valido e, portanto, a melhor ancora conservadora se nao houver indice.
+        if reversal_candidates:
+            final_sample_index = reversal_candidates[-1]
+    if final_sample_index is None:
+        final_sample_index = len(samples) - 1
+
+    expected_strokes = int(math.ceil(
+        float(state.reciprocating_total_mm) /
+        max(float(state.reciprocating_course_mm), 1.0e-12)
+    ))
+    boundaries = [item for item in boundaries if item["sample_index"] < final_sample_index]
+    boundaries = boundaries[:max(0, expected_strokes - 1)]
+    boundaries.append({
+        "sample_index": final_sample_index,
+        "stroke": expected_strokes,
+        "endpoint_error_mm": None,
+    })
+
+    final_output_index = boundaries[-1]["sample_index"]
+    output_samples = samples[:final_output_index + 1]
+    with open(state.merge_csv, "w", newline="", encoding="utf-8") as ft:
+        writer = csv.writer(ft, delimiter=";", lineterminator="\n")
+        writer.writerow([
+            "idx", "t_s", "ch1", "ch2", "ch3", "ch4", "ch5", "ch6", "ch7", "ch8",
+            "atrito", "pos", "rpm", "dlg_err", "encoder_pos_err", "encoder_rpm_err",
+            "PosEncExt", "PosEncExt_Quarentena",
+        ])
+        for sample in output_samples:
+            writer.writerow([
+                sample["idx"], fmt(sample["t"]),
+                *[fmt(value, 10) for value in sample["channels"]],
+                fmt(sample["atr"], 10), fmt(sample["pos"], 10), fmt(sample["rpm"], 10),
+                0 if sample["dlg_ok"] else 1,
+                0 if sample["accepted"] else 1,
+                0 if sample["accepted"] and sample["rpm"] is not None else 1,
+                fmt(sample["angle"], 10), sample["isolated"],
+            ])
+
+    try:
+        edge_pct = max(0.0, min(49.0, float(state.reciprocating_edge_filter_pct)))
+    except Exception:
+        edge_pct = 0.0
+    target_schedule = list(getattr(state, "target_speed_schedule", None) or [])
+    stroke_ranges = []
+    start = first_valid
+    for boundary in boundaries:
+        end = boundary["sample_index"]
+        if end > start:
+            stroke_ranges.append((start, end, boundary))
+        start = end
+
+    with open(state.turn_vp_csv, "w", newline="", encoding="utf-8") as fm:
+        wm = csv.writer(fm, delimiter=";", lineterminator="\n")
+        wm.writerow([
+            "TEMPO_(min)", "STROKE", "ATRITO_EFETIVO", "ATRITO_MEDIO",
+            "ATRITO_MAX", "POS_MAX", "ATRITO_MIN", "POS_MIN", "LINHAS",
+            "VELOCIDADE_MEDIA", "VELOCIDADE_ALVO", "ERRO_CURSO_MM",
+        ])
+        processed_courses = []
+        processed_speeds = []
+        for number, (start, end, boundary) in enumerate(stroke_ranges, 1):
+            start_sample = samples[start]
+            end_sample = samples[end]
+            start_pos = start_sample["pos"]
+            end_pos = end_sample["pos"]
+            actual_course = (
+                abs(end_pos - start_pos)
+                if start_pos is not None and end_pos is not None else None
+            )
+            direction = 1 if end_pos is not None and start_pos is not None and end_pos >= start_pos else -1
+            values = []
+            if actual_course is not None:
+                edge_mm = actual_course * edge_pct / 100.0
+                for sample in samples[start:end + 1]:
+                    if sample["pos"] is None or not sample["valid_force"]:
+                        continue
+                    local = direction * (sample["pos"] - start_pos)
+                    if edge_mm <= local <= actual_course - edge_mm:
+                        values.append((local, sample["atr"]))
+            rms = mean_abs = force_max = force_min = pos_max = pos_min = None
+            if values:
+                forces = [item[1] for item in values]
+                rms = math.sqrt(sum(value * value for value in forces) / len(forces))
+                mean_abs = sum(abs(value) for value in forces) / len(forces)
+                max_item = max(values, key=lambda item: item[1])
+                min_item = min(values, key=lambda item: item[1])
+                pos_max, force_max = max_item
+                pos_min, force_min = min_item
+            duration = (
+                end_sample["t"] - start_sample["t"]
+                if end_sample["t"] is not None and start_sample["t"] is not None else None
+            )
+            speed = actual_course / duration if actual_course is not None and duration and duration > 0 else None
+            if actual_course is not None:
+                processed_courses.append(actual_course)
+            if speed is not None:
+                processed_speeds.append(speed)
+            segment = segment_by_stroke.get(boundary.get("stroke", number), 0)
+            target_speed = None
+            if 0 <= segment < len(target_schedule):
+                target_speed = as_float(target_schedule[segment][0])
+            wm.writerow([
+                fmt(start_sample["t"] / 60.0 if start_sample["t"] is not None else None),
+                number, fmt(rms), fmt(mean_abs), fmt(force_max), fmt(pos_max),
+                fmt(force_min), fmt(pos_min), len(values), fmt(speed), fmt(target_speed),
+                fmt(actual_course - float(state.reciprocating_course_mm)
+                    if actual_course is not None else None),
+            ])
+    nominal_course = float(state.reciprocating_course_mm)
+    course_errors = [value - nominal_course for value in processed_courses]
+    state.reciprocating_processing_summary = {
+        "strokes": len(processed_courses),
+        "course_mean_mm": (
+            sum(processed_courses) / len(processed_courses)
+            if processed_courses else None
+        ),
+        "course_min_mm": min(processed_courses) if processed_courses else None,
+        "course_max_mm": max(processed_courses) if processed_courses else None,
+        "course_error_mean_mm": (
+            sum(course_errors) / len(course_errors) if course_errors else None
+        ),
+        "course_abs_error_mean_mm": (
+            sum(abs(value) for value in course_errors) / len(course_errors)
+            if course_errors else None
+        ),
+        "course_abs_error_max_mm": (
+            max(abs(value) for value in course_errors) if course_errors else None
+        ),
+        "speed_mean_mm_s": (
+            sum(processed_speeds) / len(processed_speeds)
+            if processed_speeds else None
+        ),
+        "speed_min_mm_s": min(processed_speeds) if processed_speeds else None,
+        "speed_max_mm_s": max(processed_speeds) if processed_speeds else None,
+    }
+
+    def new_acc(start_t=None):
+        return {"t": start_t, "n": 0, "fail": 0, "values": [], "rpm": []}
+
+    def add_acc(acc, sample):
+        if acc["t"] is None:
+            acc["t"] = sample["t"]
+        acc["n"] += 1
+        if sample["valid_force"]:
+            acc["values"].append(sample["atr"])
+            if sample["rpm"] is not None:
+                acc["rpm"].append(abs(sample["rpm"]))
+        else:
+            acc["fail"] += 1
+
+    with open(state.turn_dist_csv, "w", newline="", encoding="utf-8") as fdp:
+        wd = csv.writer(fdp, delimiter=";", lineterminator="\n")
+        wd.writerow([
+            "distancia_mm", "t_s_inicio", "atrito_med", "atrito_min", "atrito_max",
+            "rpm_medio_intervalo", "velocidade_media_mm_s", "n_total_pontos",
+            "n_falhas", "n_validas", "pct_perda",
+        ])
+        next_boundary = interval_mm
+        base_distance = 0.0
+        previous_t = samples[first_valid]["t"]
+        previous_cross_t = previous_t
+        acc = new_acc(previous_t)
+        for start, end, _boundary in stroke_ranges:
+            origin = samples[start]["pos"]
+            endpoint = samples[end]["pos"]
+            if origin is None or endpoint is None:
+                continue
+            direction = 1 if endpoint >= origin else -1
+            course = abs(endpoint - origin)
+            previous_progress = base_distance
+            previous_sample_t = samples[start]["t"]
+            for sample in samples[start:end + 1]:
+                add_acc(acc, sample)
+                if sample["pos"] is None or sample["t"] is None:
+                    continue
+                local = max(0.0, min(course, direction * (sample["pos"] - origin)))
+                progress = base_distance + local
+                while progress >= next_boundary and previous_progress < next_boundary:
+                    fraction = (
+                        (next_boundary - previous_progress) / (progress - previous_progress)
+                        if progress > previous_progress else 1.0
+                    )
+                    crossing_t = (
+                        previous_sample_t + fraction * (sample["t"] - previous_sample_t)
+                        if previous_sample_t is not None else sample["t"]
+                    )
+                    values = acc["values"]
+                    rpm_values = acc["rpm"]
+                    duration = crossing_t - previous_cross_t if previous_cross_t is not None else None
+                    wd.writerow([
+                        fmt(next_boundary), fmt(acc["t"]),
+                        fmt(sum(abs(value) for value in values) / len(values)
+                            if values else None),
+                        fmt(min(values) if values else None), fmt(max(values) if values else None),
+                        fmt(sum(rpm_values) / len(rpm_values) if rpm_values else None),
+                        fmt(interval_mm / duration if duration and duration > 0 else None),
+                        acc["n"], acc["fail"], len(values),
+                        fmt(100.0 * acc["fail"] / acc["n"] if acc["n"] else 0.0, 3),
+                    ])
+                    previous_cross_t = crossing_t
+                    next_boundary += interval_mm
+                    acc = new_acc(crossing_t)
+                previous_progress = max(previous_progress, progress)
+                previous_sample_t = sample["t"]
+            base_distance += course
+
+    state.encoder_quarantine_samples = quarantine_count
+    state.encoder_quarantine_fraction = quarantine_count / len(samples)
+
+
+def _build_continuous_encoder_outputs(state: RunState) -> None:
+    """Gera _T, _DP e _VP continuos exclusivamente do DLG + CH3 externo."""
+    if not os.path.isfile(state.dlg_csv) or not os.path.isfile(state.encoder_state_csv):
+        raise RuntimeError("CSV completo do DLG ou estado do encoder externo ausente.")
+    radius_mm = float(state.raio_mm)
+    interval_mm = float(state.distance_interval_mm)
+    if radius_mm <= 0.0 or interval_mm <= 0.0:
+        raise RuntimeError("Raio/intervalo invalidos para processamento continuo.")
+    circumference_mm = 2.0 * math.pi * radius_mm
+
+    def as_float(value, default=None):
+        try:
+            text_value = str(value).strip()
+            if not text_value or text_value.upper() == "NULL":
+                return default
+            number = float(text_value)
+            return number if math.isfinite(number) else default
+        except Exception:
+            return default
+
+    def as_int(value, default=None):
+        try:
+            return int(str(value).strip())
+        except Exception:
+            return default
+
+    def new_acc(start_t=None):
+        return {
+            "t_start": start_t,
+            "n_total": 0,
+            "n_fail": 0,
+            "n_valid": 0,
+            "sum": 0.0,
+            "min": None,
+            "max": None,
+        }
+
+    def add_acc(acc, t_s, value, valid):
+        if acc["t_start"] is None:
+            acc["t_start"] = t_s
+        acc["n_total"] += 1
+        if not valid or value is None:
+            acc["n_fail"] += 1
+            return
+        acc["n_valid"] += 1
+        acc["sum"] += value
+        acc["min"] = value if acc["min"] is None else min(acc["min"], value)
+        acc["max"] = value if acc["max"] is None else max(acc["max"], value)
+
+    def emit_acc(writer, boundary, acc, crossing_t, previous_crossing_t):
+        duration = crossing_t - previous_crossing_t
+        segment_distance = boundary[1]
+        speed = segment_distance / duration if duration > 0.0 else None
+        rpm = speed * 60.0 / circumference_mm if speed is not None else None
+        loss_pct = 100.0 * acc["n_fail"] / acc["n_total"] if acc["n_total"] else 0.0
+        mean = acc["sum"] / acc["n_valid"] if acc["n_valid"] else None
+        writer.writerow([
+            f"{boundary[0]:.6f}",
+            f"{acc['t_start']:.6f}" if acc["t_start"] is not None else "NULL",
+            f"{mean:.6f}" if mean is not None else "NULL",
+            f"{acc['min']:.6f}" if acc["min"] is not None else "NULL",
+            f"{acc['max']:.6f}" if acc["max"] is not None else "NULL",
+            f"{rpm:.6f}" if rpm is not None else "NULL",
+            f"{speed:.6f}" if speed is not None else "NULL",
+            acc["n_total"], acc["n_fail"], acc["n_valid"], f"{loss_pct:.3f}",
+        ])
+
+    with open(state.dlg_csv, "r", newline="", encoding="utf-8") as fdlg, \
+         open(state.encoder_state_csv, "r", newline="", encoding="utf-8") as fenc, \
+         open(state.merge_csv, "w", newline="", encoding="utf-8") as ft, \
+         open(state.turn_dist_csv, "w", newline="", encoding="utf-8") as fdp, \
+         open(state.turn_vp_csv, "w", newline="", encoding="utf-8") as fvp:
+        rd_dlg = csv.DictReader(fdlg)
+        rd_enc = csv.DictReader(fenc)
+        wt = csv.writer(ft, delimiter=";", lineterminator="\n")
+        wdp = csv.writer(fdp, delimiter=";", lineterminator="\n")
+        wvp = csv.writer(fvp, delimiter=";", lineterminator="\n")
+        wt.writerow([
+            "idx", "t_s", "ch1", "ch2", "ch3", "ch4", "ch5", "ch6", "ch7", "ch8",
+            "atrito", "pos", "rpm", "dlg_err", "encoder_pos_err", "encoder_rpm_err",
+            "PosEncExt", "PosEncExt_Quarentena",
+        ])
+        process_header = [
+            "distancia_mm", "t_s_inicio", "atrito_med", "atrito_min", "atrito_max",
+            "rpm_medio_intervalo", "velocidade_media_mm_s", "n_total_pontos",
+            "n_falhas", "n_validas", "pct_perda",
+        ]
+        wdp.writerow(process_header)
+        wvp.writerow([
+            "volta_n", "t_s_inicio", "atrito_med", "atrito_min", "atrito_max",
+            "rpm_medio_volta", "velocidade_media_mm_s", "n_total_pontos",
+            "n_falhas", "n_validas", "pct_perda",
+        ])
+
+        next_distance = interval_mm
+        next_turn = 1.0
+        distance_acc = new_acc()
+        turn_acc = new_acc()
+        previous_progress = None
+        previous_t_s = None
+        distance_cross_t = None
+        turn_cross_t = None
+        last_accepted_angle = None
+        quarantine_count = 0
+        total_count = 0
+        direction_tracker = _ContinuousDirectionTracker()
+        target_cross_t = None
+
+        for dlg_row, enc_row in zip_longest(rd_dlg, rd_enc):
+            if dlg_row is None or enc_row is None:
+                raise RuntimeError("DLG e estado do encoder possuem quantidades diferentes de linhas.")
+            dlg_idx = as_int(dlg_row.get("idx"))
+            enc_idx = as_int(enc_row.get("idx"))
+            if dlg_idx is None or enc_idx is None or dlg_idx != enc_idx:
+                raise RuntimeError("DLG e estado do encoder perderam alinhamento por indice.")
+            t_s = as_float(dlg_row.get("t_s"))
+            if t_s is None:
+                continue
+            accepted = as_int(enc_row.get("accepted"), 0) == 1
+            dlg_ok = as_int(dlg_row.get("err"), 1) == 0
+            relative_mm = as_float(enc_row.get("relative_mm"))
+            progress = direction_tracker.update(
+                t_s, relative_mm, accepted and relative_mm is not None
+            )
+            disk_rpm = as_float(enc_row.get("disk_rpm"))
+            unwrapped = as_float(enc_row.get("unwrapped_deg"))
+            if accepted and unwrapped is not None:
+                last_accepted_angle = unwrapped % 360.0
+            isolated = 0 if accepted else 1
+            quarantine_count += isolated
+            total_count += 1
+            ch1 = as_float(dlg_row.get("ch1"))
+            atrito = as_float(dlg_row.get("atrito"))
+            if state.force_normal_n > 0.0 and ch1 is not None:
+                atrito = ch1 / state.force_normal_n
+            sample_valid = dlg_ok and accepted and atrito is not None
+            wt.writerow([
+                dlg_idx, f"{t_s:.6f}",
+                *[dlg_row.get(f"ch{i}", "NULL") or "NULL" for i in range(1, 9)],
+                f"{atrito:.10g}" if atrito is not None else "NULL",
+                f"{relative_mm:.10g}" if relative_mm is not None else "NULL",
+                f"{abs(disk_rpm):.10g}" if disk_rpm is not None else "NULL",
+                0 if dlg_ok else 1,
+                0 if accepted else 1,
+                0 if accepted and disk_rpm is not None else 1,
+                f"{last_accepted_angle:.10g}" if last_accepted_angle is not None else "NULL",
+                isolated,
+            ])
+            add_acc(distance_acc, t_s, atrito, sample_valid)
+            add_acc(turn_acc, t_s, atrito, sample_valid)
+
+            if accepted and progress is not None:
+                if previous_progress is None or previous_t_s is None:
+                    previous_progress = progress
+                    previous_t_s = t_s
+                    distance_cross_t = t_s
+                    turn_cross_t = t_s
+                    continue
+                if progress > previous_progress and t_s > previous_t_s:
+                    while progress >= next_distance and previous_progress < next_distance:
+                        fraction = (next_distance - previous_progress) / (progress - previous_progress)
+                        crossing_t = previous_t_s + fraction * (t_s - previous_t_s)
+                        emit_acc(
+                            wdp, (next_distance, interval_mm), distance_acc,
+                            crossing_t, distance_cross_t,
+                        )
+                        distance_cross_t = crossing_t
+                        next_distance += interval_mm
+                        distance_acc = new_acc(crossing_t)
+                    next_turn_distance = next_turn * circumference_mm
+                    while progress >= next_turn_distance and previous_progress < next_turn_distance:
+                        fraction = (next_turn_distance - previous_progress) / (progress - previous_progress)
+                        crossing_t = previous_t_s + fraction * (t_s - previous_t_s)
+                        emit_acc(
+                            wvp, (next_turn, circumference_mm), turn_acc,
+                            crossing_t, turn_cross_t,
+                        )
+                        turn_cross_t = crossing_t
+                        next_turn += 1.0
+                        next_turn_distance = next_turn * circumference_mm
+                        turn_acc = new_acc(crossing_t)
+                target_mm = float(getattr(state, "continuous_target_mm", 0.0) or 0.0)
+                target_reached = target_mm > 0.0 and progress >= target_mm
+                if target_reached:
+                    if progress > previous_progress and t_s > previous_t_s:
+                        fraction = (target_mm - previous_progress) / (progress - previous_progress)
+                        target_cross_t = previous_t_s + fraction * (t_s - previous_t_s)
+                    else:
+                        target_cross_t = t_s
+                previous_progress = progress
+                previous_t_s = t_s
+                if target_reached:
+                    break
+
+    state.encoder_quarantine_samples = quarantine_count
+    state.encoder_quarantine_fraction = quarantine_count / total_count if total_count else 0.0
+    state.continuous_rebuild_direction = direction_tracker.direction
+    state.continuous_rebuild_direction_lock_t_s = direction_tracker.lock_t_s
+    state.continuous_rebuild_target_t_s = target_cross_t
+    state.continuous_rebuild_progress_mm = direction_tracker.max_progress_mm
+    state.continuous_rebuild_fault = direction_tracker.fault
+
+
 def _rebuild_turn_csv_from_logs(state: RunState) -> None:
     """
     Regera arquivos _DP e _VP/_M em modo offline (sem IPC) usando logs finais.
@@ -1745,7 +3373,8 @@ def _rebuild_turn_csv_from_logs(state: RunState) -> None:
     """
     if not state:
         return
-    if not os.path.exists(state.dlg_csv) or not os.path.exists(state.drive_csv):
+    processing_dlg_csv = _processing_dlg_csv(state)
+    if not os.path.exists(processing_dlg_csv) or not os.path.exists(state.drive_csv):
         return
     # Reprocessa no final em Python para manter consistencia com o grafico 3
     # em tempo real e evitar divergencia de parametros legados do agregador C.
@@ -1836,7 +3465,7 @@ def _rebuild_turn_csv_from_logs(state: RunState) -> None:
             "n_total_pontos", "n_falhas", "n_validas", "pct_perda"
         ])
 
-        with open(state.dlg_csv, "r", newline="", encoding="utf-8") as fdlg, \
+        with open(processing_dlg_csv, "r", newline="", encoding="utf-8") as fdlg, \
              open(state.drive_csv, "r", newline="", encoding="utf-8") as fdrv:
             rd_d = csv.reader(fdlg)
             rd_r = csv.reader(fdrv)
@@ -2064,7 +3693,7 @@ def _merge_csv_fallback(dlg_csv: str, drive_csv: str, out_csv: str) -> None:
             idx_fallback += 1
 
 
-def stop_run(state: Optional[RunState]) -> None:
+def stop_run(state: Optional[RunState], manual: bool = False) -> None:
     """
     Para os dois processos com prioridade para encerramento gracioso.
 
@@ -2075,9 +3704,13 @@ def stop_run(state: Optional[RunState]) -> None:
 
     Parametros:
         state: estado do ensaio em execucao.
+        manual: marca interrupcao solicitada pelo operador; nesse caso o
+            continuo preserva os dados parciais sem classificar como deadline.
     """
     if not state:
         return
+    if manual:
+        state.manual_stop_requested = True
     procs = (state.dlg_proc, state.drive_proc)
 
     # 1) Encerramento gracioso via IPC.
