@@ -119,7 +119,7 @@ SupervisÃ³rio (Python/Tk):
 - wait_and_merge has fallback merge in Python if merge_logs fails or resultado_ensaio.csv is missing.
 - wait_and_merge reconstroi os arquivos processados por distancia em Python ao final de todo ensaio para garantir consistencia com os CSVs completos.
 - Rebuild offline em Python usa a mesma regra de wrap/backstep do C (sem `%` direto no delta) para evitar sobrecontagem de voltas por jitter.
-- Outputs go to Desktop\\Repositorio\\<AAAA-MM-DD - PoD - NomeEnsaio_Estudo-Repeticao> with arquivos finais nomeados por padrao:
+- Outputs go to Desktop\\Repositorio: continuo usa `<AAAA-MM-DD - PoD - NomeEnsaio_Estudo-Repeticao>`; reciprocante usa `<AAAA-MM-DD - PoDr - NomeEnsaio_Estudo-Repeticao>`. Arquivos finais mantem o mesmo padrao de nomes:
   <data>-<nome_ensaio>-<estudo>-<repeticao>_I.csv (info), _P.csv (atrito por distancia), _T.csv (resultado ensaio).
 - info_ensaio.csv inclui bloco "Dados de calibracao" com fit do CH1 (slope, intercept, r2) usando a mesma busca do dlg_logger_ipc (calib.json/calib/calib_CH1.json/out + pasta do exe).
 - Artefatos tecnicos finais ficam em Desktop\\Repositorio\\<...>\\DadosDev\\:
@@ -151,6 +151,8 @@ SupervisÃ³rio (Python/Tk):
 - Modelo operacional de antecipacao: `0.13199835832212273 * abs(v_mm_s) + 0.27025001630016243`, OLS causal 250 ms e clamp em 45% do curso. O erro de extremo e medido no extremo fisico confirmado, nao no gatilho antecipado.
 - `_T`, `_DP`, `_M` e graficos reciprocantes sao gerados de `dlg.csv + encoder_state.csv` a 200 Hz, sem abrir telemetria do Drive. `drive.csv` principal tem `idx,t_qpc,t_s,cmd_rpm,cmd_err`.
 - Ao concluir a distancia reciprocante, o motor para imediatamente, mas Drive e DLG permanecem em pos-captura por ate 2 s. O orquestrador encerra quando CH3 apresenta o ultimo extremo e estabiliza; DadosDev preserva a cauda e `_T` e recortado no extremo externo detectado.
+- No ensaio reciprocante oficial, o progresso de termino e monotono: soma cursos entre extremos fisicos confirmados e acrescenta somente o maior deslocamento filtrado do stroke atual. Nao integra `path_distance_mm` bruto. A correcao dinamica continua terminando pela quantidade fixa de ciclos/strokes.
+- A UI reciprocante mostra `Distancia restante` em metros a partir do mesmo `path_mm` usado pelo controle. Se o tempo teorico zerar antes da distancia, mostra `Tempo previsto concluido` e `Aguardando distancia restante`; o tempo nao envia STOP.
 - O ultimo extremo reciprocante sem reversao e confirmado na cauda do CH3 a partir do QPC de RECIP_ENCODER_DONE: mediana causal 9, movimento >=0.2 mm, janela estavel 250 ms, faixa <=0.15 mm e |OLS| <=0.25 mm/s. `_T`/`_M` terminam no primeiro extremo causal aprovado; DadosDev preserva a cauda.
 - Graficos reciprocantes usam processamento por stroke no lugar de volta. A velocidade media e curso efetivo dividido pela duracao do stroke, sem media assinada de RPM nem reconversao de mm/s; o PNG final recarrega `_M`/`_DP` reconstruidos.
 - Na correcao dinamica, o orquestrador encerra os loggers ao completar os strokes do ciclo extra + ciclos validos, sem aguardar o watchdog. DadosDev/recip_dynamic_offset.csv marca as amostras usadas; _I registra offset, ciclos, RPM do disco/Drive, amostras validas, perda e validacao.
@@ -162,6 +164,7 @@ SupervisÃ³rio (Python/Tk):
 - O dlg_logger_ipc aplica ao CH3 o preset e o fit do JSON angular e normaliza em [0,360), mas preserva a aquisicao sem filtro temporal em DadosDev/dlg.csv. No `_T.csv`, o supervisor grava `PosEncExt` e `PosEncExt_Quarentena`; `_DP` e `_M` usam somente amostras aceitas do encoder. O `_I.csv` registra caminho, SHA-256, schema, data, fit, zero, preset, taxa, referencia, relacao, split 7/3, metricas, perdas, saturacoes e estatisticas de quarentena; nao registra modelo do encoder.
 - Tarefa 5A concluida: `encoder_control_protocol` define pacote binario v1 de 92 bytes com sessao, sequencia, QPC, estado causal em mm, saude/status e CRC-32. `dlg_logger_ipc` publica por UDP somente em 127.0.0.1 quando recebe porta+sessao explicitas. `a5_speed_logger --self-test-encoder-link` valida loopback/sessao/sequencia/stale sem hardware; esse caminho e autoritativo nas inversoes reais do programa principal.
 - `recip_encoder_controller` e autoritativo no programa principal: extremos fixos, uma inversao por stroke, confirmacao da reversao fisica, conclusao somente no extremo, tolerancia diagnostica, timeout de encoder/curso e falha em 2x o curso. O modulo decide e `a5_speed_logger` executa Modbus; P0B-09 nao participa.
+- Reversao reciprocante Modbus: depois do zero confirmado e da espera de 20 ms, `RUN` e RPM invertida sao fases independentes. Cada fase tem ate 5 tentativas logicas, intervalo de 50 ms e timeout total de 750 ms. Antes de cada envio, CH3 projeta posicao/velocidade por 200 ms contra o limite de 2x o curso; risco ou posicao indisponivel abortam imediatamente. Logs usam `command=RUN|RPM`, contadores entram no `_I`, e uma fase ja confirmada nao e repetida.
 - Modo continuo migrado para CH3 externo: DLG/EncoderCore a 200 Hz gera encoder_state.csv, _T, _DP e _VP sem usar posicao/RPM do Drive. A direcao usa mediana causal de 51 amostras e deslocamento liquido desde a origem; trava depois de 5 confirmacoes acima de 1 mm, falha se nao travar em 3 s apos detectar 0.2 mm de movimento ou se ficar 1 mm incompativel com o sentido. O progresso e monotono contra jitter, interpola o alvo e usa gate fisico com 2x da maior velocidade entre alvo digitado e RPM inteiro efetivo. Essa logica e exclusiva do continuo; nao alterar o reciprocante ao corrigi-la.
 
 DriveA5 (Modbus RTU / libmodbus):
@@ -195,7 +198,7 @@ DriveA5 (Modbus RTU / libmodbus):
 - a5_speed_logger aplica rampa linear de setpoint (3 s) entre trocas de segmento, pause/resume e stop de ensaio para reduzir tranco no motor.
 - a5_speed_logger tem modo reciprocante experimental em velocidade: usa RPM com sinal, P0B-09 desenrolado por direcao, curso em mm convertido por raio+relacao+P05-02/65536, e inverte em faixa `target +/- tolerancia_counts`.
 - No modo reciprocante, o curso e uma ida ou volta e os extremos nominais ficam fixos. A parada e disparada ao atingir/cruzar o extremo; sair da tolerancia vira diagnostico e nao aborta. Um stroke que alcance 2x o curso configurado, perda prolongada de posicao ou fim de tempo sem distancia alvo retorna falha e preserva os dados parciais.
-- No reciprocante, distancia e o criterio de termino e o tempo teorico recebe margem `max(1.5x, +30 s)` apenas como watchdog. RECIP_DONE ocorre depois de fechar um stroke; ao terminar Drive ou DLG, o orquestrador para o processo par para evitar cauda estatica ou movimento sem aquisicao.
+- No reciprocante, distancia fisica e o criterio de termino e o tempo teorico recebe margem `max(1.5x, +30 s)` apenas como watchdog. `RECIP_ENCODER_DONE` ocorre no gatilho do ultimo stroke, com extremo final confirmado na pos-captura; ao terminar Drive ou DLG, o orquestrador para o processo par para evitar cauda estatica ou movimento sem aquisicao.
 - Reciprocante inicial usa paradas secas sem rampa. Tolerancia de parada fica persistida no supervisorio em "configuracoes adicionais".
 - Alternativa registrada caso a conversao geometrica do curso nao funcione em bancada: calibrar empiricamente com volta lenta, lendo arquivo com tempo/RPM/posicao e usando a posicao real de parada como alvo final.
 - a5_speed_logger escreve `a5_speed_events.log` ao lado do `drive.csv` com startup, START, pause/resume, progresso por segundo, erros de leitura e encerramento.
@@ -259,7 +262,7 @@ CSV conventions
 - Ao finalizar o ensaio, o supervisor salva _G.png com a figura 2x2 da aba "graficos".
 - `_DP.velocidade_media_mm_s` vem da distancia exata dividida pelo intervalo entre cruzamentos do encoder externo; nao reconverter RPM do Drive no pipeline principal.
 - Write outputs into out/ subfolders (gitignored) when creating artifacts.
-- Supervisor (novo_tribometro.py) grava em: Desktop\\Repositorio\\<AAAA-MM-DD - PoD - NomeEnsaio_Estudo-Repeticao>.
+- Supervisor (novo_tribometro.py) grava continuo com marcador `PoD` e reciprocante com marcador `PoDr` na pasta da execucao.
   Arquivos finais: <data>-<nome_ensaio>-<estudo>-<repeticao>_I.csv, _DP.csv, _VP.csv (continuo) ou _M.csv (reciprocante), _T.csv, _G.png.
   Pasta tecnica: DadosDev\\ com <arquivo_t>.merge_source, dlg.csv, drive.csv, schedule.csv, graph_events.log, dlg_logger_events.log e a5_speed_events.log.
 

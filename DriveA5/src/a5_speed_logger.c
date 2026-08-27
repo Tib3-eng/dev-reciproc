@@ -87,6 +87,11 @@ static const uint16_t WORD_RDY = 0x0000;
 #define DRIVE_PREFLIGHT_ATTEMPTS 30
 #define ENCODER_CAL_POSITION_LOSS_S 2.0
 #define RECIP_ENCODER_REVERSE_DELAY_S 0.020
+#define RECIP_ENCODER_REVERSE_RETRY_INTERVAL_S 0.050
+#define RECIP_ENCODER_REVERSE_RETRY_TIMEOUT_S 0.750
+#define RECIP_ENCODER_REVERSE_SAFETY_LOOKAHEAD_S 0.200
+#define RECIP_ENCODER_REVERSE_RUN_MAX_ATTEMPTS 5
+#define RECIP_ENCODER_REVERSE_RPM_MAX_ATTEMPTS 5
 #define RECIP_ENCODER_ORIGIN_TIMEOUT_S 3.0
 
 typedef struct {
@@ -140,8 +145,143 @@ typedef struct {
     char abort_msg[192];
 } recip_state_t;
 
+typedef enum {
+    RECIP_REVERSE_PHASE_NONE = 0,
+    RECIP_REVERSE_PHASE_RUN,
+    RECIP_REVERSE_PHASE_RPM
+} recip_reverse_phase_t;
+
+typedef struct {
+    int active;
+    recip_reverse_phase_t phase;
+    int run_attempts;
+    int rpm_attempts;
+    int64_t started_ticks;
+    int64_t next_attempt_ticks;
+} recip_reverse_retry_t;
+
 static int recip_target_reached(const recip_state_t *r, int64_t pos, int64_t target);
 static int recip_stroke_limit_reached(const recip_state_t *r, int64_t pos);
+
+static const char *recip_reverse_phase_name(recip_reverse_phase_t phase){
+    switch(phase){
+        case RECIP_REVERSE_PHASE_RUN: return "RUN";
+        case RECIP_REVERSE_PHASE_RPM: return "RPM";
+        default: return "NONE";
+    }
+}
+
+static void recip_reverse_retry_begin(
+    recip_reverse_retry_t *retry,
+    int64_t now_ticks,
+    int64_t qpc_frequency
+){
+    if(!retry) return;
+    memset(retry, 0, sizeof(*retry));
+    retry->active = 1;
+    retry->phase = RECIP_REVERSE_PHASE_RUN;
+    retry->started_ticks = now_ticks;
+    retry->next_attempt_ticks = now_ticks + (int64_t)(
+        RECIP_ENCODER_REVERSE_DELAY_S * (double)qpc_frequency + 0.5);
+}
+
+static int recip_reverse_retry_timed_out(
+    const recip_reverse_retry_t *retry,
+    int64_t now_ticks,
+    int64_t qpc_frequency
+){
+    if(!retry || !retry->active || qpc_frequency <= 0) return 0;
+    return now_ticks - retry->started_ticks >= (int64_t)(
+        RECIP_ENCODER_REVERSE_RETRY_TIMEOUT_S *
+        (double)qpc_frequency + 0.5);
+}
+
+static int recip_reverse_retry_attempts_exhausted(
+    const recip_reverse_retry_t *retry
+){
+    if(!retry || !retry->active) return 0;
+    if(retry->phase == RECIP_REVERSE_PHASE_RUN){
+        return retry->run_attempts >=
+               RECIP_ENCODER_REVERSE_RUN_MAX_ATTEMPTS;
+    }
+    if(retry->phase == RECIP_REVERSE_PHASE_RPM){
+        return retry->rpm_attempts >=
+               RECIP_ENCODER_REVERSE_RPM_MAX_ATTEMPTS;
+    }
+    return 1;
+}
+
+static int recip_reverse_retry_record_result(
+    recip_reverse_retry_t *retry,
+    int succeeded,
+    int64_t now_ticks,
+    int64_t qpc_frequency
+){
+    if(!retry || !retry->active) return 0;
+    if(retry->phase == RECIP_REVERSE_PHASE_RUN){
+        retry->run_attempts++;
+        if(succeeded){
+            retry->phase = RECIP_REVERSE_PHASE_RPM;
+            retry->next_attempt_ticks = now_ticks;
+            return 1;
+        }
+    }else if(retry->phase == RECIP_REVERSE_PHASE_RPM){
+        retry->rpm_attempts++;
+        if(succeeded){
+            retry->active = 0;
+            retry->phase = RECIP_REVERSE_PHASE_NONE;
+            return 1;
+        }
+    }
+    retry->next_attempt_ticks = now_ticks + (int64_t)(
+        RECIP_ENCODER_REVERSE_RETRY_INTERVAL_S *
+        (double)qpc_frequency + 0.5);
+    return 0;
+}
+
+static int recip_reverse_position_risk(
+    double position_mm,
+    double position_age_s,
+    double speed_mm_s,
+    double stroke_origin_mm,
+    int new_direction,
+    double course_mm,
+    double stroke_limit_factor,
+    double *travel_mm_out,
+    double *projected_mm_out,
+    double *limit_mm_out
+){
+    double absolute_travel;
+    double outward_travel;
+    double outward_speed;
+    double projected_travel;
+    double limit_mm;
+    int old_direction;
+    if(!isfinite(position_mm) || !isfinite(position_age_s) ||
+       !isfinite(speed_mm_s) || !isfinite(stroke_origin_mm) ||
+       !isfinite(course_mm) || !isfinite(stroke_limit_factor) ||
+       new_direction == 0 || course_mm <= 0.0 ||
+       stroke_limit_factor <= 0.0){
+        return 1;
+    }
+    if(position_age_s < 0.0) position_age_s = 0.0;
+    old_direction = -new_direction;
+    absolute_travel = fabs(position_mm - stroke_origin_mm);
+    outward_travel = old_direction * (position_mm - stroke_origin_mm);
+    if(outward_travel < 0.0) outward_travel = 0.0;
+    outward_speed = old_direction * speed_mm_s;
+    if(outward_speed < 0.0) outward_speed = 0.0;
+    projected_travel = outward_travel + outward_speed *
+        (position_age_s + RECIP_ENCODER_REVERSE_SAFETY_LOOKAHEAD_S);
+    if(projected_travel < absolute_travel){
+        projected_travel = absolute_travel;
+    }
+    limit_mm = course_mm * stroke_limit_factor;
+    if(travel_mm_out) *travel_mm_out = absolute_travel;
+    if(projected_mm_out) *projected_mm_out = projected_travel;
+    if(limit_mm_out) *limit_mm_out = limit_mm;
+    return projected_travel >= limit_mm;
+}
 
 static int encoder_control_link_is_stale(
     int64_t now_qpc,
@@ -259,6 +399,7 @@ typedef struct {
     double stop_margin_mm;
     double stop_velocity_window_s;
     double stop_max_course_fraction;
+    int physical_distance_enabled;
     int forward_sign;
     int forward_sign_configured;
     SOCKET socket_handle;
@@ -284,7 +425,14 @@ typedef struct {
     uint64_t latency_over_20ms;
     uint64_t latency_over_50ms;
     uint64_t latency_over_100ms;
+    int have_latest_encoder_state;
+    int64_t latest_encoder_qpc;
+    double latest_encoder_position_mm;
+    double latest_encoder_speed_mm_s;
     uint64_t reverse_events;
+    uint64_t reverse_run_failed_attempts;
+    uint64_t reverse_rpm_failed_attempts;
+    uint64_t reverse_retry_recoveries;
     uint64_t stop_compensation_clamped_events;
     uint64_t physical_reversals;
     uint64_t endpoint_count;
@@ -318,6 +466,10 @@ static void recip_shadow_reset_motion(recip_shadow_t *shadow){
     shadow->pending_sequence = 0u;
     shadow->pending_packet_qpc = 0;
     shadow->pending_idx = -1;
+    shadow->have_latest_encoder_state = 0;
+    shadow->latest_encoder_qpc = 0;
+    shadow->latest_encoder_position_mm = 0.0;
+    shadow->latest_encoder_speed_mm_s = 0.0;
     shadow->have_physical_extreme = 0;
     ev_logf("RECIP_SHADOW_RESET reason=pause_or_start discarded=%llu",
             (unsigned long long)discarded);
@@ -357,11 +509,13 @@ static int recip_shadow_open(recip_shadow_t *shadow){
     }
     shadow->active = 1;
     recip_shadow_reset_motion(shadow);
-    ev_logf("RECIP_SHADOW_READY host=127.0.0.1 port=%u session=%llu tol_mm=%.6f course_mm=%.6f total_mm=%.6f stroke_timeout_s=%.6f forward_sign=%d sign_source=%s stop_compensation=%d stop_model_slope_s=%.9f stop_margin_mm=%.9f stop_velocity_window_s=%.6f stop_max_course_fraction=%.6f action_enabled=%d",
+    ev_logf("RECIP_SHADOW_READY host=127.0.0.1 port=%u session=%llu tol_mm=%.6f course_mm=%.6f total_mm=%.6f stroke_timeout_s=%.6f forward_sign=%d sign_source=%s distance_method=%s stop_compensation=%d stop_model_slope_s=%.9f stop_margin_mm=%.9f stop_velocity_window_s=%.6f stop_max_course_fraction=%.6f action_enabled=%d",
             (unsigned)shadow->port, (unsigned long long)shadow->session_id,
             shadow->tolerance_mm, shadow->course_mm, shadow->total_mm,
             shadow->stroke_timeout_s, shadow->forward_sign,
             shadow->forward_sign_configured ? "DYNAMIC_CORRECTION" : "LEARN_ON_MOVE",
+            shadow->physical_distance_enabled ? "confirmed_physical_extremes" :
+                                                "nominal_completed_strokes",
             shadow->stop_compensation_enabled, shadow->stop_model_slope_s,
             shadow->stop_margin_mm, shadow->stop_velocity_window_s,
             shadow->stop_max_course_fraction, shadow->action_enabled);
@@ -402,7 +556,7 @@ static void recip_shadow_log_decision(
                 shadow->endpoint_abs_error_max_mm = endpoint_abs_error;
             }
         }
-        ev_logf("RECIP_SHADOW_PHYSICAL_REVERSAL idx=%d seq=%llu qpc=%lld stroke=%llu completed_direction=%d new_direction=%d extreme_mm=%.9f physical_target_mm=%.9f endpoint_error_mm=%.9f trigger_mm=%.9f anticipation_mm=%.9f velocity_estimate_mm_s=%.9f anticipation_clamped=%d observation_latency_ms=%.6f action_enabled=%d",
+        ev_logf("RECIP_SHADOW_PHYSICAL_REVERSAL idx=%d seq=%llu qpc=%lld stroke=%llu completed_direction=%d new_direction=%d extreme_mm=%.9f physical_target_mm=%.9f endpoint_error_mm=%.9f trigger_mm=%.9f anticipation_mm=%.9f velocity_estimate_mm_s=%.9f anticipation_clamped=%d path_mm=%.9f observation_latency_ms=%.6f action_enabled=%d",
                 idx, (unsigned long long)sequence, (long long)packet_qpc,
                 (unsigned long long)decision->completed_strokes,
                 -decision->command_direction, decision->command_direction,
@@ -412,6 +566,7 @@ static void recip_shadow_log_decision(
                 decision->stopping_anticipation_mm,
                 decision->velocity_estimate_mm_s,
                 decision->stopping_anticipation_clamped,
+                decision->path_progress_mm,
                 observation_latency_ms, shadow->action_enabled);
     }
     if(decision->action == RECIP_ENCODER_ACTION_REVERSE){
@@ -521,6 +676,14 @@ static void recip_shadow_drain(
             shadow->sequence_gaps += packet.sequence - previous_sequence - 1u;
         }
         shadow->prestart_last_sequence = packet.sequence;
+        if((packet.flags & ENCODER_CONTROL_FLAG_ACCEPTED) != 0u &&
+           (packet.flags & ENCODER_CONTROL_FLAG_INITIALIZED) != 0u &&
+           packet.health == (uint32_t)ENCODER_HEALTH_OK){
+            shadow->have_latest_encoder_state = 1;
+            shadow->latest_encoder_qpc = packet.qpc;
+            shadow->latest_encoder_position_mm = packet.relative_mm;
+            shadow->latest_encoder_speed_mm_s = packet.speed_mm_s;
+        }
         if(now_qpc >= packet.qpc && qpc_frequency > 0){
             double latency_ms = 1000.0 * (double)(now_qpc - packet.qpc) /
                                 (double)qpc_frequency;
@@ -570,11 +733,12 @@ static void recip_shadow_drain(
             config.stop_margin_mm = shadow->stop_margin_mm;
             config.stop_velocity_window_s = shadow->stop_velocity_window_s;
             config.stop_max_course_fraction = shadow->stop_max_course_fraction;
+            config.physical_distance_enabled = shadow->physical_distance_enabled;
             if(recip_encoder_controller_start(
                    &shadow->controller, &config, qpc_frequency,
                    &shadow->origin_packet, &decision)){
                 shadow->controller_started = 1;
-                ev_logf("RECIP_SHADOW_INIT idx=%d origin_seq=%llu first_motion_seq=%llu encoder_forward_sign=%d sign_source=%s home_mm=%.9f target_mm=%.9f filter=causal_median filter_samples=%d target_band_mm=%.6f reversal_hysteresis_mm=%.6f path_method=completed_strokes stop_compensation=%d stop_model=linear_speed stop_model_slope_s=%.9f stop_margin_mm=%.9f stop_velocity_estimator=causal_ols stop_velocity_window_s=%.6f stop_max_course_fraction=%.6f action_enabled=%d",
+                ev_logf("RECIP_SHADOW_INIT idx=%d origin_seq=%llu first_motion_seq=%llu encoder_forward_sign=%d sign_source=%s home_mm=%.9f target_mm=%.9f filter=causal_median filter_samples=%d target_band_mm=%.6f reversal_hysteresis_mm=%.6f path_method=%s stop_compensation=%d stop_model=linear_speed stop_model_slope_s=%.9f stop_margin_mm=%.9f stop_velocity_estimator=causal_ols stop_velocity_window_s=%.6f stop_max_course_fraction=%.6f action_enabled=%d",
                         idx,
                         (unsigned long long)shadow->origin_packet.sequence,
                         (unsigned long long)packet.sequence,
@@ -585,11 +749,28 @@ static void recip_shadow_drain(
                         shadow->controller.home_mm, shadow->controller.target_mm,
                         config.position_filter_samples, config.target_band_mm,
                         config.reversal_hysteresis_mm,
+                        config.physical_distance_enabled ?
+                            "confirmed_physical_extremes" :
+                            "nominal_completed_strokes",
                         config.stop_anticipation_enabled,
                         config.stop_model_slope_s, config.stop_margin_mm,
                         config.stop_velocity_window_s,
-                        config.stop_max_course_fraction,
-                        shadow->action_enabled);
+                         config.stop_max_course_fraction,
+                         shadow->action_enabled);
+                if(shadow->action_enabled){
+                    ev_logf(
+                        "RECIP_ENCODER_REVERSE_POLICY run_max_attempts=%d "
+                        "rpm_max_logical_attempts=%d retry_interval_ms=%.3f "
+                        "retry_timeout_ms=%.3f safety_lookahead_ms=%.3f "
+                        "stroke_limit_factor=%.6f",
+                        RECIP_ENCODER_REVERSE_RUN_MAX_ATTEMPTS,
+                        RECIP_ENCODER_REVERSE_RPM_MAX_ATTEMPTS,
+                        1000.0 * RECIP_ENCODER_REVERSE_RETRY_INTERVAL_S,
+                        1000.0 * RECIP_ENCODER_REVERSE_RETRY_TIMEOUT_S,
+                        1000.0 *
+                            RECIP_ENCODER_REVERSE_SAFETY_LOOKAHEAD_S,
+                        config.stroke_limit_factor);
+                }
             }
         }
         if(shadow->controller_started &&
@@ -649,7 +830,7 @@ static void recip_shadow_close(recip_shadow_t *shadow){
         ? shadow->endpoint_abs_error_sum_mm / (double)shadow->endpoint_count : 0.0;
     physical_course_mean_mm = shadow->physical_course_count
         ? shadow->physical_course_sum_mm / (double)shadow->physical_course_count : 0.0;
-    ev_logf("RECIP_SHADOW_END active=%d session=%llu received=%llu valid=%llu rejected=%llu sequence_gaps=%llu latency_count=%llu latency_mean_ms=%.6f latency_max_ms=%.6f latency_over_20ms=%llu latency_over_50ms=%llu latency_over_100ms=%llu controller_started=%d forward_sign=%d reverse_events=%llu stop_compensation=%d stop_compensation_clamped_events=%llu physical_reversals=%llu endpoint_count=%llu endpoint_abs_error_mean_mm=%.6f endpoint_abs_error_max_mm=%.6f physical_course_count=%llu physical_course_mean_mm=%.6f physical_course_min_mm=%.6f physical_course_max_mm=%.6f complete=%d fault=%s action_enabled=%d",
+    ev_logf("RECIP_SHADOW_END active=%d session=%llu received=%llu valid=%llu rejected=%llu sequence_gaps=%llu latency_count=%llu latency_mean_ms=%.6f latency_max_ms=%.6f latency_over_20ms=%llu latency_over_50ms=%llu latency_over_100ms=%llu controller_started=%d forward_sign=%d reverse_events=%llu reverse_run_failed_attempts=%llu reverse_rpm_failed_attempts=%llu reverse_retry_recoveries=%llu distance_method=%s path_mm=%.9f target_mm=%.9f stop_compensation=%d stop_compensation_clamped_events=%llu physical_reversals=%llu endpoint_count=%llu endpoint_abs_error_mean_mm=%.6f endpoint_abs_error_max_mm=%.6f physical_course_count=%llu physical_course_mean_mm=%.6f physical_course_min_mm=%.6f physical_course_max_mm=%.6f complete=%d fault=%s action_enabled=%d",
             shadow->active, (unsigned long long)shadow->session_id,
             (unsigned long long)shadow->packets_received,
             (unsigned long long)shadow->packets_valid,
@@ -660,9 +841,16 @@ static void recip_shadow_close(recip_shadow_t *shadow){
             (unsigned long long)shadow->latency_over_20ms,
             (unsigned long long)shadow->latency_over_50ms,
             (unsigned long long)shadow->latency_over_100ms,
-            shadow->controller_started, shadow->forward_sign,
-            (unsigned long long)shadow->reverse_events,
-            shadow->stop_compensation_enabled,
+             shadow->controller_started, shadow->forward_sign,
+             (unsigned long long)shadow->reverse_events,
+             (unsigned long long)shadow->reverse_run_failed_attempts,
+             (unsigned long long)shadow->reverse_rpm_failed_attempts,
+             (unsigned long long)shadow->reverse_retry_recoveries,
+             shadow->physical_distance_enabled ?
+                "confirmed_physical_extremes" : "nominal_completed_strokes",
+             shadow->controller.last_path_mm,
+             shadow->total_mm,
+             shadow->stop_compensation_enabled,
             (unsigned long long)shadow->stop_compensation_clamped_events,
             (unsigned long long)shadow->physical_reversals,
             (unsigned long long)shadow->endpoint_count,
@@ -1336,6 +1524,10 @@ static int run_internal_self_test(void){
     char pending[256];
     size_t pending_len;
     encoder_drive_status_t status = {0};
+    recip_reverse_retry_t reverse_retry = {0};
+    double reverse_travel = 0.0;
+    double reverse_projected = 0.0;
+    double reverse_limit = 0.0;
 
     strcpy_s(pending, sizeof(pending), "START\nSTOP\n");
     pending_len = strlen(pending);
@@ -1401,8 +1593,92 @@ static int run_internal_self_test(void){
         return 0;
     }
 
+    recip_reverse_retry_begin(&reverse_retry, 1000, 1000);
+    if(!reverse_retry.active ||
+       reverse_retry.phase != RECIP_REVERSE_PHASE_RUN ||
+       reverse_retry.next_attempt_ticks != 1020 ||
+       recip_reverse_retry_timed_out(&reverse_retry, 1749, 1000) ||
+       !recip_reverse_retry_timed_out(&reverse_retry, 1750, 1000)){
+        puts("SELF-TEST FALHOU: janela de retentativa da reversao.");
+        return 0;
+    }
+    recip_reverse_retry_record_result(&reverse_retry, 0, 1020, 1000);
+    if(reverse_retry.run_attempts != 1 ||
+       reverse_retry.next_attempt_ticks != 1070 ||
+       recip_reverse_retry_attempts_exhausted(&reverse_retry)){
+        puts("SELF-TEST FALHOU: primeira retentativa RUN.");
+        return 0;
+    }
+    recip_reverse_retry_record_result(&reverse_retry, 1, 1070, 1000);
+    if(reverse_retry.phase != RECIP_REVERSE_PHASE_RPM ||
+       reverse_retry.run_attempts != 2){
+        puts("SELF-TEST FALHOU: transicao RUN para RPM.");
+        return 0;
+    }
+    for(int attempt = 0; attempt < RECIP_ENCODER_REVERSE_RPM_MAX_ATTEMPTS; ++attempt){
+        int64_t attempt_ticks = 1070 + (int64_t)attempt * 50;
+        recip_reverse_retry_record_result(
+            &reverse_retry, 0, attempt_ticks, 1000);
+        if(attempt + 1 < RECIP_ENCODER_REVERSE_RPM_MAX_ATTEMPTS &&
+           recip_reverse_retry_attempts_exhausted(&reverse_retry)){
+            puts("SELF-TEST FALHOU: RPM esgotou antes do limite.");
+            return 0;
+        }
+    }
+    if(!recip_reverse_retry_attempts_exhausted(&reverse_retry)){
+        puts("SELF-TEST FALHOU: limite de tentativas RPM.");
+        return 0;
+    }
+
+    recip_reverse_retry_begin(&reverse_retry, 2000, 1000);
+    for(int attempt = 0; attempt < RECIP_ENCODER_REVERSE_RUN_MAX_ATTEMPTS; ++attempt){
+        recip_reverse_retry_record_result(
+            &reverse_retry, 0, 2020 + (int64_t)attempt * 50, 1000);
+    }
+    if(!recip_reverse_retry_attempts_exhausted(&reverse_retry) ||
+       reverse_retry.phase != RECIP_REVERSE_PHASE_RUN){
+        puts("SELF-TEST FALHOU: limite de tentativas RUN.");
+        return 0;
+    }
+
+    recip_reverse_retry_begin(&reverse_retry, 3000, 1000);
+    recip_reverse_retry_record_result(&reverse_retry, 1, 3020, 1000);
+    recip_reverse_retry_record_result(&reverse_retry, 0, 3020, 1000);
+    recip_reverse_retry_record_result(&reverse_retry, 1, 3070, 1000);
+    if(reverse_retry.active ||
+       reverse_retry.phase != RECIP_REVERSE_PHASE_NONE ||
+       reverse_retry.run_attempts != 1 || reverse_retry.rpm_attempts != 2){
+        puts("SELF-TEST FALHOU: recuperacao transitoria da RPM.");
+        return 0;
+    }
+
+    if(recip_reverse_position_risk(
+           15.0, 0.0, 10.0, 0.0, -1, 10.0, 2.0,
+           &reverse_travel, &reverse_projected, &reverse_limit) ||
+       fabs(reverse_travel - 15.0) > 1.0e-9 ||
+       fabs(reverse_projected - 17.0) > 1.0e-9 ||
+       fabs(reverse_limit - 20.0) > 1.0e-9 ||
+       !recip_reverse_position_risk(
+           18.1, 0.0, 10.0, 0.0, -1, 10.0, 2.0,
+           NULL, NULL, NULL) ||
+       recip_reverse_position_risk(
+           15.0, 0.0, -10.0, 0.0, -1, 10.0, 2.0,
+           NULL, NULL, NULL) ||
+       !recip_reverse_position_risk(
+           21.0, 0.0, -10.0, 0.0, -1, 10.0, 2.0,
+           NULL, NULL, NULL) ||
+       !recip_reverse_position_risk(
+           -18.1, 0.0, -10.0, 0.0, 1, 10.0, 2.0,
+           NULL, NULL, NULL) ||
+       recip_reverse_position_risk(
+           -15.0, 0.0, 10.0, 0.0, 1, 10.0, 2.0,
+           NULL, NULL, NULL)){
+        puts("SELF-TEST FALHOU: guarda de posicao da reversao.");
+        return 0;
+    }
+
     puts(
-        "SELF-TEST OK: parser IPC, unwrap P0B-09 e limites reciprocantes."
+        "SELF-TEST OK: parser IPC, unwrap P0B-09, limites e retry de reversao."
     );
     return 1;
 }
@@ -1988,6 +2264,7 @@ static void print_usage(void){
     puts("                 [--recip-shadow-stop-slope-s <s> --recip-shadow-stop-margin-mm <mm>]");
     puts("                 [--recip-shadow-stop-velocity-window-s <s>]");
     puts("                 [--recip-shadow-stop-max-course-fraction <0..1>]");
+    puts("                 [--recip-shadow-physical-distance]");
     puts("                 [--recip-encoder-control] [--command-only]");
     puts("  --encoder-calibration exige --ipc e coleta somente P0B-09.");
     puts("  --strict-setup exige --setup e bloqueia READY sem readback, parada,");
@@ -2088,6 +2365,10 @@ int main(int argc, char **argv){
         }
         if(strcmp(argv[i], "--recip-shadow-stop-compensation") == 0){
             recip_shadow.stop_compensation_enabled = 1;
+            continue;
+        }
+        if(strcmp(argv[i], "--recip-shadow-physical-distance") == 0){
+            recip_shadow.physical_distance_enabled = 1;
             continue;
         }
         if(strcmp(argv[i], "--recip-shadow-stop-slope-s") == 0 && i + 1 < argc){
@@ -2206,11 +2487,13 @@ int main(int argc, char **argv){
             ev_close();
             return 1;
         }
-        ev_logf("RECIP_SHADOW_CONFIG port=%u session=%llu tol_mm=%.6f course_mm=%.6f total_mm=%.6f stroke_timeout_s=%.6f stop_compensation=%d stop_model_slope_s=%.9f stop_margin_mm=%.9f stop_velocity_window_s=%.6f stop_max_course_fraction=%.6f action_enabled=%d",
+        ev_logf("RECIP_SHADOW_CONFIG port=%u session=%llu tol_mm=%.6f course_mm=%.6f total_mm=%.6f stroke_timeout_s=%.6f distance_method=%s stop_compensation=%d stop_model_slope_s=%.9f stop_margin_mm=%.9f stop_velocity_window_s=%.6f stop_max_course_fraction=%.6f action_enabled=%d",
                 (unsigned)recip_shadow.port,
                 (unsigned long long)recip_shadow.session_id,
                 recip_shadow.tolerance_mm, recip_shadow.course_mm,
                 recip_shadow.total_mm, recip_shadow.stroke_timeout_s,
+                recip_shadow.physical_distance_enabled ?
+                    "confirmed_physical_extremes" : "nominal_completed_strokes",
                 recip_shadow.stop_compensation_enabled,
                 recip_shadow.stop_model_slope_s,
                 recip_shadow.stop_margin_mm,
@@ -2676,8 +2959,7 @@ int main(int argc, char **argv){
     int64_t recip_postroll_limit_ticks = (int64_t)(2.0 * (double)qpc_freq + 0.5);
     int recip_external_active = recip.enabled && recip_shadow.action_enabled;
     int external_motor_direction = 1;
-    int external_reverse_pending = 0;
-    int64_t external_reverse_deadline_ticks = 0;
+    recip_reverse_retry_t external_reverse_retry = {0};
     int current_cmd_rpm = 0;
     int desired_seg_rpm = recip.enabled
         ? (recip_external_active
@@ -2940,7 +3222,8 @@ int main(int argc, char **argv){
                     stop_sent = 1;
                     recip.done = 1;
                     recip_done_ticks = now;
-                    external_reverse_pending = 0;
+                    external_reverse_retry.active = 0;
+                    external_reverse_retry.phase = RECIP_REVERSE_PHASE_NONE;
                     ev_logf("RECIP_ENCODER_DONE idx=%d seq=%llu qpc=%lld strokes=%llu position_mm=%.9f physical_target_mm=%.9f trigger_mm=%.9f anticipation_mm=%.9f velocity_estimate_mm_s=%.9f path_mm=%.9f completed_segment=%d action_enabled=1 postroll_max_s=2.000",
                             external_packet_idx,
                             (unsigned long long)external_sequence,
@@ -2974,9 +3257,8 @@ int main(int argc, char **argv){
                         seg_idx = schedule_idx;
                     }
                     desired_seg_rpm = external_motor_direction * rpm_abs_safe(segs[seg_idx].rpm);
-                    external_reverse_deadline_ticks = now +
-                        (int64_t)(RECIP_ENCODER_REVERSE_DELAY_S * (double)qpc_freq + 0.5);
-                    external_reverse_pending = 1;
+                    recip_reverse_retry_begin(
+                        &external_reverse_retry, now, qpc_freq);
                     ev_logf("RECIP_ENCODER_TRIGGER idx=%d seq=%llu qpc=%lld stroke=%llu position_mm=%.9f physical_target_mm=%.9f trigger_mm=%.9f anticipation_mm=%.9f velocity_estimate_mm_s=%.9f path_mm=%.9f completed_segment=%d next_segment=%d action_enabled=1",
                             external_packet_idx,
                             (unsigned long long)external_sequence,
@@ -2991,22 +3273,205 @@ int main(int argc, char **argv){
                             completed_seg_idx, seg_idx);
                 }
             }
-            if(external_reverse_pending && now >= external_reverse_deadline_ticks){
-                if(cmd_run(ctx) != 0 || cmd_rpm(ctx, desired_seg_rpm) != 0){
-                    recip_abort(&recip, "RECIP_ENCODER_REVERSE_COMMAND_FAILED");
+            if(external_reverse_retry.active){
+                int64_t retry_now = qpc_now_ticks();
+                char reverse_failure[192] = {0};
+                double position_age_s = 0.0;
+                double travel_mm = 0.0;
+                double projected_mm = 0.0;
+                double limit_mm = 0.0;
+                const char *phase_name = recip_reverse_phase_name(
+                    external_reverse_retry.phase);
+                if(recip_reverse_retry_timed_out(
+                       &external_reverse_retry, retry_now, qpc_freq) ||
+                   recip_reverse_retry_attempts_exhausted(
+                       &external_reverse_retry)){
+                    const char *reason = recip_reverse_retry_attempts_exhausted(
+                        &external_reverse_retry)
+                        ? "RETRIES_EXHAUSTED" : "TIMEOUT";
+                    snprintf(
+                        reverse_failure, sizeof(reverse_failure),
+                        "RECIP_ENCODER_REVERSE_COMMAND_FAILED command=%s "
+                        "reason=%s run_attempts=%d rpm_attempts=%d "
+                        "elapsed_ms=%.3f",
+                        phase_name, reason,
+                        external_reverse_retry.run_attempts,
+                        external_reverse_retry.rpm_attempts,
+                        1000.0 * (double)(retry_now -
+                            external_reverse_retry.started_ticks) /
+                            (double)qpc_freq);
+                }else if(!recip_shadow.controller_started ||
+                         !recip_shadow.have_latest_encoder_state){
+                    snprintf(
+                        reverse_failure, sizeof(reverse_failure),
+                        "RECIP_ENCODER_REVERSE_COMMAND_FAILED command=%s "
+                        "reason=ENCODER_POSITION_UNAVAILABLE "
+                        "run_attempts=%d rpm_attempts=%d",
+                        phase_name,
+                        external_reverse_retry.run_attempts,
+                        external_reverse_retry.rpm_attempts);
+                }else{
+                    if(retry_now >= recip_shadow.latest_encoder_qpc &&
+                       qpc_freq > 0){
+                        position_age_s = (double)(retry_now -
+                            recip_shadow.latest_encoder_qpc) /
+                            (double)qpc_freq;
+                    }
+                    if(recip_reverse_position_risk(
+                           recip_shadow.latest_encoder_position_mm,
+                           position_age_s,
+                           recip_shadow.latest_encoder_speed_mm_s,
+                           recip_shadow.controller.stroke_origin_mm,
+                           recip_shadow.controller.command_direction,
+                           recip_shadow.controller.config.course_mm,
+                           recip_shadow.controller.config.stroke_limit_factor,
+                           &travel_mm, &projected_mm, &limit_mm)){
+                        snprintf(
+                            reverse_failure, sizeof(reverse_failure),
+                            "RECIP_ENCODER_REVERSE_COMMAND_FAILED command=%s "
+                            "reason=POSITION_RISK position_mm=%.6f "
+                            "travel_mm=%.6f projected_mm=%.6f limit_mm=%.6f",
+                            phase_name,
+                            recip_shadow.latest_encoder_position_mm,
+                            travel_mm, projected_mm, limit_mm);
+                        ev_logf(
+                            "RECIP_ENCODER_REVERSE_POSITION_RISK idx=%d "
+                            "command=%s position_mm=%.9f speed_mm_s=%.9f "
+                            "position_age_ms=%.3f stroke_origin_mm=%.9f "
+                            "travel_mm=%.9f projected_mm=%.9f limit_mm=%.9f "
+                            "lookahead_ms=%.3f encoder_new_direction=%d "
+                            "motor_direction=%d",
+                            idx, phase_name,
+                            recip_shadow.latest_encoder_position_mm,
+                            recip_shadow.latest_encoder_speed_mm_s,
+                            1000.0 * position_age_s,
+                            recip_shadow.controller.stroke_origin_mm,
+                            travel_mm, projected_mm, limit_mm,
+                            1000.0 *
+                                RECIP_ENCODER_REVERSE_SAFETY_LOOKAHEAD_S,
+                            recip_shadow.controller.command_direction,
+                            external_motor_direction);
+                    }
+                }
+                if(reverse_failure[0] != 0){
+                    recip_abort(&recip, reverse_failure);
                     ev_logf("FATAL %s", recip.abort_msg);
+                    fprintf(stderr, "%s\n", recip.abort_msg);
                     stop_drive_now(ctx, &current_cmd_rpm, 0);
                     current_cmd_rpm = 0;
                     stop_sent = 1;
                     stop_requested = 1;
                     break;
                 }
-                current_cmd_rpm = desired_seg_rpm;
-                external_reverse_pending = 0;
-                ev_logf("RECIP_ENCODER_REVERSE_COMMAND idx=%d qpc=%lld motor_direction=%d rpm=%d segment=%d delay_ms=%.3f action_enabled=1",
-                        idx, (long long)now, external_motor_direction,
-                        desired_seg_rpm, seg_idx,
-                        1000.0 * RECIP_ENCODER_REVERSE_DELAY_S);
+                if(retry_now >= external_reverse_retry.next_attempt_ticks){
+                    recip_reverse_phase_t attempted_phase =
+                        external_reverse_retry.phase;
+                    const char *attempted_name = recip_reverse_phase_name(
+                        attempted_phase);
+                    int attempt_number = attempted_phase ==
+                        RECIP_REVERSE_PHASE_RUN
+                        ? external_reverse_retry.run_attempts + 1
+                        : external_reverse_retry.rpm_attempts + 1;
+                    int max_attempts = attempted_phase ==
+                        RECIP_REVERSE_PHASE_RUN
+                        ? RECIP_ENCODER_REVERSE_RUN_MAX_ATTEMPTS
+                        : RECIP_ENCODER_REVERSE_RPM_MAX_ATTEMPTS;
+                    int command_result;
+                    int command_errno;
+                    int64_t command_done_ticks;
+                    ev_logf(
+                        "RECIP_ENCODER_REVERSE_ATTEMPT idx=%d command=%s "
+                        "attempt=%d max_attempts=%d rpm=%d "
+                        "position_mm=%.9f speed_mm_s=%.9f "
+                        "position_age_ms=%.3f travel_mm=%.9f "
+                        "projected_mm=%.9f limit_mm=%.9f",
+                        idx, attempted_name, attempt_number, max_attempts,
+                        desired_seg_rpm,
+                        recip_shadow.latest_encoder_position_mm,
+                        recip_shadow.latest_encoder_speed_mm_s,
+                        1000.0 * position_age_s,
+                        travel_mm, projected_mm, limit_mm);
+                    command_result = attempted_phase ==
+                        RECIP_REVERSE_PHASE_RUN
+                        ? cmd_run(ctx) : cmd_rpm(ctx, desired_seg_rpm);
+                    command_errno = command_result == 0 ? 0 : errno;
+                    command_done_ticks = qpc_now_ticks();
+                    (void)recip_reverse_retry_record_result(
+                        &external_reverse_retry,
+                        command_result == 0,
+                        command_done_ticks,
+                        qpc_freq);
+                    ev_logf(
+                        "RECIP_ENCODER_REVERSE_ATTEMPT_RESULT idx=%d "
+                        "command=%s attempt=%d result=%s errno=%d error=%s "
+                        "next_interval_ms=%.3f",
+                        idx, attempted_name, attempt_number,
+                        command_result == 0 ? "OK" : "FAILED",
+                        command_errno,
+                        command_errno ? modbus_strerror(command_errno) : "none",
+                        command_result == 0 ? 0.0 :
+                            1000.0 * RECIP_ENCODER_REVERSE_RETRY_INTERVAL_S);
+                    if(command_result != 0){
+                        n_cmd_err++;
+                        if(attempted_phase == RECIP_REVERSE_PHASE_RUN){
+                            recip_shadow.reverse_run_failed_attempts++;
+                        }else{
+                            recip_shadow.reverse_rpm_failed_attempts++;
+                        }
+                        if(recip_reverse_retry_attempts_exhausted(
+                               &external_reverse_retry) ||
+                           recip_reverse_retry_timed_out(
+                               &external_reverse_retry,
+                               command_done_ticks, qpc_freq)){
+                            const char *reason =
+                                recip_reverse_retry_attempts_exhausted(
+                                    &external_reverse_retry)
+                                ? "RETRIES_EXHAUSTED" : "TIMEOUT";
+                            snprintf(
+                                reverse_failure, sizeof(reverse_failure),
+                                "RECIP_ENCODER_REVERSE_COMMAND_FAILED "
+                                "command=%s reason=%s attempts=%d "
+                                "run_attempts=%d rpm_attempts=%d "
+                                "elapsed_ms=%.3f",
+                                attempted_name, reason, attempt_number,
+                                external_reverse_retry.run_attempts,
+                                external_reverse_retry.rpm_attempts,
+                                1000.0 * (double)(command_done_ticks -
+                                    external_reverse_retry.started_ticks) /
+                                    (double)qpc_freq);
+                        }
+                    }else if(!external_reverse_retry.active){
+                        if(external_reverse_retry.run_attempts > 1 ||
+                           external_reverse_retry.rpm_attempts > 1){
+                            recip_shadow.reverse_retry_recoveries++;
+                        }
+                        current_cmd_rpm = desired_seg_rpm;
+                        ev_logf(
+                            "RECIP_ENCODER_REVERSE_COMMAND idx=%d qpc=%lld "
+                            "motor_direction=%d rpm=%d segment=%d "
+                            "delay_ms=%.3f run_attempts=%d rpm_attempts=%d "
+                            "elapsed_ms=%.3f action_enabled=1",
+                            idx, (long long)command_done_ticks,
+                            external_motor_direction, desired_seg_rpm,
+                            seg_idx,
+                            1000.0 * RECIP_ENCODER_REVERSE_DELAY_S,
+                            external_reverse_retry.run_attempts,
+                            external_reverse_retry.rpm_attempts,
+                            1000.0 * (double)(command_done_ticks -
+                                external_reverse_retry.started_ticks) /
+                                (double)qpc_freq);
+                    }
+                    if(reverse_failure[0] != 0){
+                        recip_abort(&recip, reverse_failure);
+                        ev_logf("FATAL %s", recip.abort_msg);
+                        fprintf(stderr, "%s\n", recip.abort_msg);
+                        stop_drive_now(ctx, &current_cmd_rpm, 0);
+                        current_cmd_rpm = 0;
+                        stop_sent = 1;
+                        stop_requested = 1;
+                        break;
+                    }
+                }
             }
         }
         if(!stop_sent && now >= hard_stop_ticks){

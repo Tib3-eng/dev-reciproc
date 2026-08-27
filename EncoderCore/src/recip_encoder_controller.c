@@ -70,6 +70,8 @@ static int valid_config(const recip_encoder_config_t *config){
            isfinite(config->stop_max_course_fraction) &&
            config->stop_max_course_fraction > 0.0 &&
            config->stop_max_course_fraction < 1.0 &&
+           (config->physical_distance_enabled == 0 ||
+            config->physical_distance_enabled == 1) &&
            (config->initial_direction == 1 || config->initial_direction == -1);
 }
 
@@ -210,6 +212,22 @@ static double geometric_path_progress(const recip_encoder_controller_t *controll
     return completed + current;
 }
 
+static double update_path_progress(recip_encoder_controller_t *controller){
+    double current;
+    if(!controller || !controller->initialized) return 0.0;
+    if(!controller->config.physical_distance_enabled){
+        controller->last_path_mm = geometric_path_progress(controller);
+        return controller->last_path_mm;
+    }
+    current = fabs(controller->last_position_mm - controller->stroke_origin_mm);
+    if(current > controller->current_stroke_max_mm){
+        controller->current_stroke_max_mm = current;
+    }
+    controller->last_path_mm = controller->confirmed_path_mm +
+                               controller->current_stroke_max_mm;
+    return controller->last_path_mm;
+}
+
 static int packet_ready_to_start(const encoder_control_packet_t *packet){
     return packet &&
            (packet->flags & ENCODER_CONTROL_FLAG_ACCEPTED) != 0u &&
@@ -234,6 +252,7 @@ void recip_encoder_config_default(recip_encoder_config_t *config){
     config->stop_margin_mm = 0.0;
     config->stop_velocity_window_s = 0.25;
     config->stop_max_course_fraction = 0.45;
+    config->physical_distance_enabled = 0;
 }
 
 int recip_encoder_controller_start(
@@ -271,6 +290,8 @@ int recip_encoder_controller_start(
                          config->initial_direction * config->course_mm;
     controller->target_mm = controller->far_mm;
     controller->stroke_origin_mm = controller->home_mm;
+    controller->confirmed_path_mm = 0.0;
+    controller->current_stroke_max_mm = 0.0;
     controller->last_path_mm = 0.0;
     controller->last_raw_position_mm = first_packet->relative_mm;
     controller->last_position_mm = filter_position(controller, first_packet->relative_mm);
@@ -364,7 +385,7 @@ recip_encoder_action_t recip_encoder_controller_update(
     velocity_push(controller, packet->qpc, packet->relative_mm);
     position = filter_position(controller, packet->relative_mm);
     controller->last_position_mm = position;
-    controller->last_path_mm = geometric_path_progress(controller);
+    (void)update_path_progress(controller);
     stroke_travel = fabs(position - controller->stroke_origin_mm);
     if(stroke_travel >= controller->config.stroke_limit_factor *
                         controller->config.course_mm){
@@ -394,14 +415,22 @@ recip_encoder_action_t recip_encoder_controller_update(
                 controller->last_stopping_anticipation_clamped;
             int completed_direction = -controller->command_direction;
             double physical_endpoint_error_mm;
+            double completed_physical_course_mm = fabs(
+                controller->reversal_pending_extreme_mm -
+                controller->stroke_origin_mm);
             controller->awaiting_physical_reversal = 0;
+            if(controller->config.physical_distance_enabled){
+                controller->confirmed_path_mm += completed_physical_course_mm;
+            }
             controller->stroke_origin_mm = controller->reversal_pending_extreme_mm;
+            controller->current_stroke_max_mm = fabs(
+                position - controller->stroke_origin_mm);
             controller->last_physical_extreme_mm = controller->reversal_pending_extreme_mm;
             physical_endpoint_error_mm = completed_direction *
                 (controller->last_physical_extreme_mm - completed_physical_target_mm);
             controller->last_endpoint_error_mm = physical_endpoint_error_mm;
             controller->stroke_started_qpc = packet->qpc;
-            controller->last_path_mm = geometric_path_progress(controller);
+            (void)update_path_progress(controller);
             velocity_reset(controller, packet->qpc, packet->relative_mm);
             (void)update_stopping_trigger(controller);
             clear_decision(controller, decision);
@@ -423,6 +452,13 @@ recip_encoder_action_t recip_encoder_controller_update(
                 if(fabs(physical_endpoint_error_mm) > controller->config.tolerance_mm){
                     decision->events |= RECIP_ENCODER_EVENT_OUTSIDE_TOLERANCE;
                 }
+            }
+            if(controller->config.physical_distance_enabled &&
+               controller->confirmed_path_mm + 1.0e-9 >=
+                   controller->config.total_mm){
+                controller->complete = 1;
+                if(decision) decision->action = RECIP_ENCODER_ACTION_COMPLETE;
+                return RECIP_ENCODER_ACTION_COMPLETE;
             }
         }else{
             clear_decision(controller, decision);
@@ -447,8 +483,12 @@ recip_encoder_action_t recip_encoder_controller_update(
     controller->last_endpoint_error_mm = controller->command_direction *
                                          (position - controller->target_mm);
     controller->last_physical_target_mm = controller->target_mm;
-    controller->last_path_mm =
-        (double)controller->completed_strokes * controller->config.course_mm;
+    if(!controller->config.physical_distance_enabled){
+        controller->last_path_mm =
+            (double)controller->completed_strokes * controller->config.course_mm;
+    }else{
+        (void)update_path_progress(controller);
+    }
     clear_decision(controller, decision);
     if(decision){
         decision->events |= RECIP_ENCODER_EVENT_TARGET_REACHED;
@@ -458,8 +498,11 @@ recip_encoder_action_t recip_encoder_controller_update(
         }
         decision->endpoint_error_mm = controller->last_endpoint_error_mm;
     }
-    if((double)controller->completed_strokes * controller->config.course_mm + 1.0e-9 >=
-       controller->config.total_mm){
+    if((controller->config.physical_distance_enabled &&
+        controller->last_path_mm + 1.0e-9 >= controller->config.total_mm) ||
+       (!controller->config.physical_distance_enabled &&
+        (double)controller->completed_strokes * controller->config.course_mm + 1.0e-9 >=
+            controller->config.total_mm)){
         controller->complete = 1;
         if(decision) decision->action = RECIP_ENCODER_ACTION_COMPLETE;
         return RECIP_ENCODER_ACTION_COMPLETE;

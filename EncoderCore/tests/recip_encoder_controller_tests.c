@@ -235,6 +235,42 @@ static void test_noisy_signal_uses_strokes_not_total_variation(void){
     CHECK(noisy_path > 100.0);
 }
 
+static void test_physical_distance_completes_on_confirmed_extreme(void){
+    const uint64_t session = 77u;
+    const unsigned valid = ENCODER_CONTROL_FLAG_ACCEPTED |
+                           ENCODER_CONTROL_FLAG_INITIALIZED;
+    recip_encoder_config_t config = config_for(session);
+    recip_encoder_controller_t controller;
+    recip_encoder_decision_t decision;
+    encoder_control_packet_t packet;
+
+    config.total_mm = 22.0;
+    config.physical_distance_enabled = 1;
+    packet = make_packet(session, 1u, 100, 0.0, 0.0, 0, valid, ENCODER_HEALTH_OK);
+    CHECK(recip_encoder_controller_start(&controller, &config, 1000, &packet, &decision));
+
+    /* A variacao bruta pode inflar por ruido e nao participa do progresso. */
+    packet = make_packet(session, 2u, 200, 10.0, 1000.0, 1, valid, ENCODER_HEALTH_OK);
+    CHECK(recip_encoder_controller_update(&controller, &packet, sizeof(packet), &decision) ==
+          RECIP_ENCODER_ACTION_REVERSE);
+    packet = make_packet(session, 3u, 210, 12.0, 12.0, 1, valid, ENCODER_HEALTH_OK);
+    CHECK(recip_encoder_controller_update(&controller, &packet, sizeof(packet), &decision) ==
+          RECIP_ENCODER_ACTION_NONE);
+    packet = make_packet(session, 4u, 220, 11.7, 12.3, -1, valid, ENCODER_HEALTH_OK);
+    CHECK(recip_encoder_controller_update(&controller, &packet, sizeof(packet), &decision) ==
+          RECIP_ENCODER_ACTION_NONE);
+    CHECK((decision.events & RECIP_ENCODER_EVENT_PHYSICAL_REVERSAL) != 0u);
+    CHECK(fabs(controller.confirmed_path_mm - 12.0) < 1.0e-9);
+
+    packet = make_packet(session, 5u, 300, 0.0, 24.0, -1, valid, ENCODER_HEALTH_OK);
+    CHECK(recip_encoder_controller_update(&controller, &packet, sizeof(packet), &decision) ==
+          RECIP_ENCODER_ACTION_COMPLETE);
+    CHECK(controller.completed_strokes == 2u);
+    CHECK(controller.complete);
+    CHECK(fabs(controller.confirmed_path_mm - 12.0) < 1.0e-9);
+    CHECK(decision.path_progress_mm >= 24.0);
+}
+
 static void test_reverse_initial_direction_and_bad_datagram(void){
     const uint64_t session = 44u;
     const unsigned valid = ENCODER_CONTROL_FLAG_ACCEPTED |
@@ -331,6 +367,7 @@ int main(void){
     test_timeouts_and_failure();
     test_reverse_initial_direction_and_bad_datagram();
     test_noisy_signal_uses_strokes_not_total_variation();
+    test_physical_distance_completes_on_confirmed_extreme();
     test_causal_stopping_anticipation_and_clamp();
     if(failures){
         fprintf(stderr, "recip_encoder_controller_tests: %d falha(s)\n", failures);

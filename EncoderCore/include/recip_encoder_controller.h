@@ -53,6 +53,7 @@ typedef struct {
     double stop_margin_mm;
     double stop_velocity_window_s;
     double stop_max_course_fraction;
+    int physical_distance_enabled;
 } recip_encoder_config_t;
 
 typedef struct {
@@ -90,6 +91,8 @@ typedef struct {
     double far_mm;
     double target_mm;
     double stroke_origin_mm;
+    double confirmed_path_mm;
+    double current_stroke_max_mm;
     double last_path_mm;
     double last_raw_position_mm;
     double last_position_mm;

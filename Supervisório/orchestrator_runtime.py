@@ -227,6 +227,7 @@ class RunState:
     reciprocating_shadow_stop_margin_mm: float = 0.0
     reciprocating_shadow_stop_velocity_window_s: float = 0.0
     reciprocating_shadow_stop_max_course_fraction: float = 0.0
+    reciprocating_physical_distance_enabled: bool = False
     reciprocating_shadow_summary: Optional[dict] = None
     reciprocating_stop_diagnostics: Optional[dict] = None
     reciprocating_processing_summary: Optional[dict] = None
@@ -237,6 +238,12 @@ class RunState:
     continuous_encoder_message: str = ""
     encoder_monitor_thread: Optional[threading.Thread] = None
     manual_stop_requested: bool = False
+    reciprocating_progress_mm: float = 0.0
+    reciprocating_progress_log_offset: int = 0
+    reciprocating_progress_complete: bool = False
+    reciprocating_progress_event: str = "aguardando_origem"
+    theoretical_duration_s: float = 0.0
+    actual_duration_s: float = 0.0
     reciprocating_final_encoder_idx: Optional[int] = None
     reciprocating_final_encoder_t_s: Optional[float] = None
     reciprocating_postroll_status: str = "nao_aplicavel"
@@ -384,6 +391,7 @@ def load_reciprocating_shadow_summary(state: RunState) -> dict:
         os.path.join(rep_dir, "DadosDev", "a5_speed_events.log"),
     ]
     summary = {}
+    reverse_policy = {}
     legacy_trigger_indices = []
     shadow_reverse_indices = []
     legacy_done_idx = None
@@ -396,6 +404,8 @@ def load_reciprocating_shadow_summary(state: RunState) -> dict:
                 for line in stream:
                     if "RECIP_SHADOW_END " in line:
                         summary = _event_fields(line)
+                    elif "RECIP_ENCODER_REVERSE_POLICY " in line:
+                        reverse_policy = _event_fields(line)
                     elif "RECIP_STOP_TRIGGER " in line:
                         fields = _event_fields(line)
                         try:
@@ -424,6 +434,8 @@ def load_reciprocating_shadow_summary(state: RunState) -> dict:
             continue
         if summary:
             break
+    for key, value in reverse_policy.items():
+        summary[f"reverse_policy_{key}"] = value
     pair_count = min(len(legacy_trigger_indices), len(shadow_reverse_indices))
     rate_hz = float(getattr(state, "drive_rate_hz", DEFAULT_DRIVE_RATE_HZ) or DEFAULT_DRIVE_RATE_HZ)
     reverse_delta_ms = [
@@ -451,6 +463,80 @@ def load_reciprocating_shadow_summary(state: RunState) -> dict:
     })
     state.reciprocating_shadow_summary = summary
     return summary
+
+
+def refresh_reciprocating_progress(state: RunState) -> dict:
+    """Atualiza o progresso fisico lendo apenas os novos eventos do Drive.
+
+    O valor e monotonicamente crescente e vem do mesmo ``path_mm`` usado pelo
+    EncoderCore para decidir o termino. Nao integra amostras cruas do encoder.
+    """
+    target_mm = float(getattr(state, "reciprocating_shadow_total_mm", 0.0) or 0.0)
+    progress_mm = float(getattr(state, "reciprocating_progress_mm", 0.0) or 0.0)
+    if not state or not getattr(state, "reciprocating", False):
+        return {
+            "progress_mm": 0.0,
+            "remaining_mm": 0.0,
+            "target_mm": 0.0,
+            "complete": False,
+            "event": "nao_aplicavel",
+        }
+    event_path = os.path.join(
+        os.path.dirname(getattr(state, "drive_csv", "") or ""),
+        "a5_speed_events.log",
+    )
+    try:
+        file_size = os.path.getsize(event_path)
+        offset = int(getattr(state, "reciprocating_progress_log_offset", 0) or 0)
+        if offset < 0 or offset > file_size:
+            offset = 0
+        with open(event_path, "rb") as stream:
+            stream.seek(offset)
+            chunk = stream.read()
+        complete_bytes = chunk.rfind(b"\n") + 1
+        if complete_bytes > 0:
+            state.reciprocating_progress_log_offset = offset + complete_bytes
+            text_chunk = chunk[:complete_bytes].decode("ascii", errors="replace")
+            for line in text_chunk.splitlines():
+                if not any(marker in line for marker in (
+                    "RECIP_SHADOW_PHYSICAL_REVERSAL ",
+                    "RECIP_SHADOW_REVERSE ",
+                    "RECIP_SHADOW_COMPLETE ",
+                    "RECIP_ENCODER_DONE ",
+                    "RECIP_SHADOW_END ",
+                )):
+                    continue
+                fields = _event_fields(line)
+                try:
+                    candidate = float(fields.get("path_mm", "nan"))
+                except Exception:
+                    candidate = float("nan")
+                if math.isfinite(candidate):
+                    progress_mm = max(progress_mm, candidate, 0.0)
+                if "RECIP_SHADOW_COMPLETE " in line or "RECIP_ENCODER_DONE " in line:
+                    state.reciprocating_progress_complete = True
+                    state.reciprocating_progress_event = "distancia_atingida"
+                elif "RECIP_SHADOW_END " in line:
+                    state.reciprocating_progress_event = (
+                        "distancia_atingida"
+                        if fields.get("complete") == "1"
+                        else "interrompido_antes_da_distancia"
+                    )
+                elif "RECIP_SHADOW_PHYSICAL_REVERSAL " in line:
+                    state.reciprocating_progress_event = "extremo_fisico_confirmado"
+                elif "RECIP_SHADOW_REVERSE " in line:
+                    state.reciprocating_progress_event = "aguardando_extremo_fisico"
+    except (FileNotFoundError, OSError):
+        pass
+    state.reciprocating_progress_mm = progress_mm
+    remaining_mm = max(target_mm - progress_mm, 0.0)
+    return {
+        "progress_mm": progress_mm,
+        "remaining_mm": remaining_mm,
+        "target_mm": target_mm,
+        "complete": bool(getattr(state, "reciprocating_progress_complete", False)),
+        "event": getattr(state, "reciprocating_progress_event", "aguardando_origem"),
+    }
 
 
 def analyze_encoder_state_capture(path: str, expected_path_mm: float) -> dict:
@@ -1111,6 +1197,7 @@ def start_external_run(
     reciprocating_shadow_stop_margin_mm: float = RECIP_SHADOW_STOP_MARGIN_MM,
     reciprocating_shadow_stop_velocity_window_s: float = RECIP_SHADOW_STOP_VELOCITY_WINDOW_S,
     reciprocating_shadow_stop_max_course_fraction: float = RECIP_SHADOW_STOP_MAX_COURSE_FRACTION,
+    reciprocating_physical_distance_enabled: bool = False,
     strict_drive_setup: bool = False,
     reciprocating_encoder_control_enabled: bool = False,
     drive_command_only: bool = False,
@@ -1369,6 +1456,8 @@ def start_external_run(
                     "--recip-shadow-stop-velocity-window-s", f"{reciprocating_shadow_stop_velocity_window_s:.9f}",
                     "--recip-shadow-stop-max-course-fraction", f"{reciprocating_shadow_stop_max_course_fraction:.9f}",
                 ])
+            if reciprocating_physical_distance_enabled:
+                drive_cmd.append("--recip-shadow-physical-distance")
     drive_proc = subprocess.Popen(
         drive_cmd,
         stdin=subprocess.PIPE,
@@ -1463,6 +1552,9 @@ def start_external_run(
         ),
         reciprocating_shadow_stop_max_course_fraction=float(
             reciprocating_shadow_stop_max_course_fraction
+        ),
+        reciprocating_physical_distance_enabled=bool(
+            reciprocating_physical_distance_enabled
         ),
         dynamic_offset_n=float(dynamic_offset_n),
         target_speed_schedule=list(target_speed_schedule or []),
@@ -2962,10 +3054,18 @@ def _rebuild_reciprocating_csv_from_logs(
         max(float(state.reciprocating_course_mm), 1.0e-12)
     ))
     boundaries = [item for item in boundaries if item["sample_index"] < final_sample_index]
-    boundaries = boundaries[:max(0, expected_strokes - 1)]
+    if getattr(state, "reciprocating_physical_distance_enabled", False):
+        final_stroke = (
+            done_event.get("stroke")
+            if done_event and done_event.get("stroke") is not None
+            else len(boundaries) + 1
+        )
+    else:
+        boundaries = boundaries[:max(0, expected_strokes - 1)]
+        final_stroke = expected_strokes
     boundaries.append({
         "sample_index": final_sample_index,
-        "stroke": expected_strokes,
+        "stroke": final_stroke,
         "endpoint_error_mm": None,
     })
 
@@ -3063,6 +3163,12 @@ def _rebuild_reciprocating_csv_from_logs(
     course_errors = [value - nominal_course for value in processed_courses]
     state.reciprocating_processing_summary = {
         "strokes": len(processed_courses),
+        "physical_distance_mm": sum(processed_courses),
+        "duration_s": (
+            output_samples[-1]["t"]
+            if output_samples and output_samples[-1]["t"] is not None
+            else None
+        ),
         "course_mean_mm": (
             sum(processed_courses) / len(processed_courses)
             if processed_courses else None

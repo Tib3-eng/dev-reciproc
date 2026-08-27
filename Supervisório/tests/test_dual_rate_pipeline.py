@@ -293,6 +293,7 @@ class DualRatePipelineTests(unittest.TestCase):
                     reciprocating_encoder_control_enabled=True,
                     reciprocating_shadow_forward_sign=1,
                     reciprocating_shadow_stop_compensation=True,
+                    reciprocating_physical_distance_enabled=True,
                     drive_command_only=True,
                     target_speed_schedule=[(5.0, 30.0)],
                 )
@@ -303,9 +304,53 @@ class DualRatePipelineTests(unittest.TestCase):
             self.assertIn("--recip-encoder-control", drive_cmd)
             self.assertIn("--command-only", drive_cmd)
             self.assertNotIn("--recip-encoder-shadow", drive_cmd)
+            self.assertIn("--recip-shadow-physical-distance", drive_cmd)
             self.assertTrue(state.reciprocating_encoder_control_enabled)
+            self.assertTrue(state.reciprocating_physical_distance_enabled)
             self.assertTrue(state.drive_command_only)
             self.assertEqual(state.dlg_compat_csv, state.dlg_csv)
+
+    def test_reciprocating_progress_reads_only_new_complete_events(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            drive_csv = os.path.join(tmp, "drive.csv")
+            event_path = os.path.join(tmp, "a5_speed_events.log")
+            state = type("State", (), {
+                "reciprocating": True,
+                "drive_csv": drive_csv,
+                "reciprocating_shadow_total_mm": 100.0,
+                "reciprocating_progress_mm": 0.0,
+                "reciprocating_progress_log_offset": 0,
+                "reciprocating_progress_complete": False,
+                "reciprocating_progress_event": "aguardando_origem",
+            })()
+            with open(event_path, "wb") as stream:
+                stream.write(
+                    b"[00:00:01.000] RECIP_SHADOW_PHYSICAL_REVERSAL "
+                    b"path_mm=12.5\n"
+                )
+                stream.write(
+                    b"[00:00:02.000] RECIP_SHADOW_REVERSE path_mm=20.0"
+                )
+            first = orch.refresh_reciprocating_progress(state)
+            self.assertAlmostEqual(first["progress_mm"], 12.5)
+            self.assertAlmostEqual(first["remaining_mm"], 87.5)
+
+            with open(event_path, "ab") as stream:
+                stream.write(b"\n")
+                stream.write(
+                    b"[00:00:03.000] RECIP_SHADOW_COMPLETE "
+                    b"path_mm=101.0\n"
+                )
+            second = orch.refresh_reciprocating_progress(state)
+            self.assertAlmostEqual(second["progress_mm"], 101.0)
+            self.assertEqual(second["remaining_mm"], 0.0)
+            self.assertTrue(second["complete"])
+
+    def test_supervisor_uses_podr_only_for_reciprocating_folders(self):
+        source = (SUPERVISOR_DIR / "novo_tribometro.py").read_text(encoding="utf-8")
+        self.assertIn('identificador_modo = (', source)
+        self.assertIn('"PoDr"', source)
+        self.assertIn('else "PoD"', source)
 
     def test_shadow_summary_compares_external_proposals_to_legacy_triggers(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -320,8 +365,16 @@ class DualRatePipelineTests(unittest.TestCase):
                 stream.write("[00:00:03.000] RECIP_DONE idx=300\n")
                 stream.write("[00:00:03.010] RECIP_SHADOW_COMPLETE idx=303 action_enabled=0\n")
                 stream.write(
+                    "[00:00:03.015] RECIP_ENCODER_REVERSE_POLICY "
+                    "run_max_attempts=5 rpm_max_logical_attempts=5 "
+                    "retry_interval_ms=50.000 retry_timeout_ms=750.000 "
+                    "safety_lookahead_ms=200.000 stroke_limit_factor=2.000000\n"
+                )
+                stream.write(
                     "[00:00:03.020] RECIP_SHADOW_END valid=600 rejected=0 "
-                    "sequence_gaps=0 complete=1 fault=NONE action_enabled=0\n"
+                    "sequence_gaps=0 reverse_run_failed_attempts=1 "
+                    "reverse_rpm_failed_attempts=2 reverse_retry_recoveries=2 "
+                    "complete=1 fault=NONE action_enabled=0\n"
                 )
             state = type("State", (), {
                 "reciprocating_shadow_enabled": True,
@@ -336,6 +389,11 @@ class DualRatePipelineTests(unittest.TestCase):
             self.assertEqual(summary["reverse_delta_max_ms"], "40.000000")
             self.assertEqual(summary["completion_delta_ms"], "60.000000")
             self.assertEqual(summary["fault"], "NONE")
+            self.assertEqual(summary["reverse_run_failed_attempts"], "1")
+            self.assertEqual(summary["reverse_rpm_failed_attempts"], "2")
+            self.assertEqual(summary["reverse_retry_recoveries"], "2")
+            self.assertEqual(summary["reverse_policy_run_max_attempts"], "5")
+            self.assertEqual(summary["reverse_policy_retry_timeout_ms"], "750.000")
 
     def test_stop_diagnostics_consolidates_one_completed_stroke(self):
         with tempfile.TemporaryDirectory() as tmp:

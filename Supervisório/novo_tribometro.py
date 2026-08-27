@@ -18,13 +18,13 @@ Modos presentes no arquivo:
 - Fluxo da versao anterior: rotinas locais go/go_p mantidas para referencia tecnica.
 
 Saidas de ensaio:
-- Desktop\\Repositorio\\<AAAA-MM-DD - PoD - NomeEnsaio_Estudo-Repeticao>\\
+- Desktop\\Repositorio\\<AAAA-MM-DD - PoD|PoDr - NomeEnsaio_Estudo-Repeticao>\\
   <data>-<nome_ensaio>-<estudo>-<repeticao>_I.csv,
   <data>-<nome_ensaio>-<estudo>-<repeticao>_DP.csv,
   <data>-<nome_ensaio>-<estudo>-<repeticao>_VP.csv ou _M.csv no reciprocante,
   <data>-<nome_ensaio>-<estudo>-<repeticao>_T.csv,
   <data>-<nome_ensaio>-<estudo>-<repeticao>_G.png.
-- Desktop\\Repositorio\\<AAAA-MM-DD - PoD - NomeEnsaio_Estudo-Repeticao>\\DadosDev\\
+- Desktop\\Repositorio\\<AAAA-MM-DD - PoD|PoDr - NomeEnsaio_Estudo-Repeticao>\\DadosDev\\
   <arquivo_t>.merge_source, dlg.csv, drive.csv, schedule.csv,
   graph_events.log, dlg_logger_events.log, a5_speed_events.log.
 
@@ -2360,7 +2360,7 @@ def salvar_arquivo():
     # ---------------------------------------------------------------------------------
     # Estrutura padrao:
     # Pasta base: REPO_BASE
-    # Pasta da execucao: "AAAA-MM-DD - PoD - NomeEnsaio_Estudo-Repeticao"
+    # Pasta da execucao: continuo usa PoD; reciprocante usa PoDr.
     # Bloqueio de duplicidade considera data + nome + estudo + repeticao.
     # ---------------------------------------------------------------------------------
     nome_ensaio = entries_left["Nome do ensaio"].get().strip()
@@ -2372,8 +2372,13 @@ def salvar_arquivo():
     data_file_str = data_dir_str
 
     # Normaliza nomes para Windows (sem caracteres proibidos).
+    identificador_modo = (
+        "PoDr"
+        if "reciprocante_var" in globals() and reciprocante_var.get()
+        else "PoD"
+    )
     nome_pasta_execucao = orch.sanitize_folder_name(
-        f"{data_dir_str} - PoD - {nome_ensaio}_{estudo}-{repeticao}"
+        f"{data_dir_str} - {identificador_modo} - {nome_ensaio}_{estudo}-{repeticao}"
     )
     caminho_pasta = os.path.join(REPO_BASE, nome_pasta_execucao)
 
@@ -2600,16 +2605,44 @@ def atualiza_decorrido():
     if elapsed < 0:
         elapsed = 0
 
+    theoretical_finished = False
     if total_s > 0:
         remaining = total_s - elapsed
         if remaining < 0:
             remaining = 0
+            theoretical_finished = True
         display = _format_hms(remaining)
     else:
         display = _format_hms(elapsed)
 
     try:
         lbl_tempo_decorrido2.config(text=display)
+        lbl_tempo_decorrido1.config(
+            text=(
+                "Tempo previsto concluido"
+                if theoretical_finished and
+                   "reciprocante_var" in globals() and reciprocante_var.get()
+                else "Tempo restante"
+            )
+        )
+    except Exception:
+        pass
+
+    try:
+        if (
+            "reciprocante_var" in globals() and reciprocante_var.get() and
+            external_run_state is not None
+        ):
+            progress = orch.refresh_reciprocating_progress(external_run_state)
+            remaining_mm = float(progress.get("remaining_mm", 0.0) or 0.0)
+            lbl_distancia_restante2.config(text=f"{remaining_mm / 1000.0:.3f} m")
+            lbl_distancia_restante1.config(
+                text=(
+                    "Aguardando distancia restante"
+                    if theoretical_finished and remaining_mm > 0.0
+                    else "Distancia restante"
+                )
+            )
     except Exception:
         pass
 
@@ -4961,6 +4994,7 @@ def start_acquisition():
                 reciprocating_encoder_control_enabled=reciprocating_enabled,
                 reciprocating_shadow_forward_sign=int(offset_result.get("encoder_forward_sign", 0)),
                 reciprocating_shadow_stop_compensation=reciprocating_enabled,
+                reciprocating_physical_distance_enabled=reciprocating_enabled,
                 drive_command_only=True,
                 strict_drive_setup=True,
                 dynamic_offset_n=recip_dynamic_offset_n,
@@ -4978,6 +5012,8 @@ def start_acquisition():
             messagebox.showerror("Erro ao iniciar", f"Falha ao iniciar loggers C.\n\n{e}")
             external_run_state = None
             return
+
+        external_run_state.theoretical_duration_s = float(dur_total)
 
         # Atualiza estado do GUI
         global external_run_token
@@ -5044,6 +5080,18 @@ def start_acquisition():
                         graph_events_log_path = dev_graph
                 except Exception:
                     pass
+                try:
+                    processed_timing = (
+                        state_snapshot.reciprocating_processing_summary or {}
+                    )
+                    measured_duration_s = processed_timing.get("duration_s")
+                    if measured_duration_s is None:
+                        measured_duration_s = state_snapshot.reciprocating_final_encoder_t_s
+                    if measured_duration_s is None:
+                        measured_duration_s = time.time() - start_time
+                    state_snapshot.actual_duration_s = max(0.0, float(measured_duration_s))
+                except Exception:
+                    state_snapshot.actual_duration_s = 0.0
                 running = False
                 is_paused = False
                 tempo_pause_inicio = 0
@@ -5101,6 +5149,48 @@ def start_acquisition():
                             f_info.write(f"Porta local controle encoder,{state_snapshot.reciprocating_shadow_port or 'NULL'},\n")
                             f_info.write(f"Tolerancia controle encoder [mm],{state_snapshot.reciprocating_shadow_tolerance_mm:.10g},\n")
                             f_info.write(f"Distancia total controle encoder [mm],{state_snapshot.reciprocating_shadow_total_mm:.10g},\n")
+                            processed = state_snapshot.reciprocating_processing_summary or {}
+                            path_mm = processed.get(
+                                "physical_distance_mm",
+                                shadow.get(
+                                    "path_mm", state_snapshot.reciprocating_progress_mm
+                                ),
+                            )
+                            try:
+                                remaining_final_mm = max(
+                                    state_snapshot.reciprocating_shadow_total_mm -
+                                    float(path_mm),
+                                    0.0,
+                                )
+                            except Exception:
+                                remaining_final_mm = "NULL"
+                            if shadow.get("complete") == "1":
+                                termination_reason = "distancia_fisica_atingida"
+                            elif state_snapshot.manual_stop_requested:
+                                termination_reason = "parada_manual"
+                            elif shadow.get("fault", "NONE") != "NONE":
+                                termination_reason = f"falha_{shadow.get('fault')}"
+                            else:
+                                termination_reason = "encerrado_antes_da_distancia"
+                            f_info.write(
+                                "Metodo distancia reciprocante,"
+                                f"{shadow.get('distance_method', 'NULL')},\n"
+                            )
+                            f_info.write(f"Distancia fisica realizada [mm],{path_mm},\n")
+                            f_info.write(f"Distancia restante ao encerrar [mm],{remaining_final_mm},\n")
+                            f_info.write(
+                                "Tempo teorico reciprocante [s],"
+                                f"{state_snapshot.theoretical_duration_s:.6f},\n"
+                            )
+                            f_info.write(
+                                "Tempo real reciprocante [s],"
+                                f"{state_snapshot.actual_duration_s:.6f},\n"
+                            )
+                            f_info.write(
+                                "Tempo excedente ao teorico [s],"
+                                f"{max(state_snapshot.actual_duration_s - state_snapshot.theoretical_duration_s, 0.0):.6f},\n"
+                            )
+                            f_info.write(f"Motivo encerramento reciprocante,{termination_reason},\n")
                             f_info.write(f"Timeout stroke controle encoder [s],{state_snapshot.reciprocating_shadow_stroke_timeout_s:.10g},\n")
                             f_info.write(f"Sentido encoder usado no ensaio oficial,{state_snapshot.reciprocating_shadow_forward_sign},\n")
                             f_info.write(
@@ -5138,6 +5228,15 @@ def start_acquisition():
                                 ("Pacotes com latencia acima de 50 ms", "latency_over_50ms"),
                                 ("Pacotes com latencia acima de 100 ms", "latency_over_100ms"),
                                 ("Inversoes comandadas pelo encoder", "reverse_events"),
+                                ("Tentativas RUN de reversao sem resposta", "reverse_run_failed_attempts"),
+                                ("Tentativas RPM de reversao sem resposta", "reverse_rpm_failed_attempts"),
+                                ("Inversoes recuperadas por retentativa", "reverse_retry_recoveries"),
+                                ("Maximo tentativas RUN por reversao", "reverse_policy_run_max_attempts"),
+                                ("Maximo tentativas RPM por reversao", "reverse_policy_rpm_max_logical_attempts"),
+                                ("Intervalo retentativa reversao [ms]", "reverse_policy_retry_interval_ms"),
+                                ("Timeout retentativa reversao [ms]", "reverse_policy_retry_timeout_ms"),
+                                ("Projecao seguranca reversao [ms]", "reverse_policy_safety_lookahead_ms"),
+                                ("Limite seguro reversao [x curso]", "reverse_policy_stroke_limit_factor"),
                                 ("Inversoes fisicas confirmadas", "physical_reversals"),
                                 ("Conclusao controle encoder", "complete"),
                                 ("Falha controle encoder", "fault"),
@@ -7185,6 +7284,9 @@ def muda_estado_reciprocante():
             lbl_header_voltas_pin.config(text="Cursos_pin")
         if 'rb_g3_turn' in globals():
             rb_g3_turn.config(text="Stroke")
+        if 'lbl_distancia_restante1' in globals():
+            lbl_distancia_restante1.grid()
+            lbl_distancia_restante2.grid()
     else:
         chk_reciprocante.config(selectcolor="white")
         entry_curso.config(state='disabled')
@@ -7195,9 +7297,15 @@ def muda_estado_reciprocante():
             lbl_header_voltas_pin.config(text='Voltas_pin')
         if 'rb_g3_turn' in globals():
             rb_g3_turn.config(text="Volta")
+        if 'lbl_distancia_restante1' in globals():
+            lbl_distancia_restante1.grid_remove()
+            lbl_distancia_restante2.grid_remove()
 
     if 'calcular_voltas_cursos_duracao' in globals():
         calcular_voltas_cursos_duracao()
+
+
+chk_reciprocante.config(command=muda_estado_reciprocante)
 
 
 # calcular_voltas_cursos_duracao(event=None):
@@ -7411,14 +7519,21 @@ lbl_tempo_decorrido1 = tkinter.Label(labelframe3_baixo, text="Tempo restante", f
 lbl_tempo_decorrido1.grid(row=3, column=0, padx=5, pady=5)
 lbl_tempo_decorrido2 = tkinter.Label(labelframe3_baixo, text="0:00:00", font=("Arial", 40, "bold"))
 lbl_tempo_decorrido2.grid(row=3, column=1, sticky="w", padx=5, pady=5)
+lbl_distancia_restante1 = tkinter.Label(labelframe3_baixo, text="Distancia restante", font=("Arial", 9, "bold"))
+lbl_distancia_restante1.grid(row=4, column=0, padx=5, pady=5)
+lbl_distancia_restante2 = tkinter.Label(labelframe3_baixo, text="0.000 m", font=("Arial", 18, "bold"))
+lbl_distancia_restante2.grid(row=4, column=1, sticky="w", padx=5, pady=5)
+if not reciprocante_var.get():
+    lbl_distancia_restante1.grid_remove()
+    lbl_distancia_restante2.grid_remove()
 
 #Botões
 button_frame4_iniciar = tkinter.Button(labelframe3_baixo, text="Iniciar", command=start_acquisition)
-button_frame4_iniciar.grid(sticky="news", row=4, column=0,columnspan=2, padx=5, pady=2)
+button_frame4_iniciar.grid(sticky="news", row=5, column=0,columnspan=2, padx=5, pady=2)
 button_frame5_pausar = tkinter.Button(labelframe3_baixo, text="Pausar", command=pause_acquisition)
-button_frame5_pausar.grid(sticky="news", row=5, column=0,columnspan=2, padx=5, pady=2)
+button_frame5_pausar.grid(sticky="news", row=6, column=0,columnspan=2, padx=5, pady=2)
 button_frame5_parar = tkinter.Button(labelframe3_baixo, text="Parar", command=stop_acquisition)
-button_frame5_parar.grid(sticky="news", row=6, column=0,columnspan=2, padx=5, pady=2)
+button_frame5_parar.grid(sticky="news", row=7, column=0,columnspan=2, padx=5, pady=2)
 
 # Bit de monitoramento (CH1/CH2 sem ensaio), bloqueia inicio enquanto ativo.
 monitor_mode_var = tkinter.BooleanVar(value=False)
@@ -7428,19 +7543,19 @@ chk_monitor = tkinter.Checkbutton(
     variable=monitor_mode_var,
     command=toggle_monitor_mode
 )
-chk_monitor.grid(sticky="w", row=7, column=0, columnspan=2, padx=5, pady=(2, 2))
+chk_monitor.grid(sticky="w", row=8, column=0, columnspan=2, padx=5, pady=(2, 2))
 _set_start_button_state()
 
 # Grupo tecnico: tara e check de comunicacao.
 button_frame7_zerar = tkinter.Button(labelframe3_baixo, text="Zerar celula", command=zerar_celula)
-button_frame7_zerar.grid(sticky="news", row=8, column=0, columnspan=2, padx=5, pady=(14, 2))
+button_frame7_zerar.grid(sticky="news", row=9, column=0, columnspan=2, padx=5, pady=(14, 2))
 
 # Check status (DLG + Drive) - separado dos botoes principais
 button_frame6_status = tkinter.Button(labelframe3_baixo, text="Check status", command=check_status)
-button_frame6_status.grid(sticky="news", row=9, column=0, columnspan=2, padx=5, pady=(2, 2))
+button_frame6_status.grid(sticky="news", row=10, column=0, columnspan=2, padx=5, pady=(2, 2))
 
 status_frame = tkinter.Frame(labelframe3_baixo)
-status_frame.grid(sticky="w", row=10, column=0, columnspan=2, padx=5, pady=(2, 6))
+status_frame.grid(sticky="w", row=11, column=0, columnspan=2, padx=5, pady=(2, 6))
 tkinter.Label(status_frame, text="DLG:", font=("Arial", 9, "bold")).grid(row=0, column=0, padx=(0, 4))
 status_dlg_value = tkinter.Label(status_frame, text="?", fg="gray")
 status_dlg_value.grid(row=0, column=1, padx=(0, 12))

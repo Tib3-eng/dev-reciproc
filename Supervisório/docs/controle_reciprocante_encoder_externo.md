@@ -38,6 +38,59 @@ programa `MapeiaParadaReciprocante`; ele não é usado pelo programa principal.
 - pausa é bloqueada no reciprocante autoritativo para preservar a referência
   causal dos extremos; o botão Parar continua disponível.
 
+### Distancia fisica, termino e feedback ao operador
+
+No ensaio oficial, o progresso nao usa mais `strokes * curso nominal`. O
+controlador soma apenas a distancia entre extremos fisicos confirmados e, no
+stroke em andamento, acrescenta o maior deslocamento filtrado desde o ultimo
+extremo. Esse valor e monotono, nao integra `path_distance_mm` bruto e e o
+mesmo `path_mm` usado para terminar o movimento e alimentar a interface.
+
+O campo fixo `Distancia restante` e atualizado em metros durante todo o ensaio
+reciprocante. Quando o tempo teorico chega a zero antes da distancia, a UI
+mostra `Tempo previsto concluido` e `Aguardando distancia restante`. O tempo
+teorico continua sendo apenas uma previsao; o STOP automatico ocorre pela
+distancia no gatilho de um stroke e o extremo final e confirmado na
+pos-captura do CH3.
+
+A correcao dinamica permanece deliberadamente no metodo fixo por ciclos e
+strokes, pois sua finalidade e obter exatamente 1 ciclo descartado e 5 ciclos
+uteis, independentemente da ultrapassagem fisica de cada extremo.
+
+As pastas do modo reciprocante usam o marcador `PoDr`, por exemplo
+`2026-08-27 - PoDr - XM19_2-1`. O modo continuo mantem `PoD`; os nomes dos
+arquivos `_I`, `_T`, `_DP`, `_M` e `_VP` nao mudam.
+
+### Recuperação de falha Modbus durante a inversão
+
+Depois que o setpoint zero é confirmado, a reversão aguarda 20 ms e executa
+duas fases independentes: `RUN` e envio da RPM invertida. Cada fase admite até
+5 tentativas lógicas, com 50 ms entre falhas e janela total de 750 ms desde o
+gatilho. Uma fase confirmada não é repetida enquanto a seguinte é recuperada.
+Cada tentativa lógica de RPM conserva as duas escritas de baixo nível já
+existentes em `cmd_rpm`; o limite de tempo total prevalece sobre a quantidade.
+
+Antes de cada tentativa, o logger usa a posição, a velocidade e a idade da
+última amostra aceita do CH3. O deslocamento é projetado por mais 200 ms na
+direção do movimento anterior e comparado ao limite seguro de `2 x curso`. A
+reversão é abortada imediatamente se a posição projetada alcançar esse limite
+ou se não houver posição válida para fazer a avaliação. Nos demais casos, uma
+falha transitória isolada não encerra o ensaio.
+
+O `a5_speed_events.log` registra:
+
+- `RECIP_ENCODER_REVERSE_POLICY`: limites aplicados naquele ensaio;
+- `RECIP_ENCODER_REVERSE_ATTEMPT` e `_RESULT`: comando `RUN` ou `RPM`, número
+  da tentativa, retorno Modbus e estado do encoder;
+- `RECIP_ENCODER_REVERSE_POSITION_RISK`: posição e projeção que causaram a
+  parada preventiva;
+- `RECIP_ENCODER_REVERSE_COMMAND_FAILED command=RUN|RPM reason=...`: fase e
+  motivo final, somente por esgotamento, timeout ou risco de posição;
+- `RECIP_SHADOW_END`: totais de tentativas sem resposta e reversões recuperadas.
+
+O `_I.csv` replica os contadores finais e a política fixa da reversão para
+distinguir recuperação transitória de uma execução sem falhas Modbus.
+
 O modelo de antecipação aplicado em todas as velocidades é:
 
 `antecipacao_mm = 0.13199835832212273 * abs(velocidade_mm_s) + 0.27025001630016243`
@@ -77,6 +130,10 @@ O `_I.csv` tem sempre três colunas (`campo;valor;valor2`) e usa `;` como
 separador. Valores que contenham `;` são protegidos pelas regras normais de CSV.
 Arquivos históricos com separador `,` continuam aceitos pelo reprocessador
 offline.
+
+Para o reciprocante, o `_I.csv` tambem registra metodo de distancia, distancia
+fisica realizada e restante, tempo teorico, tempo real, excedente ao teorico e
+motivo do encerramento.
 
 O erro de extremo registrado no `_I` é o erro do extremo físico confirmado,
 não a distância entre gatilho antecipado e alvo. A correção dinâmica também
