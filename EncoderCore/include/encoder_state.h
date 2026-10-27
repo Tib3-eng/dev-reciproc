@@ -136,6 +136,9 @@ typedef struct {
 
 void encoder_state_config_default(encoder_state_config_t *config);
 
+/* max_physical_speed_mm_s already includes the supervisor's speed margin. */
+void encoder_state_config_reciprocating(encoder_state_config_t *config);
+
 int encoder_calibration_validate(
     const encoder_calibration_t *calibration,
     char *reason,

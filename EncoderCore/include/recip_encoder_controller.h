@@ -136,6 +136,17 @@ recip_encoder_action_t recip_encoder_controller_tick(
     recip_encoder_decision_t *decision
 );
 
+/* Compartilha com as guardas externas exatamente o mesmo estimador causal
+   usado para calcular a antecipacao do gatilho. O reset e destinado ao
+   periodo de recuperacao apos lacunas do encoder, quando amostras antigas e
+   a retomada comprimida nao podem continuar na mesma regressao. */
+double recip_encoder_controller_velocity_estimate_mm_s(
+    const recip_encoder_controller_t *controller
+);
+void recip_encoder_controller_reset_velocity_estimator(
+    recip_encoder_controller_t *controller
+);
+
 const char *recip_encoder_action_name(recip_encoder_action_t action);
 const char *recip_encoder_fault_name(recip_encoder_fault_t fault);
 

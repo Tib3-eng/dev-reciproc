@@ -90,6 +90,9 @@ static const uint16_t WORD_RDY = 0x0000;
 #define RECIP_ENCODER_REVERSE_RETRY_INTERVAL_S 0.050
 #define RECIP_ENCODER_REVERSE_RETRY_TIMEOUT_S 0.750
 #define RECIP_ENCODER_REVERSE_SAFETY_LOOKAHEAD_S 0.200
+#define RECIP_ENCODER_RECOVERY_CLEAN_S 0.150
+#define RECIP_ENCODER_RECOVERY_MIN_SAMPLES 20
+#define RECIP_ENCODER_RECOVERY_MAX_SAMPLE_AGE_S 0.050
 #define RECIP_ENCODER_REVERSE_RUN_MAX_ATTEMPTS 5
 #define RECIP_ENCODER_REVERSE_RPM_MAX_ATTEMPTS 5
 #define RECIP_ENCODER_ORIGIN_TIMEOUT_S 3.0
@@ -158,6 +161,10 @@ typedef struct {
     int rpm_attempts;
     int64_t started_ticks;
     int64_t next_attempt_ticks;
+    int recovery_active;
+    int64_t recovery_started_ticks;
+    int64_t recovery_clean_not_before_ticks;
+    int64_t recovery_last_quality_issue_qpc;
 } recip_reverse_retry_t;
 
 static int recip_target_reached(const recip_state_t *r, int64_t pos, int64_t target);
@@ -429,10 +436,19 @@ typedef struct {
     int64_t latest_encoder_qpc;
     double latest_encoder_position_mm;
     double latest_encoder_speed_mm_s;
+    int64_t encoder_clean_since_qpc;
+    uint64_t encoder_clean_samples;
+    int64_t last_encoder_quality_issue_qpc;
+    uint32_t last_encoder_quality_issue_status;
     uint64_t reverse_events;
     uint64_t reverse_run_failed_attempts;
     uint64_t reverse_rpm_failed_attempts;
     uint64_t reverse_retry_recoveries;
+    uint64_t reverse_safety_holds;
+    uint64_t reverse_safety_recoveries;
+    uint64_t reverse_safety_timeouts;
+    double reverse_safety_hold_total_ms;
+    double reverse_safety_hold_max_ms;
     uint64_t stop_compensation_clamped_events;
     uint64_t physical_reversals;
     uint64_t endpoint_count;
@@ -445,6 +461,117 @@ typedef struct {
     double physical_course_min_mm;
     double physical_course_max_mm;
 } recip_shadow_t;
+
+static int recip_shadow_encoder_quality_ready(
+    const recip_shadow_t *shadow,
+    int64_t now_qpc,
+    int64_t qpc_frequency
+){
+    if(!shadow || !shadow->have_latest_encoder_state || qpc_frequency <= 0 ||
+       now_qpc < shadow->latest_encoder_qpc ||
+       shadow->encoder_clean_since_qpc <= 0 ||
+       shadow->encoder_clean_samples < RECIP_ENCODER_RECOVERY_MIN_SAMPLES ||
+       shadow->latest_encoder_qpc < shadow->encoder_clean_since_qpc){
+        return 0;
+    }
+    if((double)(now_qpc - shadow->latest_encoder_qpc) /
+           (double)qpc_frequency >
+       RECIP_ENCODER_RECOVERY_MAX_SAMPLE_AGE_S){
+        return 0;
+    }
+    return (double)(shadow->latest_encoder_qpc -
+                    shadow->encoder_clean_since_qpc) /
+                   (double)qpc_frequency >= RECIP_ENCODER_RECOVERY_CLEAN_S;
+}
+
+static void recip_reverse_recovery_begin_or_refresh(
+    recip_reverse_retry_t *retry,
+    recip_shadow_t *shadow,
+    int64_t now_ticks,
+    int64_t qpc_frequency,
+    int idx,
+    const char *phase_name,
+    const char *reason,
+    double position_mm,
+    double velocity_mm_s,
+    double travel_mm,
+    double projected_mm,
+    double limit_mm
+){
+    int new_issue;
+    if(!retry || !shadow || qpc_frequency <= 0) return;
+    new_issue = retry->recovery_active &&
+        shadow->last_encoder_quality_issue_qpc != 0 &&
+        shadow->last_encoder_quality_issue_qpc !=
+            retry->recovery_last_quality_issue_qpc;
+    if(!retry->recovery_active){
+        retry->recovery_active = 1;
+        retry->recovery_started_ticks = now_ticks;
+        shadow->reverse_safety_holds++;
+        ev_logf(
+            "RECIP_ENCODER_REVERSE_RECOVERY_BEGIN idx=%d command=%s "
+            "reason=%s qpc=%lld position_mm=%.9f velocity_mm_s=%.9f "
+            "travel_mm=%.9f projected_mm=%.9f limit_mm=%.9f",
+            idx, phase_name, reason, (long long)now_ticks, position_mm,
+            velocity_mm_s, travel_mm, projected_mm, limit_mm);
+    }
+    if(!retry->recovery_active || new_issue ||
+       retry->recovery_clean_not_before_ticks == 0){
+        retry->recovery_clean_not_before_ticks = now_ticks + (int64_t)(
+            RECIP_ENCODER_RECOVERY_CLEAN_S * (double)qpc_frequency + 0.5);
+        retry->recovery_last_quality_issue_qpc =
+            shadow->last_encoder_quality_issue_qpc;
+        recip_encoder_controller_reset_velocity_estimator(&shadow->controller);
+        if(new_issue){
+            ev_logf(
+                "RECIP_ENCODER_REVERSE_RECOVERY_RESET idx=%d command=%s "
+                "reason=NEW_ENCODER_QUALITY_ISSUE qpc=%lld issue_qpc=%lld "
+                "sample_status=%u",
+                idx, phase_name, (long long)now_ticks,
+                (long long)shadow->last_encoder_quality_issue_qpc,
+                (unsigned)shadow->last_encoder_quality_issue_status);
+        }
+    }
+}
+
+static double recip_reverse_recovery_finish(
+    recip_reverse_retry_t *retry,
+    recip_shadow_t *shadow,
+    int64_t now_ticks,
+    int64_t qpc_frequency,
+    int idx,
+    const char *phase_name,
+    const char *result,
+    double position_mm,
+    double velocity_mm_s,
+    double projected_mm,
+    double limit_mm
+){
+    double duration_ms = 0.0;
+    if(!retry || !shadow || !retry->recovery_active) return duration_ms;
+    if(qpc_frequency > 0 && now_ticks >= retry->recovery_started_ticks){
+        duration_ms = 1000.0 * (double)(now_ticks -
+            retry->recovery_started_ticks) / (double)qpc_frequency;
+    }
+    shadow->reverse_safety_hold_total_ms += duration_ms;
+    if(duration_ms > shadow->reverse_safety_hold_max_ms){
+        shadow->reverse_safety_hold_max_ms = duration_ms;
+    }
+    if(result && strcmp(result, "RECOVERED") == 0){
+        shadow->reverse_safety_recoveries++;
+    }else if(result && strcmp(result, "TIMEOUT") == 0){
+        shadow->reverse_safety_timeouts++;
+    }
+    ev_logf(
+        "RECIP_ENCODER_REVERSE_RECOVERY_END idx=%d command=%s result=%s "
+        "qpc=%lld duration_ms=%.3f position_mm=%.9f velocity_mm_s=%.9f "
+        "projected_mm=%.9f limit_mm=%.9f",
+        idx, phase_name, result ? result : "UNKNOWN", (long long)now_ticks,
+        duration_ms, position_mm, velocity_mm_s, projected_mm, limit_mm);
+    retry->recovery_active = 0;
+    retry->recovery_clean_not_before_ticks = 0;
+    return duration_ms;
+}
 
 static void recip_shadow_reset_motion(recip_shadow_t *shadow){
     uint64_t discarded = 0;
@@ -470,6 +597,10 @@ static void recip_shadow_reset_motion(recip_shadow_t *shadow){
     shadow->latest_encoder_qpc = 0;
     shadow->latest_encoder_position_mm = 0.0;
     shadow->latest_encoder_speed_mm_s = 0.0;
+    shadow->encoder_clean_since_qpc = 0;
+    shadow->encoder_clean_samples = 0u;
+    shadow->last_encoder_quality_issue_qpc = 0;
+    shadow->last_encoder_quality_issue_status = 0u;
     shadow->have_physical_extreme = 0;
     ev_logf("RECIP_SHADOW_RESET reason=pause_or_start discarded=%llu",
             (unsigned long long)discarded);
@@ -676,6 +807,25 @@ static void recip_shadow_drain(
             shadow->sequence_gaps += packet.sequence - previous_sequence - 1u;
         }
         shadow->prestart_last_sequence = packet.sequence;
+        {
+            int encoder_sample_ok =
+                (packet.flags & ENCODER_CONTROL_FLAG_ACCEPTED) != 0u &&
+                (packet.flags & ENCODER_CONTROL_FLAG_INITIALIZED) != 0u &&
+                packet.health == (uint32_t)ENCODER_HEALTH_OK;
+            int sequence_gap = previous_sequence != 0u &&
+                               packet.sequence > previous_sequence + 1u;
+            if(encoder_sample_ok && !sequence_gap){
+                if(shadow->encoder_clean_samples == 0u){
+                    shadow->encoder_clean_since_qpc = packet.qpc;
+                }
+                shadow->encoder_clean_samples++;
+            }else{
+                shadow->encoder_clean_since_qpc = 0;
+                shadow->encoder_clean_samples = 0u;
+                shadow->last_encoder_quality_issue_qpc = packet.qpc;
+                shadow->last_encoder_quality_issue_status = packet.sample_status;
+            }
+        }
         if((packet.flags & ENCODER_CONTROL_FLAG_ACCEPTED) != 0u &&
            (packet.flags & ENCODER_CONTROL_FLAG_INITIALIZED) != 0u &&
            packet.health == (uint32_t)ENCODER_HEALTH_OK){
@@ -762,14 +912,18 @@ static void recip_shadow_drain(
                         "RECIP_ENCODER_REVERSE_POLICY run_max_attempts=%d "
                         "rpm_max_logical_attempts=%d retry_interval_ms=%.3f "
                         "retry_timeout_ms=%.3f safety_lookahead_ms=%.3f "
-                        "stroke_limit_factor=%.6f",
+                        "stroke_limit_factor=%.6f recovery_clean_ms=%.3f "
+                        "recovery_min_samples=%d recovery_max_sample_age_ms=%.3f",
                         RECIP_ENCODER_REVERSE_RUN_MAX_ATTEMPTS,
                         RECIP_ENCODER_REVERSE_RPM_MAX_ATTEMPTS,
                         1000.0 * RECIP_ENCODER_REVERSE_RETRY_INTERVAL_S,
                         1000.0 * RECIP_ENCODER_REVERSE_RETRY_TIMEOUT_S,
                         1000.0 *
                             RECIP_ENCODER_REVERSE_SAFETY_LOOKAHEAD_S,
-                        config.stroke_limit_factor);
+                        config.stroke_limit_factor,
+                        1000.0 * RECIP_ENCODER_RECOVERY_CLEAN_S,
+                        RECIP_ENCODER_RECOVERY_MIN_SAMPLES,
+                        1000.0 * RECIP_ENCODER_RECOVERY_MAX_SAMPLE_AGE_S);
                 }
             }
         }
@@ -830,7 +984,7 @@ static void recip_shadow_close(recip_shadow_t *shadow){
         ? shadow->endpoint_abs_error_sum_mm / (double)shadow->endpoint_count : 0.0;
     physical_course_mean_mm = shadow->physical_course_count
         ? shadow->physical_course_sum_mm / (double)shadow->physical_course_count : 0.0;
-    ev_logf("RECIP_SHADOW_END active=%d session=%llu received=%llu valid=%llu rejected=%llu sequence_gaps=%llu latency_count=%llu latency_mean_ms=%.6f latency_max_ms=%.6f latency_over_20ms=%llu latency_over_50ms=%llu latency_over_100ms=%llu controller_started=%d forward_sign=%d reverse_events=%llu reverse_run_failed_attempts=%llu reverse_rpm_failed_attempts=%llu reverse_retry_recoveries=%llu distance_method=%s path_mm=%.9f target_mm=%.9f stop_compensation=%d stop_compensation_clamped_events=%llu physical_reversals=%llu endpoint_count=%llu endpoint_abs_error_mean_mm=%.6f endpoint_abs_error_max_mm=%.6f physical_course_count=%llu physical_course_mean_mm=%.6f physical_course_min_mm=%.6f physical_course_max_mm=%.6f complete=%d fault=%s action_enabled=%d",
+    ev_logf("RECIP_SHADOW_END active=%d session=%llu received=%llu valid=%llu rejected=%llu sequence_gaps=%llu latency_count=%llu latency_mean_ms=%.6f latency_max_ms=%.6f latency_over_20ms=%llu latency_over_50ms=%llu latency_over_100ms=%llu controller_started=%d forward_sign=%d reverse_events=%llu reverse_run_failed_attempts=%llu reverse_rpm_failed_attempts=%llu reverse_retry_recoveries=%llu reverse_safety_holds=%llu reverse_safety_recoveries=%llu reverse_safety_timeouts=%llu reverse_safety_hold_total_ms=%.6f reverse_safety_hold_max_ms=%.6f distance_method=%s path_mm=%.9f target_mm=%.9f stop_compensation=%d stop_compensation_clamped_events=%llu physical_reversals=%llu endpoint_count=%llu endpoint_abs_error_mean_mm=%.6f endpoint_abs_error_max_mm=%.6f physical_course_count=%llu physical_course_mean_mm=%.6f physical_course_min_mm=%.6f physical_course_max_mm=%.6f complete=%d fault=%s action_enabled=%d",
             shadow->active, (unsigned long long)shadow->session_id,
             (unsigned long long)shadow->packets_received,
             (unsigned long long)shadow->packets_valid,
@@ -846,6 +1000,11 @@ static void recip_shadow_close(recip_shadow_t *shadow){
              (unsigned long long)shadow->reverse_run_failed_attempts,
              (unsigned long long)shadow->reverse_rpm_failed_attempts,
              (unsigned long long)shadow->reverse_retry_recoveries,
+             (unsigned long long)shadow->reverse_safety_holds,
+             (unsigned long long)shadow->reverse_safety_recoveries,
+             (unsigned long long)shadow->reverse_safety_timeouts,
+             shadow->reverse_safety_hold_total_ms,
+             shadow->reverse_safety_hold_max_ms,
              shadow->physical_distance_enabled ?
                 "confirmed_physical_extremes" : "nominal_completed_strokes",
              shadow->controller.last_path_mm,
@@ -1525,6 +1684,7 @@ static int run_internal_self_test(void){
     size_t pending_len;
     encoder_drive_status_t status = {0};
     recip_reverse_retry_t reverse_retry = {0};
+    recip_shadow_t recovery_shadow = {0};
     double reverse_travel = 0.0;
     double reverse_projected = 0.0;
     double reverse_limit = 0.0;
@@ -1677,8 +1837,42 @@ static int run_internal_self_test(void){
         return 0;
     }
 
+    /* Regressao do incidente real de 28-08-2026: a velocidade curta apos
+       lacuna projetava 22.24 mm, enquanto o estimador causal compartilhado
+       mantinha a projecao em aproximadamente 14.39 mm. */
+    if(!recip_reverse_position_risk(
+           9.631127883, 0.0060056, 56.742865856,
+           -0.923314739, -1, 10.0, 2.0,
+           NULL, NULL, NULL) ||
+       recip_reverse_position_risk(
+           9.631127883, 0.0060056, 18.612533232,
+           -0.923314739, -1, 10.0, 2.0,
+           NULL, NULL, NULL)){
+        puts("SELF-TEST FALHOU: regressao POSITION_RISK pos-lacuna.");
+        return 0;
+    }
+
+    recovery_shadow.have_latest_encoder_state = 1;
+    recovery_shadow.encoder_clean_since_qpc = 1000;
+    recovery_shadow.latest_encoder_qpc = 1149;
+    recovery_shadow.encoder_clean_samples =
+        RECIP_ENCODER_RECOVERY_MIN_SAMPLES;
+    if(recip_shadow_encoder_quality_ready(&recovery_shadow, 1149, 1000)){
+        puts("SELF-TEST FALHOU: recuperacao liberada antes da janela limpa.");
+        return 0;
+    }
+    recovery_shadow.latest_encoder_qpc = 1150;
+    if(!recip_shadow_encoder_quality_ready(&recovery_shadow, 1150, 1000)){
+        puts("SELF-TEST FALHOU: recuperacao nao liberou janela limpa.");
+        return 0;
+    }
+    if(recip_shadow_encoder_quality_ready(&recovery_shadow, 1201, 1000)){
+        puts("SELF-TEST FALHOU: recuperacao aceitou amostra antiga.");
+        return 0;
+    }
+
     puts(
-        "SELF-TEST OK: parser IPC, unwrap P0B-09, limites e retry de reversao."
+        "SELF-TEST OK: parser IPC, unwrap P0B-09, limites, retry e recuperacao de reversao."
     );
     return 1;
 }
@@ -3280,15 +3474,34 @@ int main(int argc, char **argv){
                 double travel_mm = 0.0;
                 double projected_mm = 0.0;
                 double limit_mm = 0.0;
+                double safety_velocity_mm_s =
+                    recip_encoder_controller_velocity_estimate_mm_s(
+                        &recip_shadow.controller);
+                int projected_risk = 0;
+                int hard_position_limit = 0;
+                int quality_ready = recip_shadow_encoder_quality_ready(
+                    &recip_shadow, retry_now, qpc_freq);
                 const char *phase_name = recip_reverse_phase_name(
                     external_reverse_retry.phase);
                 if(recip_reverse_retry_timed_out(
                        &external_reverse_retry, retry_now, qpc_freq) ||
                    recip_reverse_retry_attempts_exhausted(
                        &external_reverse_retry)){
-                    const char *reason = recip_reverse_retry_attempts_exhausted(
-                        &external_reverse_retry)
-                        ? "RETRIES_EXHAUSTED" : "TIMEOUT";
+                    int attempts_exhausted =
+                        recip_reverse_retry_attempts_exhausted(
+                            &external_reverse_retry);
+                    const char *reason = attempts_exhausted
+                        ? "RETRIES_EXHAUSTED"
+                        : external_reverse_retry.recovery_active
+                            ? "RECOVERY_TIMEOUT" : "TIMEOUT";
+                    if(external_reverse_retry.recovery_active){
+                        (void)recip_reverse_recovery_finish(
+                            &external_reverse_retry, &recip_shadow,
+                            retry_now, qpc_freq, idx, phase_name,
+                            "TIMEOUT",
+                            recip_shadow.latest_encoder_position_mm,
+                            safety_velocity_mm_s, projected_mm, limit_mm);
+                    }
                     snprintf(
                         reverse_failure, sizeof(reverse_failure),
                         "RECIP_ENCODER_REVERSE_COMMAND_FAILED command=%s "
@@ -3317,25 +3530,35 @@ int main(int argc, char **argv){
                             recip_shadow.latest_encoder_qpc) /
                             (double)qpc_freq;
                     }
-                    if(recip_reverse_position_risk(
-                           recip_shadow.latest_encoder_position_mm,
-                           position_age_s,
-                           recip_shadow.latest_encoder_speed_mm_s,
-                           recip_shadow.controller.stroke_origin_mm,
-                           recip_shadow.controller.command_direction,
-                           recip_shadow.controller.config.course_mm,
-                           recip_shadow.controller.config.stroke_limit_factor,
-                           &travel_mm, &projected_mm, &limit_mm)){
+                    projected_risk = recip_reverse_position_risk(
+                        recip_shadow.latest_encoder_position_mm,
+                        position_age_s,
+                        safety_velocity_mm_s,
+                        recip_shadow.controller.stroke_origin_mm,
+                        recip_shadow.controller.command_direction,
+                        recip_shadow.controller.config.course_mm,
+                        recip_shadow.controller.config.stroke_limit_factor,
+                        &travel_mm, &projected_mm, &limit_mm);
+                    hard_position_limit = travel_mm >= limit_mm;
+                    if(hard_position_limit){
+                        if(external_reverse_retry.recovery_active){
+                            (void)recip_reverse_recovery_finish(
+                                &external_reverse_retry, &recip_shadow,
+                                retry_now, qpc_freq, idx, phase_name,
+                                "POSITION_LIMIT",
+                                recip_shadow.latest_encoder_position_mm,
+                                safety_velocity_mm_s, projected_mm, limit_mm);
+                        }
                         snprintf(
                             reverse_failure, sizeof(reverse_failure),
                             "RECIP_ENCODER_REVERSE_COMMAND_FAILED command=%s "
-                            "reason=POSITION_RISK position_mm=%.6f "
+                            "reason=POSITION_LIMIT position_mm=%.6f "
                             "travel_mm=%.6f projected_mm=%.6f limit_mm=%.6f",
                             phase_name,
                             recip_shadow.latest_encoder_position_mm,
                             travel_mm, projected_mm, limit_mm);
                         ev_logf(
-                            "RECIP_ENCODER_REVERSE_POSITION_RISK idx=%d "
+                            "RECIP_ENCODER_REVERSE_POSITION_LIMIT idx=%d "
                             "command=%s position_mm=%.9f speed_mm_s=%.9f "
                             "position_age_ms=%.3f stroke_origin_mm=%.9f "
                             "travel_mm=%.9f projected_mm=%.9f limit_mm=%.9f "
@@ -3343,7 +3566,7 @@ int main(int argc, char **argv){
                             "motor_direction=%d",
                             idx, phase_name,
                             recip_shadow.latest_encoder_position_mm,
-                            recip_shadow.latest_encoder_speed_mm_s,
+                            safety_velocity_mm_s,
                             1000.0 * position_age_s,
                             recip_shadow.controller.stroke_origin_mm,
                             travel_mm, projected_mm, limit_mm,
@@ -3351,6 +3574,34 @@ int main(int argc, char **argv){
                                 RECIP_ENCODER_REVERSE_SAFETY_LOOKAHEAD_S,
                             recip_shadow.controller.command_direction,
                             external_motor_direction);
+                    }else if(!quality_ready){
+                        recip_reverse_recovery_begin_or_refresh(
+                            &external_reverse_retry, &recip_shadow,
+                            retry_now, qpc_freq, idx, phase_name,
+                            "RECENT_ENCODER_GAP",
+                            recip_shadow.latest_encoder_position_mm,
+                            safety_velocity_mm_s, travel_mm,
+                            projected_mm, limit_mm);
+                    }else if(projected_risk){
+                        recip_reverse_recovery_begin_or_refresh(
+                            &external_reverse_retry, &recip_shadow,
+                            retry_now, qpc_freq, idx, phase_name,
+                            "PROJECTED_RISK",
+                            recip_shadow.latest_encoder_position_mm,
+                            safety_velocity_mm_s, travel_mm,
+                            projected_mm, limit_mm);
+                    }else if(external_reverse_retry.recovery_active &&
+                             retry_now >= external_reverse_retry.
+                                 recovery_clean_not_before_ticks &&
+                             recip_shadow.controller.velocity_count >=
+                                 RECIP_ENCODER_RECOVERY_MIN_SAMPLES){
+                        (void)recip_reverse_recovery_finish(
+                            &external_reverse_retry, &recip_shadow,
+                            retry_now, qpc_freq, idx, phase_name,
+                            "RECOVERED",
+                            recip_shadow.latest_encoder_position_mm,
+                            safety_velocity_mm_s, projected_mm, limit_mm);
+                        external_reverse_retry.next_attempt_ticks = retry_now;
                     }
                 }
                 if(reverse_failure[0] != 0){
@@ -3363,7 +3614,8 @@ int main(int argc, char **argv){
                     stop_requested = 1;
                     break;
                 }
-                if(retry_now >= external_reverse_retry.next_attempt_ticks){
+                if(!external_reverse_retry.recovery_active &&
+                   retry_now >= external_reverse_retry.next_attempt_ticks){
                     recip_reverse_phase_t attempted_phase =
                         external_reverse_retry.phase;
                     const char *attempted_name = recip_reverse_phase_name(
@@ -3388,7 +3640,7 @@ int main(int argc, char **argv){
                         idx, attempted_name, attempt_number, max_attempts,
                         desired_seg_rpm,
                         recip_shadow.latest_encoder_position_mm,
-                        recip_shadow.latest_encoder_speed_mm_s,
+                        safety_velocity_mm_s,
                         1000.0 * position_age_s,
                         travel_mm, projected_mm, limit_mm);
                     command_result = attempted_phase ==

@@ -1379,7 +1379,11 @@ int main(int argc, char **argv){
     }
     if(encoder_enabled){
         encoder_state_config_t encoder_config;
-        encoder_state_config_default(&encoder_config);
+        if(encoder_reciprocating_shadow){
+            encoder_state_config_reciprocating(&encoder_config);
+        }else{
+            encoder_state_config_default(&encoder_config);
+        }
         encoder_config.radius_mm = encoder_radius_mm;
         encoder_config.max_physical_speed_mm_s = encoder_max_speed_mm_s;
         encoder_config.stale_stop_s = 0.10;
@@ -1417,6 +1421,12 @@ int main(int argc, char **argv){
                 encoder_radius_mm, encoder_max_speed_mm_s,
                 encoder_target_mm, encoder_config.stale_stop_s,
                 encoder_config.failure_timeout_s);
+        ev_logf("ENCODER_GATE profile=%s speed_factor=%.6f margin_deg=%.6f min_gate_deg=%.6f effective_speed_bound_mm_s=%.6f",
+                encoder_reciprocating_shadow ? "RECIP_PHYSICAL_V1" : "DEFAULT",
+                encoder_config.innovation_factor,
+                encoder_config.innovation_margin_deg,
+                encoder_config.innovation_min_gate_deg,
+                encoder_config.max_physical_speed_mm_s * encoder_config.innovation_factor);
         if(encoder_control_port != 0){
             memset(&encoder_control_addr, 0, sizeof(encoder_control_addr));
             encoder_control_addr.sin_family = AF_INET;

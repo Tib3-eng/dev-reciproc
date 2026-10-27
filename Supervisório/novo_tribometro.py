@@ -62,6 +62,8 @@ import subprocess
 import tempfile
 import shutil
 import hashlib
+import queue
+import communication_check as comm_check
 
 # UI (Tkinter):
 # - tkinter: widgets base e janela principal.
@@ -123,6 +125,7 @@ external_run_token = 0
 run_finalizing = False
 # Flag da rotina de tara para evitar execucoes concorrentes.
 tara_running = False
+check_status_running = False
 # Estado do modo de monitoramento (DLG sem ensaio ativo).
 monitor_mode_active = False
 monitor_mode_token = 0
@@ -619,6 +622,8 @@ def abrir_configurar_canais():
     - Encontra caminho do executavel via orchestrator_runtime.
     - Abre processo em background via subprocess.Popen.
     """
+    if _check_hardware_busy():
+        return
     if _is_running() or _external_pipeline_ativo():
         messagebox.showwarning(
             "Configurar canais",
@@ -784,6 +789,7 @@ def _set_start_button_state():
     try:
         disabled = (
             monitor_mode_active
+            or check_status_running
             or tara_running
             or run_finalizing
             or _is_running()
@@ -846,99 +852,6 @@ def _subprocess_no_window_kwargs():
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             kwargs['startupinfo'] = startupinfo
     return kwargs
-
-
-# Executa um check curto do DLG via logger IPC e retorna resultado/detalhe.
-# Boa parte das funcoes a baixo estão relacionadas a rotina de check status que foi adicionada
-# Mas sao bons exemplos da comunicacao Programa -> DLG
-def _dlg_check_once(dlg_exe, dlg_ip, dlg_port, bind_port):
-    """
-    Executa um teste curto de aquisicao DLG via dlg_logger_ipc em modo IPC.
-
-    Args:
-        dlg_exe (str): caminho do executavel dlg_logger_ipc.exe.
-        dlg_ip (str): IP do equipamento DLG.
-        dlg_port (int): porta UDP do DLG (tipicamente 41401).
-        bind_port (int): porta local de bind para receber pacotes.
-
-    Returns:
-        tuple[bool, str]:
-            - ok=True quando houver evidencias de dados validos (DATA_OK ou err=0 em CSV).
-            - detalhe com motivo de falha quando aplicavel.
-
-    Protocolo usado:
-        - Processo e iniciado com --ipc.
-        - Este codigo envia "START\\n" no stdin do processo.
-        - O logger responde no stdout com marcadores como DATA_OK/DATA_TIMEOUT.
-    """
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as tmp:
-        tmp_path = tmp.name
-
-    cmd = [
-        dlg_exe,
-        '--out', tmp_path,
-        '--duration', '2',
-        '--rate', f"{getattr(orch, 'DEFAULT_RATE_HZ', 50.0):.0f}",
-        '--ip', str(dlg_ip),
-        '--port', str(dlg_port),
-        '--bind-port', str(bind_port),
-        '--ipc',
-    ]
-    # cmd acima inicia um logger headless de curta duracao:
-    # - escreve CSV temporario em tmp_path
-    # - fica aguardando START no stdin por estar em modo --ipc
-    # - tenta receber ACQDATA do DLG na porta bind_port
-
-    detail = ''
-    ok = False
-    try:
-        res = subprocess.run(
-            cmd,
-            input='START\n',
-            capture_output=True,
-            text=True,
-            timeout=10,
-            **_subprocess_no_window_kwargs()
-        )
-        # Analise de resposta:
-        # - stdout/stderr podem conter DATA_OK ou DATA_TIMEOUT.
-        # - returncode != 0 normalmente indica erro operacional do logger.
-        out_txt = ((res.stdout or '') + '\n' + (res.stderr or '')).upper()
-        if 'DATA_OK' in out_txt:
-            ok = True
-        elif 'DATA_TIMEOUT' in out_txt:
-            detail = 'timeout sem ACQDATA'
-        elif 'FALHA AO ABRIR UDP' in out_txt:
-            detail = 'falha ao abrir UDP/bind'
-        elif res.returncode != 0:
-            detail = f'rc={res.returncode}'
-    except subprocess.TimeoutExpired:
-        detail = 'timeout executando logger'
-    except Exception as e:
-        detail = f'erro ({e})'
-
-    # Fallback por CSV: considera valido se existir ao menos uma linha com err=0.
-    if not ok:
-        try:
-            with open(tmp_path, 'r', encoding='utf-8') as f:
-                next(f, None)
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    parts = line.split(',')
-                    if parts and parts[-1].strip() == '0':
-                        ok = True
-                        break
-        except Exception:
-            pass
-
-    try:
-        os.remove(tmp_path)
-    except Exception:
-        pass
-
-    return ok, detail
 
 
 def _encoder_calibration_path():
@@ -1538,6 +1451,7 @@ def _run_auto_tara_before_start(repo_root, exe_info):
     }
 
     try:
+        comm_check.require_dlg_available()
         label_ensaio_estado.config(text="Coletando dados para tara", fg="#0078D4")
         root.update()
         rate_hz = getattr(orch, "DEFAULT_RATE_HZ", 50.0)
@@ -1604,6 +1518,8 @@ def zerar_celula():
     """
     global tara_running
 
+    if _check_hardware_busy() or _warn_dlg_interference():
+        return
     if tara_running:
         messagebox.showwarning("Zerar celula", "Rotina de tara ja esta em execucao.")
         return
@@ -1704,149 +1620,107 @@ def zerar_celula():
     threading.Thread(target=_worker, daemon=True).start()
 
 
-# Check simples de comunicacao (DLG + Drive) acionado pelo botao de status.
+def _check_hardware_busy():
+    if check_status_running:
+        messagebox.showwarning("Check status em andamento",
+                               "Aguarde o teste de comunicação terminar antes de usar o equipamento.")
+        return True
+    return False
+
+
+def _warn_dlg_interference():
+    try:
+        comm_check.require_dlg_available()
+        return False
+    except Exception as exc:
+        log_msg(f"Inicio bloqueado: {exc}")
+        messagebox.showwarning("Comunicação com o DLG", str(exc))
+        return True
+
+
 def check_status():
-    """
-    Valida conectividade operacional com os dois lados de hardware.
+    """Check bounded, repeated communication in a worker; Tk stays on main thread."""
+    global check_status_running
+    if _check_hardware_busy():
+        return
+    if (_is_running() or tara_running or run_finalizing or monitor_mode_active
+            or _external_pipeline_ativo()):
+        messagebox.showwarning("Check status",
+                               "Finalize o ensaio, a tara ou o monitoramento antes de testar a comunicação.")
+        return
+    # Warn immediately, but still let the worker diagnose Drive independently.
+    _warn_dlg_interference()
+    check_status_running = True
+    _set_start_button_state()
+    button_frame6_status.config(state="disabled")
+    for label in (status_dlg_value, status_drive_value, status_communication_value):
+        label.config(text="...", fg="#0078D4")
+    status_check_progress.config(text="Verificando comunicação...")
+    events = queue.Queue()
 
-    Fluxo:
-    1) DLG: executa dlg_logger_ipc por ~2 s em IPC e busca DATA_OK.
-    2) Drive: executa a5_pos_cli --diag na COM5.
-    3) Atualiza labels visuais de status (DLG/Drive).
+    def _worker():
+        try:
+            directory = os.path.join(APP_SETTINGS_DIR, "check_status",
+                                     datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
+            os.makedirs(directory, exist_ok=True)
+            exe = orch.check_executables(orch.find_repo_root()).get("dlg_exe")
+            def _progress(message):
+                events.put(("progress", message))
+            report = comm_check.run_check(
+                exe, directory, _progress,
+                getattr(orch, "DEFAULT_DLG_IP", "192.168.1.100"),
+                getattr(orch, "DEFAULT_DLG_PORT", 41401))
+            report_path = os.path.join(directory, "resultado.json")
+            try:
+                with open(report_path, "w", encoding="utf8") as stream:
+                    json.dump(report, stream, indent=2, ensure_ascii=True)
+            except OSError as exc:
+                _progress(f"Falha salvando diagnostico: {exc}")
+                report_path = ""
+            events.put(("done", (report, report_path)))
+        except Exception as exc:
+            events.put(("error", str(exc)))
 
-    Observacao:
-        Este check verifica comunicacao de aplicacao/protocolo.
-    """
-    log_msg('Check status: iniciando.')
-
-    dlg_ok = False
-    drive_ok = False
-
-    repo_root = orch.find_repo_root()
-
-    # ---- DLG ----
-    # Este bloco valida "na pratica" se existe comunicacao com o DLG:
-    # em vez de ping ICMP, ele sobe o logger IPC por poucos segundos e
-    # verifica se chega ao menos uma amostra ACQDATA valida.
-    try:
-        # check_executables() retorna um dicionario com caminhos dos .exe
-        # que o supervisorio precisa (dlg_logger_ipc, a5_speed_logger etc.).
-        exe_info = orch.check_executables(repo_root)
-        # Pegamos somente o executavel do logger DLG para o check atual.
-        dlg_exe = exe_info.get('dlg_exe')
-        if not dlg_exe:
-            # Sem executavel nao existe como testar protocolo/acquisicao.
-            # Aqui nao e erro fatal da UI; apenas registramos o diagnostico.
-            log_msg('DLG check: dlg_logger_ipc.exe nao encontrado.')
-        else:
-            # Usa constantes do orchestrator quando disponiveis.
-            # getattr com fallback evita quebra se a constante nao existir
-            # (mantem compatibilidade com versoes antigas do modulo).
-            dlg_ip = getattr(orch, 'DEFAULT_DLG_IP', '192.168.1.100')
-            dlg_port = getattr(orch, 'DEFAULT_DLG_PORT', 41401)
-            log_msg('DLG check: executando dlg_logger_ipc (ipc, 2s)...')
-            # Primeiro tenta a mesma porta de bind do logger real (41402).
-            # Se falhar (porta ocupada), tenta porta efemera.
-            # - 41402: replica o cenario normal de execucao do pipeline.
-            # - 0: pede ao SO uma porta livre qualquer (fallback robusto).
-            attempts = [41402, 0]
-            # detail carrega o motivo da ultima falha retornado por
-            # _dlg_check_once (ex.: timeout sem ACQDATA, falha de bind UDP).
-            detail = ''
-            for bind_port in attempts:
-                # _dlg_check_once executa um mini teste:
-                # 1) sobe dlg_logger_ipc em --ipc
-                # 2) envia START via stdin (message passing)
-                # 3) tenta receber dados do DLG por ~2 s
-                # 4) retorna (ok, detail)
-                # Parametros:
-                # - dlg_exe: caminho do executavel a testar
-                # - dlg_ip/dlg_port: destino UDP do equipamento DLG
-                # - bind_port: porta local para receber ACQDATA
-                dlg_ok, detail = _dlg_check_once(dlg_exe, dlg_ip, dlg_port, bind_port)
-                if dlg_ok:
-                    # Achou amostra valida: nao precisa novas tentativas.
-                    break
-                if bind_port == 41402:
-                    # Log explicito para mostrar que o fallback foi acionado.
-                    log_msg('DLG check: tentativa em 41402 falhou; tentando porta efemera...')
-
-            if dlg_ok:
-                # dlg_ok=True significa "recebeu dado valido no mini teste".
-                log_msg('DLG check: ok.')
-            else:
-                # Sem amostra valida, priorizamos mensagem com causa tecnica.
-                if detail:
-                    log_msg(f'DLG check: nenhuma amostra valida ({detail}).')
-                else:
-                    # Caso raro: falha sem detalhe textual especifico.
-                    log_msg('DLG check: nenhuma amostra valida.')
-    except Exception as e:
-        # Ultima defesa: erros inesperados do check nao podem derrubar a tela.
-        log_msg(f'DLG check: erro ({e}).')
-   
-    # ---- Drive ----
-    # Este bloco valida comunicacao serial/Modbus com o DriveA5.
-    # O objetivo e confirmar que o CLI consegue abrir a porta e ler
-    try:
-        # Preferir a5_pos_cli --diag:
-        # - comando curto de diagnostico
-        # - evita logica de ensaio longo
-        # - menor risco de alterar estado operacional
-        # candidates lista caminhos comuns de build em ordem de preferencia.
-        candidates = [
-            os.path.join(repo_root, 'DriveA5', 'build', 'Release', 'a5_pos_cli.exe'),
-            os.path.join(repo_root, 'DriveA5', 'build', 'a5_pos_cli.exe'),
-        ]
-        # drive_exe recebe o primeiro caminho existente.
-        drive_exe = None
-        for c in candidates:
-            if os.path.exists(c):
-                drive_exe = c
-                # Para no primeiro valido para evitar ambiguidade de versao.
+    def _poll():
+        global check_status_running
+        completed = False
+        while True:
+            try:
+                kind, value = events.get_nowait()
+            except queue.Empty:
                 break
-
-        if not drive_exe:
-            # Sem executavel nao ha como testar serial/Modbus.
-            log_msg('Drive check: a5_pos_cli.exe nao encontrado.')
-        else:
-            # COM5 e padrao do setup atual
-            # cmd:
-            # - drive_exe: executavel de diagnostico
-            # - COM5: porta serial esperada neste setup
-            # - --diag: teste basico de comunicacao
-            cmd = [drive_exe, 'COM5', '--diag']
-            res = subprocess.run(
-                cmd,
-                # captura stdout/stderr para evitar poluir o console da UI.
-                capture_output=True,
-                # text=True converte bytes para str automaticamente.
-                text=True,
-                # timeout curto evita travar o check se a porta nao responder.
-                timeout=5,
-                # Em Windows, oculta janela de console do subprocess.
-                **_subprocess_no_window_kwargs()
-            )
-            # --diag retorna 0 quando leituras Modbus basicas foram bem-sucedidas.
-            # Convencao:
-            # - rc=0   -> drive_ok=True
-            # - rc!=0  -> drive_ok=False
-            drive_ok = (res.returncode == 0)
-            if drive_ok:
-                log_msg('Drive check: ok.')
+            if kind == "progress":
+                status_check_progress.config(text=value[:180])
+                log_msg(value)
+                continue
+            completed = True
+            check_status_running = False
+            button_frame6_status.config(state="normal")
+            _set_start_button_state()
+            if kind == "done":
+                report, report_path = value
+                _set_status(status_dlg_value, report["dlg"]["available"])
+                _set_status(status_drive_value, report["drive"]["available"])
+                _set_status(status_communication_value, report["ok"])
+                status_check_progress.config(text=("Comunicação aprovada" if report["ok"]
+                                                   else "Comunicação reprovada — veja o diagnóstico"))
+                text = comm_check.format_report(report)
+                log_msg(text.encode("ascii", "backslashreplace").decode("ascii"))
+                if report_path:
+                    log_msg(f"Check status salvo: {report_path}")
+                show = messagebox.showinfo if report["ok"] else messagebox.showwarning
+                show("Check status — Comunicação", text)
             else:
-                log_msg('Drive check: falhou (diag).')
-    except Exception as e:
-        # Erros inesperados sao logados sem interromper o supervisorio.
-        log_msg(f'Drive check: erro ({e}).')
+                for label in (status_dlg_value, status_drive_value, status_communication_value):
+                    _set_status(label, False)
+                status_check_progress.config(text="Falha no check de comunicação")
+                messagebox.showerror("Check status", value)
+        if not completed:
+            root.after(100, _poll)
 
-    try:
-        # Atualiza indicadores visuais de status apos concluir ambos checks.
-        _set_status(status_dlg_value, dlg_ok)
-        _set_status(status_drive_value, drive_ok)
-    except Exception:
-        # Ignora erro de UI (ex.: widget indisponivel em transicao de tela).
-        pass
+    threading.Thread(target=_worker, daemon=True).start()
+    root.after(100, _poll)
+
 
 # INICIALIZACAO DE ESTADO GLOBAL DO ENSAIO.
 # Observacao: este arquivo mistura fluxo atual e da versao anterior; por isso existem
@@ -2635,10 +2509,13 @@ def atualiza_decorrido():
         ):
             progress = orch.refresh_reciprocating_progress(external_run_state)
             remaining_mm = float(progress.get("remaining_mm", 0.0) or 0.0)
+            progress_event = str(progress.get("event", "") or "")
             lbl_distancia_restante2.config(text=f"{remaining_mm / 1000.0:.3f} m")
             lbl_distancia_restante1.config(
                 text=(
-                    "Aguardando distancia restante"
+                    "Recuperando sinal do encoder"
+                    if progress_event == "recuperando_encoder"
+                    else "Aguardando distancia restante"
                     if theoretical_finished and remaining_mm > 0.0
                     else "Distancia restante"
                 )
@@ -3118,6 +2995,8 @@ def _start_monitor_mode():
     global monitor_mode_active, monitor_mode_token, monitor_proc, monitor_tail_thread, monitor_csv_path
     global x_time_ref_s
 
+    if _check_hardware_busy() or _warn_dlg_interference():
+        return False
     if monitor_mode_active:
         return True
 
@@ -4293,6 +4172,8 @@ def start_acquisition():
     global contador_amostras_total
     global x_auto_total_min, x3_auto_total_mm, x_time_ref_s
 
+    if _check_hardware_busy():
+        return
     if monitor_mode_active:
         messagebox.showwarning(
             "Monitoramento ativo",
@@ -4319,6 +4200,9 @@ def start_acquisition():
         messagebox.showwarning("Atenção", 
                                "O ensaio já está rodando!\n\n"
                                "Para iniciar um novo, clique em 'Parar'")
+        return
+
+    if _warn_dlg_interference():
         return
 
     ###################  VALIDAÇÕES PARA QUE O PROGRAMA INICIE:
@@ -4608,6 +4492,7 @@ def start_acquisition():
             root.update()
 
         try:
+            comm_check.require_dlg_available()
             offset_result = orch.run_reciprocating_offset_capture(
                 repo_root=repo_root,
                 run_folder=caminho_pasta,
@@ -4965,6 +4850,7 @@ def start_acquisition():
         repo_root = orch.find_repo_root()
         global external_run_state
         try:
+            comm_check.require_dlg_available()
             external_run_state = orch.start_external_run(
                 repo_root=repo_root,
                 out_paths=out_paths,
@@ -5237,6 +5123,14 @@ def start_acquisition():
                                 ("Timeout retentativa reversao [ms]", "reverse_policy_retry_timeout_ms"),
                                 ("Projecao seguranca reversao [ms]", "reverse_policy_safety_lookahead_ms"),
                                 ("Limite seguro reversao [x curso]", "reverse_policy_stroke_limit_factor"),
+                                ("Janela limpa recuperacao encoder [ms]", "reverse_policy_recovery_clean_ms"),
+                                ("Amostras minimas recuperacao encoder", "reverse_policy_recovery_min_samples"),
+                                ("Idade maxima amostra na recuperacao [ms]", "reverse_policy_recovery_max_sample_age_ms"),
+                                ("Paradas de seguranca do encoder", "reverse_safety_holds"),
+                                ("Recuperacoes concluidas do encoder", "reverse_safety_recoveries"),
+                                ("Timeouts de recuperacao do encoder", "reverse_safety_timeouts"),
+                                ("Tempo total recuperacao encoder [ms]", "reverse_safety_hold_total_ms"),
+                                ("Maior recuperacao encoder [ms]", "reverse_safety_hold_max_ms"),
                                 ("Inversoes fisicas confirmadas", "physical_reversals"),
                                 ("Conclusao controle encoder", "complete"),
                                 ("Falha controle encoder", "fault"),
@@ -5259,6 +5153,8 @@ def start_acquisition():
                                 ("Velocidade media dos strokes [mm/s]", "speed_mean_mm_s"),
                                 ("Velocidade minima dos strokes [mm/s]", "speed_min_mm_s"),
                                 ("Velocidade maxima dos strokes [mm/s]", "speed_max_mm_s"),
+                                ("Intervalos de recuperacao excluidos", "encoder_recovery_intervals"),
+                                ("Tempo de recuperacao excluido [s]", "encoder_recovery_excluded_s"),
                             ):
                                 value = processed.get(key)
                                 f_info.write(f"{label},{value if value is not None else 'NULL'},\n")
@@ -7562,6 +7458,11 @@ status_dlg_value.grid(row=0, column=1, padx=(0, 12))
 tkinter.Label(status_frame, text="Drive:", font=("Arial", 9, "bold")).grid(row=0, column=2, padx=(0, 4))
 status_drive_value = tkinter.Label(status_frame, text="?", fg="gray")
 status_drive_value.grid(row=0, column=3, padx=(0, 4))
+tkinter.Label(status_frame, text="Comunicação:", font=("Arial", 9, "bold")).grid(row=1, column=0, columnspan=2, sticky="w")
+status_communication_value = tkinter.Label(status_frame, text="?", fg="gray")
+status_communication_value.grid(row=1, column=2, sticky="w")
+status_check_progress = tkinter.Label(status_frame, text="", fg="#555555", wraplength=280, justify="left")
+status_check_progress.grid(row=2, column=0, columnspan=4, sticky="w")
 '''
 atualiza_tempo_button = tkinter.Button(labelframe2_lb2_4, text="atualiza", font=("Arial", 10),
                                        command=atualiza_decorrido)

@@ -361,6 +361,55 @@ static void test_causal_stopping_anticipation_and_clamp(void){
     CHECK(fabs(decision.trigger_position_mm - 2.2) < 1.0e-9);
 }
 
+static void test_shared_velocity_estimator_reset(void){
+    const uint64_t session = 88u;
+    const unsigned valid = ENCODER_CONTROL_FLAG_ACCEPTED |
+                           ENCODER_CONTROL_FLAG_INITIALIZED;
+    recip_encoder_config_t config = config_for(session);
+    recip_encoder_controller_t controller;
+    recip_encoder_decision_t decision;
+    encoder_control_packet_t packet = make_packet(
+        session, 1u, 100, 0.0, 0.0, 0, valid, ENCODER_HEALTH_OK);
+
+    CHECK(recip_encoder_controller_start(
+        &controller, &config, 1000, &packet, &decision));
+    packet = make_packet(
+        session, 2u, 200, 1.0, 1.0, 1, valid, ENCODER_HEALTH_OK);
+    CHECK(recip_encoder_controller_update(
+        &controller, &packet, sizeof(packet), &decision) ==
+        RECIP_ENCODER_ACTION_NONE);
+    packet = make_packet(
+        session, 3u, 300, 2.0, 2.0, 1, valid, ENCODER_HEALTH_OK);
+    CHECK(recip_encoder_controller_update(
+        &controller, &packet, sizeof(packet), &decision) ==
+        RECIP_ENCODER_ACTION_NONE);
+    CHECK(fabs(recip_encoder_controller_velocity_estimate_mm_s(
+        &controller) - 10.0) < 1.0e-9);
+
+    recip_encoder_controller_reset_velocity_estimator(&controller);
+    CHECK(controller.velocity_count == 0);
+    CHECK(fabs(recip_encoder_controller_velocity_estimate_mm_s(
+        &controller)) < 1.0e-12);
+
+    packet = make_packet(
+        session, 4u, 400, 2.5, 2.5, 1, valid, ENCODER_HEALTH_OK);
+    CHECK(recip_encoder_controller_update(
+        &controller, &packet, sizeof(packet), &decision) ==
+        RECIP_ENCODER_ACTION_NONE);
+    packet = make_packet(
+        session, 5u, 500, 3.0, 3.0, 1, valid, ENCODER_HEALTH_OK);
+    CHECK(recip_encoder_controller_update(
+        &controller, &packet, sizeof(packet), &decision) ==
+        RECIP_ENCODER_ACTION_NONE);
+    packet = make_packet(
+        session, 6u, 600, 3.5, 3.5, 1, valid, ENCODER_HEALTH_OK);
+    CHECK(recip_encoder_controller_update(
+        &controller, &packet, sizeof(packet), &decision) ==
+        RECIP_ENCODER_ACTION_NONE);
+    CHECK(fabs(recip_encoder_controller_velocity_estimate_mm_s(
+        &controller) - 5.0) < 1.0e-9);
+}
+
 int main(void){
     test_nominal_fixed_endpoints_and_completion();
     test_quarantine_and_stroke_limit();
@@ -369,6 +418,7 @@ int main(void){
     test_noisy_signal_uses_strokes_not_total_variation();
     test_physical_distance_completes_on_confirmed_extreme();
     test_causal_stopping_anticipation_and_clamp();
+    test_shared_velocity_estimator_reset();
     if(failures){
         fprintf(stderr, "recip_encoder_controller_tests: %d falha(s)\n", failures);
         return 1;

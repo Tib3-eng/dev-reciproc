@@ -175,6 +175,21 @@ static double velocity_regression_mm_s(const recip_encoder_controller_t *control
     return ((double)count * sum_tp - sum_t * sum_p) / denominator;
 }
 
+double recip_encoder_controller_velocity_estimate_mm_s(
+    const recip_encoder_controller_t *controller
+){
+    if(!controller || !controller->initialized) return 0.0;
+    return velocity_regression_mm_s(controller);
+}
+
+void recip_encoder_controller_reset_velocity_estimator(
+    recip_encoder_controller_t *controller
+){
+    if(!controller) return;
+    controller->velocity_count = 0;
+    controller->last_velocity_estimate_mm_s = 0.0;
+}
+
 static double update_stopping_trigger(recip_encoder_controller_t *controller){
     double anticipation = 0.0;
     double maximum = controller->config.course_mm *

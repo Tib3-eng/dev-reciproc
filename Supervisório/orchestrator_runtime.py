@@ -503,6 +503,8 @@ def refresh_reciprocating_progress(state: RunState) -> dict:
                     "RECIP_SHADOW_REVERSE ",
                     "RECIP_SHADOW_COMPLETE ",
                     "RECIP_ENCODER_DONE ",
+                    "RECIP_ENCODER_REVERSE_RECOVERY_BEGIN ",
+                    "RECIP_ENCODER_REVERSE_RECOVERY_END ",
                     "RECIP_SHADOW_END ",
                 )):
                     continue
@@ -525,6 +527,10 @@ def refresh_reciprocating_progress(state: RunState) -> dict:
                 elif "RECIP_SHADOW_PHYSICAL_REVERSAL " in line:
                     state.reciprocating_progress_event = "extremo_fisico_confirmado"
                 elif "RECIP_SHADOW_REVERSE " in line:
+                    state.reciprocating_progress_event = "aguardando_extremo_fisico"
+                elif "RECIP_ENCODER_REVERSE_RECOVERY_BEGIN " in line:
+                    state.reciprocating_progress_event = "recuperando_encoder"
+                elif "RECIP_ENCODER_REVERSE_RECOVERY_END " in line:
                     state.reciprocating_progress_event = "aguardando_extremo_fisico"
     except (FileNotFoundError, OSError):
         pass
@@ -1714,6 +1720,40 @@ def run_reciprocating_offset_capture(
                 except Exception:
                     continue
     qpc_values = [item[0] for item in dlg_qpc_idx]
+    qpc_by_idx = {idx: qpc for qpc, idx in dlg_qpc_idx}
+    recovery_qpc_intervals = []
+    recovery_start_qpc = None
+    if os.path.exists(event_path):
+        try:
+            with open(event_path, "r", encoding="ascii", errors="replace") as stream:
+                for line in stream:
+                    fields = _event_fields(line)
+                    if "RECIP_ENCODER_REVERSE_RECOVERY_BEGIN " in line:
+                        try:
+                            recovery_start_qpc = int(fields["qpc"])
+                        except Exception:
+                            recovery_start_qpc = None
+                    elif "RECIP_ENCODER_REVERSE_RECOVERY_END " in line:
+                        try:
+                            recovery_end_qpc = int(fields["qpc"])
+                        except Exception:
+                            recovery_end_qpc = None
+                        if recovery_start_qpc is not None and recovery_end_qpc is not None:
+                            recovery_qpc_intervals.append((
+                                recovery_start_qpc,
+                                max(recovery_start_qpc, recovery_end_qpc),
+                            ))
+                            recovery_start_qpc = None
+        except Exception:
+            recovery_qpc_intervals = []
+
+    def _idx_in_encoder_recovery(row_idx):
+        qpc = qpc_by_idx.get(row_idx)
+        return bool(qpc is not None and any(
+            start_qpc <= qpc <= end_qpc
+            for start_qpc, end_qpc in recovery_qpc_intervals
+        ))
+
     reverse_indices = []
     for qpc in boundary_qpcs:
         pos = bisect.bisect_left(qpc_values, qpc)
@@ -1745,7 +1785,11 @@ def run_reciprocating_offset_capture(
                     and capture_end_idx is not None
                     and retained_start_idx <= row_idx <= capture_end_idx
                 )
-                if in_retained_window:
+                in_encoder_recovery = (
+                    row_idx is not None and _idx_in_encoder_recovery(row_idx)
+                )
+                in_metric_window = in_retained_window and not in_encoder_recovery
+                if in_metric_window:
                     total_rows += 1
                 sample_valid = False
                 value = None
@@ -1756,12 +1800,14 @@ def run_reciprocating_offset_capture(
                     )
                     if sample_valid:
                         value = float(row[3])
-                        valid_by_idx[row_idx] = value
+                        if not in_encoder_recovery:
+                            valid_by_idx[row_idx] = value
                 except Exception:
                     sample_valid = False
                 rows.append((
                     row[0] if row else "", row[2] if len(row) > 2 else "",
                     value, sample_valid, in_retained_window,
+                    in_encoder_recovery,
                 ))
 
     stroke_means = []
@@ -1817,12 +1863,20 @@ def run_reciprocating_offset_capture(
     capture_csv = os.path.join(dev_dir, "recip_dynamic_offset.csv")
     with open(capture_csv, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f, delimiter=";", lineterminator="\n")
-        writer.writerow(["idx", "t_s", "ch1_raw_N", "valida", "usada_offset"])
-        for idx, t_s, value, sample_valid, in_retained_window in rows:
+        writer.writerow([
+            "idx", "t_s", "ch1_raw_N", "valida",
+            "recuperacao_encoder", "usada_offset",
+        ])
+        for (
+            idx, t_s, value, sample_valid, in_retained_window,
+            in_encoder_recovery,
+        ) in rows:
             writer.writerow([
                 idx, t_s, f"{value:.10g}" if value is not None else "NULL",
                 1 if sample_valid else 0,
-                1 if sample_valid and in_retained_window else 0,
+                1 if in_encoder_recovery else 0,
+                1 if sample_valid and in_retained_window and
+                     not in_encoder_recovery else 0,
             ])
 
     for name in ("a5_speed_events.log", "dlg_logger_events.log", "drive.csv", "schedule.csv", "encoder_state.csv"):
@@ -2912,6 +2966,8 @@ def _rebuild_reciprocating_csv_from_logs(
     physical_events = []
     segment_by_stroke = {}
     done_event = None
+    recovery_intervals = []
+    open_recovery = None
     if os.path.isfile(event_path):
         with open(event_path, "r", encoding="ascii", errors="replace") as stream:
             for line in stream:
@@ -2939,6 +2995,22 @@ def _rebuild_reciprocating_csv_from_logs(
                     }
                     if done_event["stroke"] is not None and done_event["segment"] is not None:
                         segment_by_stroke[done_event["stroke"]] = done_event["segment"]
+                elif "RECIP_ENCODER_REVERSE_RECOVERY_BEGIN " in line:
+                    start_qpc = as_int(fields.get("qpc"))
+                    if start_qpc is not None:
+                        open_recovery = {
+                            "start_qpc": start_qpc,
+                            "end_qpc": None,
+                            "reason": fields.get("reason", "UNKNOWN"),
+                        }
+                elif "RECIP_ENCODER_REVERSE_RECOVERY_END " in line:
+                    end_qpc = as_int(fields.get("qpc"))
+                    if open_recovery is not None and end_qpc is not None:
+                        open_recovery["end_qpc"] = max(
+                            end_qpc, open_recovery["start_qpc"]
+                        )
+                        recovery_intervals.append(open_recovery)
+                        open_recovery = None
 
     samples = []
     offset_n = float(getattr(state, "dynamic_offset_n", 0.0) or 0.0)
@@ -2988,6 +3060,57 @@ def _rebuild_reciprocating_csv_from_logs(
             })
     if not samples:
         raise RuntimeError("Nenhuma amostra DLG disponivel para o reciprocante.")
+    if open_recovery is not None:
+        final_qpc = samples[-1].get("qpc")
+        if final_qpc is not None:
+            open_recovery["end_qpc"] = max(
+                int(final_qpc), open_recovery["start_qpc"]
+            )
+            recovery_intervals.append(open_recovery)
+    recovery_intervals.sort(key=lambda item: item["start_qpc"])
+    merged_recovery_intervals = []
+    for interval in recovery_intervals:
+        if not merged_recovery_intervals or (
+            interval["start_qpc"] > merged_recovery_intervals[-1]["end_qpc"]
+        ):
+            merged_recovery_intervals.append(dict(interval))
+        else:
+            merged_recovery_intervals[-1]["end_qpc"] = max(
+                merged_recovery_intervals[-1]["end_qpc"], interval["end_qpc"]
+            )
+    recovery_intervals = merged_recovery_intervals
+
+    qpc_frequency = 0.0
+    timed_samples = [
+        sample for sample in samples
+        if sample["qpc"] is not None and sample["t"] is not None
+    ]
+    if len(timed_samples) >= 2:
+        qpc_delta = timed_samples[-1]["qpc"] - timed_samples[0]["qpc"]
+        time_delta = timed_samples[-1]["t"] - timed_samples[0]["t"]
+        if qpc_delta > 0 and time_delta > 0.0:
+            qpc_frequency = qpc_delta / time_delta
+
+    def recovery_overlap_s(start_qpc, end_qpc):
+        if (
+            qpc_frequency <= 0.0 or start_qpc is None or end_qpc is None or
+            end_qpc <= start_qpc
+        ):
+            return 0.0
+        overlap_ticks = 0
+        for interval in recovery_intervals:
+            left = max(int(start_qpc), interval["start_qpc"])
+            right = min(int(end_qpc), interval["end_qpc"])
+            if right > left:
+                overlap_ticks += right - left
+        return overlap_ticks / qpc_frequency
+
+    for sample in samples:
+        qpc = sample.get("qpc")
+        sample["recovery"] = bool(qpc is not None and any(
+            interval["start_qpc"] <= qpc <= interval["end_qpc"]
+            for interval in recovery_intervals
+        ))
 
     first_valid = next(
         (i for i, sample in enumerate(samples)
@@ -3125,7 +3248,10 @@ def _rebuild_reciprocating_csv_from_logs(
             if actual_course is not None:
                 edge_mm = actual_course * edge_pct / 100.0
                 for sample in samples[start:end + 1]:
-                    if sample["pos"] is None or not sample["valid_force"]:
+                    if (
+                        sample["pos"] is None or not sample["valid_force"] or
+                        sample.get("recovery", False)
+                    ):
                         continue
                     local = direction * (sample["pos"] - start_pos)
                     if edge_mm <= local <= actual_course - edge_mm:
@@ -3143,6 +3269,13 @@ def _rebuild_reciprocating_csv_from_logs(
                 end_sample["t"] - start_sample["t"]
                 if end_sample["t"] is not None and start_sample["t"] is not None else None
             )
+            if duration is not None:
+                duration = max(
+                    0.0,
+                    duration - recovery_overlap_s(
+                        start_sample.get("qpc"), end_sample.get("qpc")
+                    ),
+                )
             speed = actual_course / duration if actual_course is not None and duration and duration > 0 else None
             if actual_course is not None:
                 processed_courses.append(actual_course)
@@ -3191,12 +3324,21 @@ def _rebuild_reciprocating_csv_from_logs(
         ),
         "speed_min_mm_s": min(processed_speeds) if processed_speeds else None,
         "speed_max_mm_s": max(processed_speeds) if processed_speeds else None,
+        "encoder_recovery_intervals": len(recovery_intervals),
+        "encoder_recovery_excluded_s": sum(
+            recovery_overlap_s(
+                interval["start_qpc"], interval["end_qpc"]
+            )
+            for interval in recovery_intervals
+        ),
     }
 
     def new_acc(start_t=None):
         return {"t": start_t, "n": 0, "fail": 0, "values": [], "rpm": []}
 
     def add_acc(acc, sample):
+        if sample.get("recovery", False):
+            return
         if acc["t"] is None:
             acc["t"] = sample["t"]
         acc["n"] += 1
@@ -3218,6 +3360,7 @@ def _rebuild_reciprocating_csv_from_logs(
         base_distance = 0.0
         previous_t = samples[first_valid]["t"]
         previous_cross_t = previous_t
+        previous_cross_qpc = samples[first_valid]["qpc"]
         acc = new_acc(previous_t)
         for start, end, _boundary in stroke_ranges:
             origin = samples[start]["pos"]
@@ -3228,6 +3371,7 @@ def _rebuild_reciprocating_csv_from_logs(
             course = abs(endpoint - origin)
             previous_progress = base_distance
             previous_sample_t = samples[start]["t"]
+            previous_sample_qpc = samples[start]["qpc"]
             for sample in samples[start:end + 1]:
                 add_acc(acc, sample)
                 if sample["pos"] is None or sample["t"] is None:
@@ -3243,9 +3387,25 @@ def _rebuild_reciprocating_csv_from_logs(
                         previous_sample_t + fraction * (sample["t"] - previous_sample_t)
                         if previous_sample_t is not None else sample["t"]
                     )
+                    crossing_qpc = (
+                        int(round(
+                            previous_sample_qpc + fraction *
+                            (sample["qpc"] - previous_sample_qpc)
+                        ))
+                        if previous_sample_qpc is not None and
+                           sample["qpc"] is not None
+                        else sample["qpc"]
+                    )
                     values = acc["values"]
                     rpm_values = acc["rpm"]
                     duration = crossing_t - previous_cross_t if previous_cross_t is not None else None
+                    if duration is not None:
+                        duration = max(
+                            0.0,
+                            duration - recovery_overlap_s(
+                                previous_cross_qpc, crossing_qpc
+                            ),
+                        )
                     wd.writerow([
                         fmt(next_boundary), fmt(acc["t"]),
                         fmt(sum(abs(value) for value in values) / len(values)
@@ -3257,10 +3417,12 @@ def _rebuild_reciprocating_csv_from_logs(
                         fmt(100.0 * acc["fail"] / acc["n"] if acc["n"] else 0.0, 3),
                     ])
                     previous_cross_t = crossing_t
+                    previous_cross_qpc = crossing_qpc
                     next_boundary += interval_mm
                     acc = new_acc(crossing_t)
                 previous_progress = max(previous_progress, progress)
                 previous_sample_t = sample["t"]
+                previous_sample_qpc = sample["qpc"]
             base_distance += course
 
     state.encoder_quarantine_samples = quarantine_count

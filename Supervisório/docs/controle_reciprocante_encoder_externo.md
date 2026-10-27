@@ -71,25 +71,45 @@ Cada tentativa lógica de RPM conserva as duas escritas de baixo nível já
 existentes em `cmd_rpm`; o limite de tempo total prevalece sobre a quantidade.
 
 Antes de cada tentativa, o logger usa a posição, a velocidade e a idade da
-última amostra aceita do CH3. O deslocamento é projetado por mais 200 ms na
-direção do movimento anterior e comparado ao limite seguro de `2 x curso`. A
-reversão é abortada imediatamente se a posição projetada alcançar esse limite
-ou se não houver posição válida para fazer a avaliação. Nos demais casos, uma
-falha transitória isolada não encerra o ensaio.
+última amostra aceita do CH3. A velocidade de segurança é a mesma OLS causal de
+250 ms usada pelo controlador; a velocidade curta publicada no pacote não é
+mais usada nessa decisão. O deslocamento é projetado por mais 200 ms na direção
+do movimento anterior e comparado ao limite seguro de `2 x curso`.
+
+O limite de `2 x curso` medido pela posição continua sendo uma falha física
+imediata. Já uma projeção acima desse limite, ou uma perda/transição recente do
+DLG, inicia uma contenção recuperável: o setpoint permanece em zero, o
+estimador de velocidade é reiniciado e nenhum `RUN`/RPM de reversão é enviado.
+A liberação exige pelo menos 150 ms e 20 amostras aceitas consecutivas, última
+amostra com no máximo 50 ms, uma nova OLS causal válida e projeção novamente
+segura. Uma nova perda reinicia a janela limpa. A recuperação compartilha o
+timeout total de 750 ms da reversão;
+somente o esgotamento desse prazo, a indisponibilidade prolongada da posição ou
+o limite físico real encerram o ensaio.
 
 O `a5_speed_events.log` registra:
 
 - `RECIP_ENCODER_REVERSE_POLICY`: limites aplicados naquele ensaio;
 - `RECIP_ENCODER_REVERSE_ATTEMPT` e `_RESULT`: comando `RUN` ou `RPM`, número
   da tentativa, retorno Modbus e estado do encoder;
-- `RECIP_ENCODER_REVERSE_POSITION_RISK`: posição e projeção que causaram a
-  parada preventiva;
+- `RECIP_ENCODER_REVERSE_RECOVERY_BEGIN`, `_RESET` e `_END`: início da
+  contenção, reinício por nova perda e resultado/tempo da recuperação;
+- `RECIP_ENCODER_REVERSE_POSITION_LIMIT`: posição real que alcançou o limite
+  físico de `2 x curso`;
 - `RECIP_ENCODER_REVERSE_COMMAND_FAILED command=RUN|RPM reason=...`: fase e
   motivo final, somente por esgotamento, timeout ou risco de posição;
 - `RECIP_SHADOW_END`: totais de tentativas sem resposta e reversões recuperadas.
 
-O `_I.csv` replica os contadores finais e a política fixa da reversão para
-distinguir recuperação transitória de uma execução sem falhas Modbus.
+O `_I.csv` replica os contadores finais, tempos de contenção e a política fixa
+da reversão para distinguir recuperação transitória de uma execução sem falhas
+Modbus. A interface mostra explicitamente quando está recuperando o encoder.
+
+Os intervalos entre `RECOVERY_BEGIN` e `RECOVERY_END` permanecem nos arquivos
+técnicos, mas são excluídos da força e da duração usada para a velocidade média
+dos strokes em `_M` e `_DP`. A correção dinâmica também marca esses intervalos
+em `recip_dynamic_offset.csv` e não os usa no cálculo do offset. O tempo real
+do ensaio não é congelado: o critério autoritativo de término continua sendo a
+distância física.
 
 O modelo de antecipação aplicado em todas as velocidades é:
 
@@ -148,7 +168,8 @@ reciprocante;encoder_estavel;` no `_I`.
 
 ## Evidência automatizada
 
-- 38 testes Python do pipeline/processamento aprovados;
+- 40 testes Python do pipeline/processamento aprovados (1 replay opcional sem
+  fixture local foi ignorado);
 - 3 suites C do `EncoderCore` aprovadas;
 - `a5_speed_logger --self-test` aprovado;
 - `a5_speed_logger --self-test-encoder-link` aprovado;

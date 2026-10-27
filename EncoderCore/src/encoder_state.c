@@ -53,6 +53,17 @@ void encoder_state_config_default(encoder_state_config_t *config)
     config->failure_timeout_s = 3.0;
 }
 
+void encoder_state_config_reciprocating(encoder_state_config_t *config)
+{
+    if (!config) return;
+    encoder_state_config_default(config);
+    /* The caller supplies twice the requested/effective speed already. The
+       legacy factor of five admitted ~200 mm/s jumps with a 40 mm/s limit.
+       Keep the angle noise allowance and gap-aware time, but no extra speed
+       multiplier. Other modes retain their existing default profile. */
+    config->innovation_factor = 1.0;
+}
+
 int encoder_calibration_validate(
     const encoder_calibration_t *calibration,
     char *reason,

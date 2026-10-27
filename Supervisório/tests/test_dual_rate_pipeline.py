@@ -368,12 +368,17 @@ class DualRatePipelineTests(unittest.TestCase):
                     "[00:00:03.015] RECIP_ENCODER_REVERSE_POLICY "
                     "run_max_attempts=5 rpm_max_logical_attempts=5 "
                     "retry_interval_ms=50.000 retry_timeout_ms=750.000 "
-                    "safety_lookahead_ms=200.000 stroke_limit_factor=2.000000\n"
+                    "safety_lookahead_ms=200.000 stroke_limit_factor=2.000000 "
+                    "recovery_clean_ms=150.000 recovery_min_samples=20 "
+                    "recovery_max_sample_age_ms=50.000\n"
                 )
                 stream.write(
                     "[00:00:03.020] RECIP_SHADOW_END valid=600 rejected=0 "
                     "sequence_gaps=0 reverse_run_failed_attempts=1 "
                     "reverse_rpm_failed_attempts=2 reverse_retry_recoveries=2 "
+                    "reverse_safety_holds=3 reverse_safety_recoveries=2 "
+                    "reverse_safety_timeouts=1 reverse_safety_hold_total_ms=640.0 "
+                    "reverse_safety_hold_max_ms=400.0 "
                     "complete=1 fault=NONE action_enabled=0\n"
                 )
             state = type("State", (), {
@@ -392,8 +397,16 @@ class DualRatePipelineTests(unittest.TestCase):
             self.assertEqual(summary["reverse_run_failed_attempts"], "1")
             self.assertEqual(summary["reverse_rpm_failed_attempts"], "2")
             self.assertEqual(summary["reverse_retry_recoveries"], "2")
+            self.assertEqual(summary["reverse_safety_holds"], "3")
+            self.assertEqual(summary["reverse_safety_recoveries"], "2")
+            self.assertEqual(summary["reverse_safety_timeouts"], "1")
             self.assertEqual(summary["reverse_policy_run_max_attempts"], "5")
             self.assertEqual(summary["reverse_policy_retry_timeout_ms"], "750.000")
+            self.assertEqual(summary["reverse_policy_recovery_clean_ms"], "150.000")
+            self.assertEqual(summary["reverse_policy_recovery_min_samples"], "20")
+            self.assertEqual(
+                summary["reverse_policy_recovery_max_sample_age_ms"], "50.000"
+            )
 
     def test_stop_diagnostics_consolidates_one_completed_stroke(self):
         with tempfile.TemporaryDirectory() as tmp:

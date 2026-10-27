@@ -190,6 +190,71 @@ static void test_crossing_interpolation(void)
     CHECK(!encoder_interpolate_crossing_qpc(200000, 4.0, 220000, 4.4, 5.0, &crossing));
 }
 
+static void test_reciprocating_gate_rejects_captured_wrap_spike(void)
+{
+    /* CH3, 2026-10-07 TESTE_1-1, idx 66989..67010 at 200 Hz.
+       idx 66992 previously reached relative_mm=8.249334 and falsely crossed
+       the 10 mm stroke guard. Values are calibrated angles from dlg.csv. */
+    const double angles[] = {
+        354.294406, 7.205653, 344.668000, 32.070068, 206.932828,
+        337.632738, 14.632812, 3.135872, 7.652527, 9.888043,
+        6.922563, 15.408400, 9.158079, 15.225909, 13.583488,
+        16.731460, 15.180286, 17.872030, 18.373880, 17.872030,
+        18.328258, 18.647617
+    };
+    encoder_state_config_t config;
+    encoder_state_t state;
+    encoder_state_output_t output;
+    double max_position = 0.0;
+    encoder_state_config_reciprocating(&config);
+    config.radius_mm = 5.0;
+    config.max_physical_speed_mm_s = 40.0;
+    CHECK(encoder_state_init(&state, &config, QPC_FREQ, NULL));
+    /* Replay twice with the same state storage to catch reset contamination. */
+    for (int run = 0; run < 2; ++run) {
+        encoder_state_reset(&state);
+        max_position = 0.0;
+        for (int i = 0; i < (int)(sizeof(angles) / sizeof(angles[0])); ++i) {
+            encoder_state_update_angle(&state, TICKS_MS(i * 5), angles[i],
+                ENCODER_INPUT_HAS_VALUE, &output);
+            if (i == 1 || i == 3) {
+                CHECK(output.sample_status == ENCODER_SAMPLE_IMPOSSIBLE_JUMP);
+                CHECK(!output.accepted);
+                CHECK(near(output.relative_mm, 0.0, 1.0e-9));
+            }
+            if (output.relative_mm > max_position) max_position = output.relative_mm;
+            CHECK(output.health != ENCODER_HEALTH_STALE_STOP);
+        }
+        CHECK(output.accepted);
+        CHECK(max_position < 2.2);
+        CHECK(near(output.relative_mm, 2.125218576, 1.0e-6));
+    }
+}
+
+static void test_reciprocating_gate_preserves_real_motion_and_stale_stop(void)
+{
+    encoder_state_config_t config;
+    encoder_state_t state;
+    encoder_state_output_t output;
+    double scale = 2.0 * 3.14159265358979323846 * 5.0 / 360.0;
+    encoder_state_config_reciprocating(&config);
+    config.radius_mm = 5.0;
+    config.max_physical_speed_mm_s = 40.0;
+    CHECK(encoder_state_init(&state, &config, QPC_FREQ, NULL));
+    for (int i = 0; i <= 110; ++i) {
+        /* Real 20 mm/s travel past 2x a 5 mm course must remain visible. */
+        CHECK(encoder_state_update_angle(&state, TICKS_MS(i * 5),
+            encoder_normalize_angle(350.0 + i * 0.1 / scale),
+            ENCODER_INPUT_HAS_VALUE, &output) == ENCODER_SAMPLE_ACCEPTED);
+    }
+    CHECK(near(output.relative_mm, 11.0, 1.0e-9));
+    CHECK(near(output.speed_mm_s, 20.0, 1.0e-9));
+    encoder_state_update_angle(&state, TICKS_MS(650), 0.0, 0, &output);
+    CHECK(output.health == ENCODER_HEALTH_STALE_STOP);
+    encoder_state_update_angle(&state, TICKS_MS(3550), 0.0, 0, &output);
+    CHECK(output.health == ENCODER_HEALTH_FAILED);
+}
+
 int main(void)
 {
     test_calibration();
@@ -201,6 +266,8 @@ int main(void)
     test_stationary_jitter_does_not_accumulate_distance();
     test_reversal_reports_physical_extreme();
     test_crossing_interpolation();
+    test_reciprocating_gate_rejects_captured_wrap_spike();
+    test_reciprocating_gate_preserves_real_motion_and_stale_stop();
     if (failures) {
         fprintf(stderr, "encoder_state_tests: %d failure(s)\n", failures);
         return 1;

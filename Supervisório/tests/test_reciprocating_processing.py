@@ -152,7 +152,7 @@ class ReciprocatingProcessingTests(unittest.TestCase):
                 w = csv.writer(f, lineterminator="\n")
                 w.writerow(["idx", "t_qpc", "t_s", "ch1", "ch2", "ch3", "ch4", "ch5", "ch6", "ch7", "ch8", "atrito", "err"])
                 for idx in range(8):
-                    force = -1.0 if idx < 4 else 1.0
+                    force = 100.0 if idx in (1, 2) else (-1.0 if idx < 4 else 1.0)
                     w.writerow([idx, idx, idx * 0.1, force, 0, 0, 0, 0, 0, 0, 0, force, 0])
 
             positions = [0, 1, 2, 3, 3, 2, 1, 0]
@@ -179,6 +179,8 @@ class ReciprocatingProcessingTests(unittest.TestCase):
 
             with open(os.path.join(tmp, "a5_speed_events.log"), "w", encoding="ascii") as f:
                 f.write("RECIP_ENCODER_TRIGGER idx=3 qpc=3 stroke=1 completed_segment=0\n")
+                f.write("RECIP_ENCODER_REVERSE_RECOVERY_BEGIN idx=3 command=RUN reason=RECENT_ENCODER_GAP qpc=1\n")
+                f.write("RECIP_ENCODER_REVERSE_RECOVERY_END idx=3 command=RUN result=RECOVERED qpc=2\n")
                 f.write("RECIP_SHADOW_PHYSICAL_REVERSAL idx=3 qpc=3 stroke=1 endpoint_error_mm=0\n")
                 f.write("RECIP_ENCODER_DONE idx=7 qpc=7 strokes=2 completed_segment=1\n")
 
@@ -204,8 +206,17 @@ class ReciprocatingProcessingTests(unittest.TestCase):
             self.assertEqual(len(rows), 2)
             self.assertEqual(rows[0]["VELOCIDADE_ALVO"], "5.000000")
             self.assertEqual(rows[1]["VELOCIDADE_ALVO"], "8.000000")
+            self.assertEqual(rows[0]["VELOCIDADE_MEDIA"], "15.000000")
             self.assertIn("VELOCIDADE_MEDIA", rows[0])
             self.assertNotIn("VELOCIDADE", rows[0])
+            self.assertEqual(
+                state.reciprocating_processing_summary["encoder_recovery_intervals"],
+                1,
+            )
+            self.assertAlmostEqual(
+                state.reciprocating_processing_summary["encoder_recovery_excluded_s"],
+                0.1,
+            )
 
             # A media reciprocante por distancia usa o modulo para impedir
             # cancelamento entre valores positivos e negativos. Os extremos
