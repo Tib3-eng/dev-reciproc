@@ -12,6 +12,8 @@ target_link_libraries(DLGlogger PRIVATE ws2_32)
 
 add_executable(dlg_logger_ipc
   src/dlg_logger_ipc.c
+  src/dlg_sample_clock.c
+  src/dlg_encoder_stream.c
   ../EncoderCore/src/encoder_state.c
   ../EncoderCore/src/encoder_control_protocol.c
 )
@@ -21,6 +23,31 @@ target_link_libraries(dlg_logger_ipc PRIVATE ws2_32 winmm)
 if (MSVC)
   target_compile_options(dlg_logger_ipc PRIVATE /W4)
 endif()
+
+add_executable(dlg_sample_clock_tests tests/dlg_sample_clock_tests.c src/dlg_sample_clock.c
+  ../EncoderCore/src/encoder_state.c
+  ../EncoderCore/src/encoder_control_protocol.c
+  ../EncoderCore/src/recip_encoder_controller.c)
+target_include_directories(dlg_sample_clock_tests PRIVATE src ../EncoderCore/include)
+if(MSVC)
+  target_compile_options(dlg_sample_clock_tests PRIVATE /W4)
+endif()
+enable_testing()
+add_test(NAME dlg_sample_clock_unit COMMAND dlg_sample_clock_tests)
+
+add_executable(dlg_encoder_stream_tests tests/dlg_encoder_stream_tests.c
+  src/dlg_encoder_stream.c src/dlg_sample_clock.c
+  ../EncoderCore/src/encoder_state.c ../EncoderCore/src/encoder_control_protocol.c)
+target_include_directories(dlg_encoder_stream_tests PRIVATE src ../EncoderCore/include)
+target_compile_definitions(dlg_encoder_stream_tests PRIVATE
+  DLG_STREAM_TESTING STREAM_QUEUE_CAPACITY=64 _CRT_SECURE_NO_WARNINGS)
+target_link_libraries(dlg_encoder_stream_tests PRIVATE ws2_32)
+if(MSVC)
+  target_compile_options(dlg_encoder_stream_tests PRIVATE /W4)
+endif()
+file(MAKE_DIRECTORY "${CMAKE_SOURCE_DIR}/../out/fifo_fix_20261027/stream_tests")
+add_test(NAME dlg_encoder_stream_unit COMMAND dlg_encoder_stream_tests
+  "${CMAKE_SOURCE_DIR}/../out/fifo_fix_20261027/stream_tests")
 
 add_executable(dlg_encoder_test src/dlg_encoder_test.c)
 target_compile_definitions(dlg_encoder_test PRIVATE WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)

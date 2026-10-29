@@ -410,6 +410,23 @@ static void test_shared_velocity_estimator_reset(void){
         &controller) - 5.0) < 1.0e-9);
 }
 
+static void test_source_age_cannot_be_refreshed_by_missing_packets(void){
+    const unsigned valid=ENCODER_CONTROL_FLAG_ACCEPTED|ENCODER_CONTROL_FLAG_INITIALIZED;
+    recip_encoder_config_t config=config_for(121);
+    recip_encoder_controller_t controller;
+    recip_encoder_decision_t decision;
+    encoder_control_packet_t packet=make_packet(121,1,1000,0,0,0,valid,ENCODER_HEALTH_OK);
+    config.max_source_age_s=0.100;
+    CHECK(recip_encoder_controller_start(&controller,&config,1000,&packet,&decision));
+    packet=make_packet(121,2,1090,0,0,0,ENCODER_CONTROL_FLAG_INITIALIZED,ENCODER_HEALTH_DEGRADED);
+    CHECK(recip_encoder_controller_update(&controller,&packet,sizeof(packet),&decision)==RECIP_ENCODER_ACTION_NONE);
+    CHECK(recip_encoder_controller_tick(&controller,1100,&decision)==RECIP_ENCODER_ACTION_NONE);
+    CHECK(recip_encoder_controller_tick(&controller,1101,&decision)==RECIP_ENCODER_ACTION_FAULT);
+    CHECK(decision.fault==RECIP_ENCODER_FAULT_ENCODER_TIMEOUT);
+    packet=make_packet(121,3,1102,1,1,1,valid,ENCODER_HEALTH_OK);
+    CHECK(recip_encoder_controller_update(&controller,&packet,sizeof(packet),&decision)==RECIP_ENCODER_ACTION_FAULT);
+}
+
 int main(void){
     test_nominal_fixed_endpoints_and_completion();
     test_quarantine_and_stroke_limit();
@@ -419,6 +436,7 @@ int main(void){
     test_physical_distance_completes_on_confirmed_extreme();
     test_causal_stopping_anticipation_and_clamp();
     test_shared_velocity_estimator_reset();
+    test_source_age_cannot_be_refreshed_by_missing_packets();
     if(failures){
         fprintf(stderr, "recip_encoder_controller_tests: %d falha(s)\n", failures);
         return 1;

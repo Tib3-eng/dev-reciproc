@@ -178,6 +178,10 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <Project>{F6DF4397-B9F4-393A-A36B-F56404EF4927}</Project>
       <Name>DLGlogger</Name>
     </ProjectReference>
+    <ProjectReference Include="C:\Users\nicol\Desktop\DevReciproc\DLG4000\build_vs2022\dlg_encoder_stream_tests.vcxproj">
+      <Project>{967BF668-8C22-3A49-8364-706B22C10FFF}</Project>
+      <Name>dlg_encoder_stream_tests</Name>
+    </ProjectReference>
     <ProjectReference Include="C:\Users\nicol\Desktop\DevReciproc\DLG4000\build_vs2022\dlg_encoder_test.vcxproj">
       <Project>{E7188CA2-5B70-3F72-AB76-50AD6BEB4ACA}</Project>
       <Name>dlg_encoder_test</Name>
@@ -185,6 +189,10 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ProjectReference Include="C:\Users\nicol\Desktop\DevReciproc\DLG4000\build_vs2022\dlg_logger_ipc.vcxproj">
       <Project>{2B137CB1-2C76-3A12-9334-23A07FD61C9A}</Project>
       <Name>dlg_logger_ipc</Name>
+    </ProjectReference>
+    <ProjectReference Include="C:\Users\nicol\Desktop\DevReciproc\DLG4000\build_vs2022\dlg_sample_clock_tests.vcxproj">
+      <Project>{DF80CD7F-D003-3A25-89BF-7088FA6C851C}</Project>
+      <Name>dlg_sample_clock_tests</Name>
     </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

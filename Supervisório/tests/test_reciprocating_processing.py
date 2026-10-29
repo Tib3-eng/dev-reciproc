@@ -139,6 +139,17 @@ class ReciprocatingProcessingTests(unittest.TestCase):
                 rows = list(csv.DictReader(f, delimiter=";"))
             self.assertEqual([int(row["idx"]) for row in rows], list(range(6)))
 
+    def test_rejects_equal_indices_with_different_acquisition_times(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dlg=os.path.join(tmp,"dlg.csv")
+            enc=os.path.join(tmp,"encoder_state.csv")
+            Path(dlg).write_text("idx,t_qpc,t_s\n0,1000,0\n",encoding="ascii")
+            Path(enc).write_text("idx,t_qpc,t_s\n0,1001,0\n",encoding="ascii")
+            state=SimpleNamespace(dlg_csv=dlg,encoder_state_csv=enc,
+                drive_csv=os.path.join(tmp,"drive.csv"),force_normal_n=1.0)
+            with self.assertRaisesRegex(RuntimeError,"alinhamento temporal"):
+                orch._rebuild_reciprocating_csv_from_logs(state,1.0,10.0,5.0)
+
     def test_m_uses_one_target_speed_per_completed_stroke(self):
         with tempfile.TemporaryDirectory() as tmp:
             dlg = os.path.join(tmp, "dlg.csv")

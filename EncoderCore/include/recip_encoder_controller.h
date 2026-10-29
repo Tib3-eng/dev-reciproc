@@ -45,6 +45,7 @@ typedef struct {
     double target_band_mm;
     double reversal_hysteresis_mm;
     double encoder_timeout_s;
+    double max_source_age_s; /* 0: legacy; receipt-driven feedback uses 0.100 s */
     double stroke_timeout_s;
     int position_filter_samples;
     int initial_direction;
@@ -86,6 +87,7 @@ typedef struct {
     uint64_t last_sequence;
     int64_t qpc_frequency;
     int64_t last_packet_qpc;
+    int64_t last_accepted_packet_qpc;
     int64_t stroke_started_qpc;
     double home_mm;
     double far_mm;

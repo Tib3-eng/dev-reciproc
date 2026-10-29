@@ -37,6 +37,10 @@ int main(void){
     CHECK(packet.flags == (ENCODER_CONTROL_FLAG_ACCEPTED |
                            ENCODER_CONTROL_FLAG_INITIALIZED |
                            ENCODER_CONTROL_FLAG_REVERSAL));
+    CHECK(encoder_control_packet_source_age_s(&packet,506,1000) > 0.0549);
+    CHECK(encoder_control_packet_source_age_s(&packet,506,1000) < 0.0551);
+    CHECK(encoder_control_packet_source_age_s(&packet,455,1000) < 0.0);
+    CHECK(encoder_control_packet_source_age_s(&packet,506,0) < 0.0);
     CHECK(encoder_control_packet_validate(&packet, sizeof(packet), 124u, 6u) ==
           ENCODER_CONTROL_PACKET_BAD_SESSION);
     CHECK(encoder_control_packet_validate(&packet, sizeof(packet), 123u, 7u) ==

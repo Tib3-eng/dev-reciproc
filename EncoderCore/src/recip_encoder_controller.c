@@ -56,6 +56,7 @@ static int valid_config(const recip_encoder_config_t *config){
            isfinite(config->reversal_hysteresis_mm) && config->reversal_hysteresis_mm > 0.0 &&
            config->reversal_hysteresis_mm < config->course_mm &&
            isfinite(config->encoder_timeout_s) && config->encoder_timeout_s > 0.0 &&
+           isfinite(config->max_source_age_s) && config->max_source_age_s >= 0.0 &&
            isfinite(config->stroke_timeout_s) && config->stroke_timeout_s > 0.0 &&
            config->position_filter_samples >= 1 &&
            config->position_filter_samples <= RECIP_ENCODER_POSITION_FILTER_CAPACITY &&
@@ -299,6 +300,7 @@ int recip_encoder_controller_start(
     controller->last_sequence = first_packet->sequence;
     controller->qpc_frequency = qpc_frequency;
     controller->last_packet_qpc = first_packet->qpc;
+    controller->last_accepted_packet_qpc = first_packet->qpc;
     controller->stroke_started_qpc = first_packet->qpc;
     controller->home_mm = first_packet->relative_mm;
     controller->far_mm = controller->home_mm +
@@ -340,6 +342,11 @@ recip_encoder_action_t recip_encoder_controller_tick(
     }
     encoder_age_s = (double)(now_qpc - controller->last_packet_qpc) /
                     (double)controller->qpc_frequency;
+    if(controller->config.max_source_age_s > 0.0 &&
+       (double)(now_qpc - controller->last_accepted_packet_qpc) /
+           (double)controller->qpc_frequency > controller->config.max_source_age_s){
+        return fail_controller(controller, RECIP_ENCODER_FAULT_ENCODER_TIMEOUT, decision);
+    }
     if(encoder_age_s > controller->config.encoder_timeout_s){
         return fail_controller(controller, RECIP_ENCODER_FAULT_ENCODER_TIMEOUT, decision);
     }
@@ -397,6 +404,7 @@ recip_encoder_action_t recip_encoder_controller_update(
         return RECIP_ENCODER_ACTION_NONE;
     }
     controller->last_raw_position_mm = packet->relative_mm;
+    controller->last_accepted_packet_qpc = packet->qpc;
     velocity_push(controller, packet->qpc, packet->relative_mm);
     position = filter_position(controller, packet->relative_mm);
     controller->last_position_mm = position;

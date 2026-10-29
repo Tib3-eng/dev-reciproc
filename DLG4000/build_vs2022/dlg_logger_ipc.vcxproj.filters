@@ -4,6 +4,12 @@
     <ClCompile Include="C:\Users\nicol\Desktop\DevReciproc\DLG4000\src\dlg_logger_ipc.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="C:\Users\nicol\Desktop\DevReciproc\DLG4000\src\dlg_sample_clock.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\nicol\Desktop\DevReciproc\DLG4000\src\dlg_encoder_stream.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="C:\Users\nicol\Desktop\DevReciproc\EncoderCore\src\encoder_state.c">
       <Filter>Source Files</Filter>
     </ClCompile>

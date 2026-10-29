@@ -31,6 +31,36 @@ class _FakeProcess:
 
 
 class DualRatePipelineTests(unittest.TestCase):
+    def test_dlg_exit_before_origin_never_sends_drive_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths={name:os.path.join(tmp,filename) for name,filename in {
+                "dlg_csv":"dlg.csv","drive_csv":"drive.csv","turn_dist_csv":"out_DP.csv",
+                "turn_vp_csv":"out_M.csv","merge_csv":"out_T.csv","schedule_csv":"schedule.csv",
+            }.items()}
+            created=[]
+            def fake_popen(cmd,**kwargs):
+                proc=_FakeProcess(cmd,**kwargs)
+                proc.poll=lambda:proc.returncode
+                created.append(proc)
+                return proc
+            def data_failed(*args,**kwargs):
+                created[0].returncode=2
+                return False
+            executables=dict(dlg_exe="dlg_logger_ipc.exe",drive_exe="a5_speed_logger.exe",
+                             merge_exe=None,missing=[])
+            with mock.patch.object(orch,"check_executables",return_value=executables), \
+                 mock.patch.object(orch.subprocess,"Popen",side_effect=fake_popen), \
+                 mock.patch.object(orch,"_wait_ready",return_value=True), \
+                 mock.patch.object(orch,"_wait_data_ready",side_effect=data_failed), \
+                 mock.patch.object(orch,"_send_start") as start, \
+                 mock.patch.object(orch,"_send_ipc"), \
+                 mock.patch.object(orch.time,"sleep"):
+                with self.assertRaisesRegex(RuntimeError,"DLG encerrou"):
+                    orch.start_external_run(repo_root=tmp,out_paths=paths,
+                        schedule=[(10,1.0)],duration_s=1.0)
+            self.assertEqual(start.call_count,1)
+            self.assertIs(start.call_args.args[0],created[0])
+
     def test_ui_builds_stage_durations_before_continuous_deadline(self):
         source = (SUPERVISOR_DIR / "novo_tribometro.py").read_text(encoding="utf-8")
         start = source.index("def start_acquisition():")
@@ -151,6 +181,8 @@ class DualRatePipelineTests(unittest.TestCase):
             self.assertNotIn("--encoder-target-mm", drive_cmd)
             self.assertNotIn("--encoder-control-port", dlg_cmd)
             self.assertNotIn("--encoder-session", dlg_cmd)
+            self.assertNotIn("--encoder-acquisition-clock", dlg_cmd)
+            self.assertNotIn("--recip-source-max-age-ms", drive_cmd)
             self.assertNotIn("--self-test-encoder-link", drive_cmd)
             self.assertEqual(state.continuous_encoder_status, "aguardando_alvo")
 
@@ -302,6 +334,8 @@ class DualRatePipelineTests(unittest.TestCase):
             self.assertIn("--encoder-control-port", dlg_cmd)
             self.assertNotIn("--compat-out", dlg_cmd)
             self.assertIn("--recip-encoder-control", drive_cmd)
+            self.assertIn("--encoder-acquisition-clock", dlg_cmd)
+            self.assertEqual(drive_cmd[drive_cmd.index("--recip-source-max-age-ms") + 1], "100.000")
             self.assertIn("--command-only", drive_cmd)
             self.assertNotIn("--recip-encoder-shadow", drive_cmd)
             self.assertIn("--recip-shadow-physical-distance", drive_cmd)

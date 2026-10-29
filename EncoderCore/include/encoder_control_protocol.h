@@ -55,6 +55,11 @@ typedef enum {
 
 uint32_t encoder_control_crc32(const void *data, size_t size);
 
+/* Age includes pre-publication acquisition delay and age of last accepted
+   measurement. Negative means invalid/future clock; callers must not use it. */
+double encoder_control_packet_source_age_s(
+    const encoder_control_packet_t *packet, int64_t now_qpc, int64_t frequency);
+
 int encoder_control_packet_build(
     encoder_control_packet_t *packet,
     uint64_t session_id,

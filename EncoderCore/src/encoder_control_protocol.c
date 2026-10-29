@@ -3,6 +3,13 @@
 #include <math.h>
 #include <string.h>
 
+double encoder_control_packet_source_age_s(
+    const encoder_control_packet_t *packet, int64_t now_qpc, int64_t frequency){
+    if(!packet || frequency <= 0 || packet->qpc <= 0 || now_qpc < packet->qpc ||
+       !isfinite(packet->accepted_age_s) || packet->accepted_age_s < 0.0) return -1.0;
+    return (double)(now_qpc-packet->qpc)/(double)frequency + packet->accepted_age_s;
+}
+
 uint32_t encoder_control_crc32(const void *data, size_t size){
     const unsigned char *bytes = (const unsigned char *)data;
     uint32_t crc = 0xFFFFFFFFu;

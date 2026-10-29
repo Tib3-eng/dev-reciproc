@@ -55,8 +55,10 @@ Resumo de funcoes:
 #include <share.h>
 #include <stdarg.h>
 #include <math.h>
+#include <limits.h>
 #include "encoder_state.h"
 #include "encoder_control_protocol.h"
+#include "dlg_encoder_stream.h"
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -801,35 +803,8 @@ Entradas: Parametros declarados na assinatura.
 Retorno: Retorna valor conforme contrato da funcao.
 Efeitos colaterais: Pode alterar estado interno, IO ou logs conforme implementacao.
 */
-static ipc_cmd_t ipc_poll_command(int use_ipc){
-    static char pending[256];
-    static size_t pending_len = 0;
-    if(!use_ipc) return IPC_CMD_NONE;
-
-    HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
-    if(h == NULL || h == INVALID_HANDLE_VALUE) return IPC_CMD_NONE;
-
-    DWORD avail = 0;
-    if(!PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL) || avail == 0){
-        return IPC_CMD_NONE;
-    }
-
-    char chunk[128];
-    DWORD to_read = (avail < (DWORD)(sizeof(chunk) - 1)) ? avail : (DWORD)(sizeof(chunk) - 1);
-    DWORD got = 0;
-    if(!ReadFile(h, chunk, to_read, &got, NULL) || got == 0){
-        return IPC_CMD_NONE;
-    }
-    chunk[got] = 0;
-
-    if(got + pending_len >= sizeof(pending)){
-        pending_len = 0;
-    }
-    memcpy(pending + pending_len, chunk, got);
-    pending_len += got;
-    pending[pending_len] = 0;
-
-    for(size_t i = 0; i < pending_len; ++i){
+static ipc_cmd_t ipc_take_pending(char *pending,size_t *pending_len){
+    for(size_t i = 0; i < *pending_len; ++i){
         if(pending[i] != '\n') continue;
 
         size_t line_len = i;
@@ -843,10 +818,10 @@ static ipc_cmd_t ipc_poll_command(int use_ipc){
         line[copy_len] = 0;
         trim(line);
 
-        size_t remain = pending_len - (i + 1);
+        size_t remain = *pending_len - (i + 1);
         memmove(pending, pending + i + 1, remain);
-        pending_len = remain;
-        pending[pending_len] = 0;
+        *pending_len = remain;
+        pending[*pending_len] = 0;
 
         if(_stricmp(line, "STOP") == 0) return IPC_CMD_STOP;
         if(_stricmp(line, "PAUSE") == 0) return IPC_CMD_PAUSE;
@@ -856,6 +831,39 @@ static ipc_cmd_t ipc_poll_command(int use_ipc){
     }
 
     return IPC_CMD_NONE;
+}
+
+static ipc_cmd_t ipc_poll_command(int use_ipc){
+    static char pending[256];
+    static size_t pending_len = 0;
+    ipc_cmd_t command;
+    HANDLE h;
+    DWORD avail=0,got=0,to_read;
+    char chunk[128];
+    if(!use_ipc) return IPC_CMD_NONE;
+    command=ipc_take_pending(pending,&pending_len);
+    if(command!=IPC_CMD_NONE) return command;
+    h=GetStdHandle(STD_INPUT_HANDLE);
+    if(h==NULL || h==INVALID_HANDLE_VALUE) return IPC_CMD_NONE;
+    if(!PeekNamedPipe(h,NULL,0,NULL,&avail,NULL) || avail==0) return IPC_CMD_NONE;
+    to_read=avail<(DWORD)(sizeof(chunk)-1)?avail:(DWORD)(sizeof(chunk)-1);
+    if(!ReadFile(h,chunk,to_read,&got,NULL) || got==0) return IPC_CMD_NONE;
+    if(got+pending_len>=sizeof(pending)) pending_len=0;
+    memcpy(pending+pending_len,chunk,got);pending_len+=got;pending[pending_len]=0;
+    return ipc_take_pending(pending,&pending_len);
+}
+
+static int stream_poll_command(int use_ipc){
+    ipc_cmd_t command=ipc_poll_command(use_ipc);
+    if(use_ipc && command==IPC_CMD_NONE){
+        HANDLE h=GetStdHandle(STD_INPUT_HANDLE);
+        DWORD avail=0;
+        if(h!=NULL && h!=INVALID_HANDLE_VALUE && GetFileType(h)==FILE_TYPE_PIPE &&
+           !PeekNamedPipe(h,NULL,0,NULL,&avail,NULL) && GetLastError()==ERROR_BROKEN_PIPE){
+            return IPC_CMD_STOP;
+        }
+    }
+    return (int)command;
 }
 
 /*
@@ -876,6 +884,7 @@ static void print_usage(void){
     puts("                [--encoder-state-out <csv> --encoder-radius-mm <mm>]");
     puts("                [--encoder-max-speed-mm-s <mm/s> --encoder-target-mm <mm>]");
     puts("                [--encoder-control-port <localhost_udp> --encoder-session <u64>]");
+    puts("                [--encoder-acquisition-clock] (reciprocante IPC autoritativo)");
     puts("                [--encoder-reciprocating-shadow]");
     puts("                [--self-test-decimation]");
     puts("                [--self-test-encoder-state]");
@@ -1144,6 +1153,7 @@ int main(int argc, char **argv){
     int self_test_decimation = 0;
     int self_test_encoder_state = 0;
     int encoder_reciprocating_shadow = 0;
+    int encoder_acquisition_clock = 0;
 
     for(int i = 1; i < argc; ++i){
         if(strcmp(argv[i], "--out") == 0 && i + 1 < argc){ out_path = argv[++i]; continue; }
@@ -1163,6 +1173,7 @@ int main(int argc, char **argv){
         if(strcmp(argv[i], "--encoder-control-port") == 0 && i + 1 < argc){ encoder_control_port = (uint16_t)atoi(argv[++i]); continue; }
         if(strcmp(argv[i], "--encoder-session") == 0 && i + 1 < argc){ encoder_session_id = _strtoui64(argv[++i], NULL, 10); continue; }
         if(strcmp(argv[i], "--encoder-reciprocating-shadow") == 0){ encoder_reciprocating_shadow = 1; continue; }
+        if(strcmp(argv[i], "--encoder-acquisition-clock") == 0){ encoder_acquisition_clock = 1; continue; }
         if(strcmp(argv[i], "--self-test-decimation") == 0){ self_test_decimation = 1; continue; }
         if(strcmp(argv[i], "--self-test-encoder-state") == 0){ self_test_encoder_state = 1; continue; }
         if(strcmp(argv[i], "--ipc") == 0){ use_ipc = 1; continue; }
@@ -1197,7 +1208,8 @@ int main(int argc, char **argv){
         puts("SELF_TEST_ENCODER_OK rate=200 target_mm=10 crossing_s=2 speed_mm_s=5");
         return 0;
     }
-    if(!out_path || duration_s <= 0 || rate_hz <= 0){
+    if(!out_path || !isfinite(duration_s) || !isfinite(rate_hz) ||
+       duration_s <= 0 || rate_hz <= 0 || duration_s*rate_hz > INT_MAX){
         print_usage();
         return 1;
     }
@@ -1218,6 +1230,11 @@ int main(int argc, char **argv){
     if(encoder_reciprocating_shadow &&
        (!encoder_state_out_path || encoder_control_port == 0 || encoder_session_id == 0)){
         fprintf(stderr, "Sombra reciprocante exige estado do encoder e enlace UDP local.\n");
+        return 1;
+    }
+    if(encoder_acquisition_clock && (!encoder_reciprocating_shadow || !use_ipc ||
+                                    encoder_control_port == 0 || encoder_session_id == 0)){
+        fprintf(stderr, "Relogio de aquisicao exige reciprocante, --ipc e enlace do encoder.\n");
         return 1;
     }
     if((encoder_control_port == 0) != (encoder_session_id == 0) ||
@@ -1343,7 +1360,7 @@ int main(int argc, char **argv){
     FILE *f_compat = NULL;
     FILE *f_encoder = NULL;
     SOCKET encoder_control_socket = INVALID_SOCKET;
-    struct sockaddr_in encoder_control_addr;
+    struct sockaddr_in encoder_control_addr = {0};
     uint64_t encoder_control_sequence = 0;
     uint64_t encoder_control_sent = 0;
     uint64_t encoder_control_send_errors = 0;
@@ -1454,6 +1471,9 @@ int main(int argc, char **argv){
     }
 
     if(use_ipc){
+        /* Do not let fgets prefetch subsequent STOP/PAUSE into a CRT buffer
+           invisible to the Win32 pipe reader used during capture. */
+        setvbuf(stdin,NULL,_IONBF,0);
         puts("READY");
         fflush(stdout);
         ev_logf("READY emitted; waiting START.");
@@ -1480,6 +1500,69 @@ int main(int argc, char **argv){
             return 1;
         }
         ev_logf("IPC START received.");
+    }
+
+    if(encoder_acquisition_clock){
+        dlg_encoder_stream_config_t stream = {0};
+        char timing_path[MAX_PATH];
+        const char *slash = strrchr(out_path, '\\');
+        const char *forward_slash = strrchr(out_path, '/');
+        size_t directory_length;
+        FILE *timing_file;
+        int result;
+        if(forward_slash && (!slash || forward_slash > slash)) slash = forward_slash;
+        directory_length = slash ? (size_t)(slash - out_path + 1) : 0u;
+        if(directory_length + sizeof("dlg_acquisition.csv") > sizeof(timing_path)){
+            fprintf(stderr,"Caminho da trilha de aquisicao muito longo.\n");
+            result = 2;
+        }else{
+            memcpy(timing_path,out_path,directory_length);
+            strcpy(timing_path + directory_length,"dlg_acquisition.csv");
+            timing_file = (_stricmp(timing_path,out_path)==0 ||
+                           _stricmp(timing_path,encoder_state_out_path)==0 ||
+                           (compat_out_path && _stricmp(timing_path,compat_out_path)==0))
+                ? NULL : _fsopen(timing_path,"w",_SH_DENYNO);
+            if(!timing_file){
+                ev_logf("ERROR open acquisition timing archive failed.");
+                result = 2;
+            }else{
+                setvbuf(timing_file,NULL,_IONBF,0);
+                stream.acquisition_socket = s;
+                stream.control_socket = encoder_control_socket;
+                stream.control_address = encoder_control_addr;
+                stream.data_file = f;
+                stream.encoder_file = f_encoder;
+                stream.compat_file = f_compat;
+                stream.timing_file = timing_file;
+                stream.compat_decimation = compat_decimation;
+                stream.total_rows = (int)(duration_s * rate_hz + 0.5);
+                stream.use_ipc = use_ipc;
+                stream.rate_hz = rate_hz;
+                stream.force_normal_n = force_normal_n;
+                stream.frequency = qpc_freq;
+                stream.session = encoder_session_id;
+                memcpy(stream.slope,slope,sizeof(slope));
+                memcpy(stream.intercept,intercept,sizeof(intercept));
+                memcpy(stream.calibrated,has_calib,sizeof(has_calib));
+                memcpy(stream.normalize_degrees,normalizeDegrees,sizeof(normalizeDegrees));
+                stream.encoder = &encoder_state;
+                stream.poll_command = stream_poll_command;
+                stream.log_event = ev_logf;
+                timeBeginPeriod(1);
+                result = dlg_encoder_stream_run(&stream);
+                timeEndPeriod(1);
+                if(fclose(timing_file) != 0) result = 2;
+            }
+        }
+        stop_acq(s,&addr);
+        if(encoder_control_socket != INVALID_SOCKET) closesocket(encoder_control_socket);
+        closesocket(s);
+        WSACleanup();
+        if(fclose(f) != 0) result = 2;
+        if(f_compat && fclose(f_compat) != 0) result = 2;
+        if(f_encoder && fclose(f_encoder) != 0) result = 2;
+        ev_close();
+        return result;
     }
 
     int total_samples = (int)(duration_s * rate_hz + 0.5);

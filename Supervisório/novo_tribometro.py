@@ -4666,6 +4666,9 @@ def start_acquisition():
             if reciprocante_var.get():
                 f.write("Controle encoder externo reciprocante,ativo e autoritativo,\n")
                 f.write("Fonte inversao e termino,encoder externo CH3 no DLG a 200 Hz,\n")
+                f.write("Relogio aquisicao reciprocante,RECEIVE_DRIVEN_V1,\n")
+                f.write("Limite idade total feedback encoder [ms],100,\n")
+                f.write("Trilha temporal aquisicao,DadosDev/dlg_acquisition.csv,\n")
                 f.write("Dependencia de posicao/RPM do Drive,removida,\n")
                 f.write("Metodo atrito medio _DP,media do modulo; minimo e maximo assinados,\n")
             else:

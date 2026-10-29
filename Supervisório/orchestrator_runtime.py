@@ -1382,6 +1382,8 @@ def start_external_run(
             "--encoder-session", str(shadow_session),
             "--encoder-reciprocating-shadow",
         ])
+        if reciprocating_encoder_control_enabled:
+            dlg_cmd.append("--encoder-acquisition-clock")
     if not reciprocating and continuous_target_mm > 0.0:
         if raio_mm <= 0.0 or not encoder_speed_limits:
             raise ValueError("Modo continuo pelo encoder exige raio e velocidade alvo validos.")
@@ -1431,6 +1433,8 @@ def start_external_run(
         drive_cmd.append("--command-only")
     if strict_drive_setup:
         drive_cmd.append("--strict-setup")
+    if reciprocating_encoder_control_enabled:
+        drive_cmd.extend(["--recip-source-max-age-ms", "100.000"])
     if reciprocating:
         drive_cmd.extend([
             "--reciprocating",
@@ -1488,6 +1492,8 @@ def start_external_run(
         # reais antes de iniciar cronometro e pode abortar de forma controlada
         # se o DLG nao estabilizar.
         _wait_data_ready(dlg_proc, timeout_s=6.0)
+        if dlg_proc.poll() is not None:
+            raise RuntimeError("Logger DLG encerrou antes de validar a origem do encoder.")
         _send_start(drive_proc)
     except Exception:
         # Evita processos zumbis se startup falhar em qualquer etapa.
@@ -1879,7 +1885,7 @@ def run_reciprocating_offset_capture(
                      not in_encoder_recovery else 0,
             ])
 
-    for name in ("a5_speed_events.log", "dlg_logger_events.log", "drive.csv", "schedule.csv", "encoder_state.csv"):
+    for name in ("a5_speed_events.log", "dlg_logger_events.log", "drive.csv", "schedule.csv", "encoder_state.csv", "dlg_acquisition.csv"):
         src = os.path.join(work_dir, name)
         if os.path.exists(src):
             shutil.copy2(src, os.path.join(dev_dir, f"recip_offset_{name}"))
@@ -2443,6 +2449,7 @@ def _move_dev_artifacts(state: RunState) -> None:
         (os.path.join(rep_dir, "dlg_logger_events.log"), os.path.join(dev_dir, "dlg_logger_events.log")),
         (os.path.join(rep_dir, "a5_speed_events.log"), os.path.join(dev_dir, "a5_speed_events.log")),
         (os.path.join(rep_dir, "recip_stop_diagnostics.csv"), os.path.join(dev_dir, "recip_stop_diagnostics.csv")),
+        (os.path.join(rep_dir, "dlg_acquisition.csv"), os.path.join(dev_dir, "dlg_acquisition.csv")),
     ])
     if state.dlg_compat_csv and state.dlg_compat_csv != state.dlg_csv:
         pairs.append((state.dlg_compat_csv, os.path.join(dev_dir, "dlg_compat_50hz.csv")))
@@ -2506,6 +2513,7 @@ def finalize_dev_artifacts_after_run(state: RunState, retries: int = 20, sleep_s
     pending = [
         (state.dlg_csv, os.path.join(dev_dir, "dlg.csv")),
         (state.drive_csv, os.path.join(dev_dir, "drive.csv")),
+        (os.path.join(rep_dir, "dlg_acquisition.csv"), os.path.join(dev_dir, "dlg_acquisition.csv")),
     ]
     if state.dlg_compat_csv and state.dlg_compat_csv != state.dlg_csv:
         pending.append((state.dlg_compat_csv, os.path.join(dev_dir, "dlg_compat_50hz.csv")))
@@ -3029,6 +3037,9 @@ def _rebuild_reciprocating_csv_from_logs(
                 raise RuntimeError("DLG e encoder externo perderam alinhamento por indice.")
             t_s = as_float(dlg_row.get("t_s"))
             qpc = as_int(dlg_row.get("t_qpc"))
+            enc_qpc = as_int(enc_row.get("t_qpc"))
+            if qpc is not None and enc_qpc is not None and qpc != enc_qpc:
+                raise RuntimeError("DLG e encoder externo perderam alinhamento temporal.")
             accepted = as_int(enc_row.get("accepted"), 0) == 1
             dlg_ok = as_int(dlg_row.get("err"), 1) == 0
             relative_mm = as_float(enc_row.get("relative_mm"))

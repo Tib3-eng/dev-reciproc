@@ -1,5 +1,10 @@
 # Controle reciprocante pelo encoder externo
 
+Atualizacao de 27/10/2026: o reciprocante autoritativo usa recepcao e feedback
+independentes da escrita em disco para eliminar envelhecimento na fila do DLG.
+Detalhes de timestamps, arquivos e protecoes estao em
+[Relogio de aquisicao](reciprocante_relogio_aquisicao.md).
+
 ## Estado atual: controle autoritativo validado em bancada
 
 O programa principal não requisita mais `P0B-09` (posição) nem `P0B-00`

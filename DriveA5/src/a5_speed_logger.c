@@ -401,6 +401,7 @@ typedef struct {
     double course_mm;
     double total_mm;
     double stroke_timeout_s;
+    double max_source_age_s;
     int stop_compensation_enabled;
     double stop_model_slope_s;
     double stop_margin_mm;
@@ -461,6 +462,8 @@ typedef struct {
     double physical_course_min_mm;
     double physical_course_max_mm;
 } recip_shadow_t;
+
+static int64_t qpc_now_ticks(void);
 
 static int recip_shadow_encoder_quality_ready(
     const recip_shadow_t *shadow,
@@ -741,7 +744,8 @@ static void recip_shadow_log_decision(
                 decision->path_progress_mm,
                 decision->endpoint_error_mm, observation_latency_ms,
                 shadow->action_enabled);
-        if(shadow->action_enabled && !shadow->action_pending){
+        if(shadow->action_enabled && (!shadow->action_pending ||
+           shadow->pending_decision.action != RECIP_ENCODER_ACTION_FAULT)){
             shadow->pending_decision = *decision;
             shadow->pending_sequence = sequence;
             shadow->pending_packet_qpc = packet_qpc;
@@ -756,7 +760,8 @@ static void recip_shadow_log_decision(
                 decision->position_mm, decision->target_mm,
                 decision->path_progress_mm, observation_latency_ms,
                 shadow->action_enabled);
-        if(shadow->action_enabled && !shadow->action_pending){
+        if(shadow->action_enabled && (!shadow->action_pending ||
+           shadow->pending_decision.action != RECIP_ENCODER_ACTION_FAULT)){
             shadow->pending_decision = *decision;
             shadow->pending_sequence = sequence;
             shadow->pending_packet_qpc = packet_qpc;
@@ -802,11 +807,24 @@ static void recip_shadow_drain(
             shadow->packets_rejected++;
             continue;
         }
-        shadow->packets_valid++;
         if(previous_sequence != 0u && packet.sequence > previous_sequence + 1u){
             shadow->sequence_gaps += packet.sequence - previous_sequence - 1u;
         }
         shadow->prestart_last_sequence = packet.sequence;
+        /* Source QPC precedes publication in the receive-driven logger.
+           Stale/future samples cannot establish an origin or refresh control. */
+        now_qpc = qpc_now_ticks();
+        if(shadow->max_source_age_s > 0.0 && packet.health != ENCODER_HEALTH_FAILED){
+            double source_age = encoder_control_packet_source_age_s(
+                &packet,now_qpc,qpc_frequency);
+            if(source_age < 0.0 || source_age > shadow->max_source_age_s){
+                shadow->encoder_clean_samples = 0u;
+                shadow->encoder_clean_since_qpc = 0;
+                shadow->packets_rejected++;
+                continue;
+            }
+        }
+        shadow->packets_valid++;
         {
             int encoder_sample_ok =
                 (packet.flags & ENCODER_CONTROL_FLAG_ACCEPTED) != 0u &&
@@ -876,6 +894,7 @@ static void recip_shadow_drain(
             config.total_mm = shadow->total_mm;
             config.tolerance_mm = shadow->tolerance_mm;
             config.encoder_timeout_s = 3.0;
+            config.max_source_age_s = shadow->max_source_age_s;
             config.stroke_timeout_s = shadow->stroke_timeout_s;
             config.initial_direction = shadow->forward_sign;
             config.stop_anticipation_enabled = shadow->stop_compensation_enabled;
@@ -942,6 +961,7 @@ static void recip_shadow_drain(
                 observation_latency_ms);
         }
     }
+    now_qpc = qpc_now_ticks();
     if(shadow->controller_started && !shadow->controller.faulted &&
        !shadow->controller.complete){
         recip_encoder_decision_t decision;
@@ -965,6 +985,11 @@ static int recip_shadow_take_pending(
     int *idx
 ){
     if(!shadow || !decision || !shadow->action_pending) return 0;
+    if(shadow->pending_decision.action == RECIP_ENCODER_ACTION_REVERSE &&
+       (shadow->controller.faulted || shadow->controller.complete)){
+        (void)recip_encoder_controller_tick(&shadow->controller,qpc_now_ticks(),
+                                           &shadow->pending_decision);
+    }
     *decision = shadow->pending_decision;
     if(sequence) *sequence = shadow->pending_sequence;
     if(packet_qpc) *packet_qpc = shadow->pending_packet_qpc;
@@ -1871,6 +1896,31 @@ static int run_internal_self_test(void){
         return 0;
     }
 
+    {
+        recip_shadow_t terminal_shadow={0};
+        recip_encoder_decision_t reverse={0},terminal={0},taken;
+        terminal_shadow.action_enabled=1;
+        reverse.action=RECIP_ENCODER_ACTION_REVERSE;
+        terminal.action=RECIP_ENCODER_ACTION_FAULT;
+        terminal.fault=RECIP_ENCODER_FAULT_ENCODER_TIMEOUT;
+        recip_shadow_log_decision(&terminal_shadow,&reverse,0,1,1000,0);
+        recip_shadow_log_decision(&terminal_shadow,&terminal,0,2,1101,101);
+        if(!recip_shadow_take_pending(&terminal_shadow,&taken,NULL,NULL,NULL) ||
+           taken.action!=RECIP_ENCODER_ACTION_FAULT){
+            puts("SELF-TEST FALHOU: falha de origem atras de inversao pendente.");return 0;
+        }
+        memset(&terminal_shadow,0,sizeof(terminal_shadow));
+        terminal_shadow.action_enabled=1;
+        terminal.action=RECIP_ENCODER_ACTION_COMPLETE;
+        terminal.fault=RECIP_ENCODER_FAULT_NONE;
+        recip_shadow_log_decision(&terminal_shadow,&reverse,0,1,1000,0);
+        recip_shadow_log_decision(&terminal_shadow,&terminal,0,2,1101,0);
+        if(!recip_shadow_take_pending(&terminal_shadow,&taken,NULL,NULL,NULL) ||
+           taken.action!=RECIP_ENCODER_ACTION_COMPLETE){
+            puts("SELF-TEST FALHOU: termino atras de inversao pendente.");return 0;
+        }
+    }
+
     puts(
         "SELF-TEST OK: parser IPC, unwrap P0B-09, limites, retry e recuperacao de reversao."
     );
@@ -2036,7 +2086,27 @@ static int run_encoder_control_link_self_test(void){
        delayed_thread_result != 1u ||
        origin_wait_ms < 20.0 || origin_wait_ms >= 500.0) goto cleanup;
 
-    printf("SELF-TEST ENCODER LINK OK: udp_loopback latency_us=%.3f session=OK sequence=OK stale=OK state_machine=OK delayed_origin_wait_ms=%.3f\n",
+    {
+        recip_shadow_t freshness_shadow={0};
+        freshness_shadow.active=1;
+        freshness_shadow.socket_handle=receiver;
+        freshness_shadow.session_id=session_id;
+        freshness_shadow.max_source_age_s=.100;
+        for(int trial=0;trial<3;++trial){
+            int64_t now=qpc_now_ticks();
+            int64_t source=trial==0?now-frequency.QuadPart/4:
+                           trial==1?now+frequency.QuadPart/4:now;
+            if(!encoder_control_packet_build(&sent_packet,session_id,4u+(uint64_t)trial,source,&output))goto cleanup;
+            if(sendto(sender,(const char *)&sent_packet,sizeof(sent_packet),0,
+                (const struct sockaddr *)&address,sizeof(address))!=sizeof(sent_packet))goto cleanup;
+            recip_shadow_drain(&freshness_shadow,qpc_now_ticks(),frequency.QuadPart,-1);
+            if(trial<2 && freshness_shadow.have_origin)goto cleanup;
+        }
+        if(!freshness_shadow.have_origin || freshness_shadow.origin_packet.sequence!=6u ||
+           freshness_shadow.packets_rejected!=2u)goto cleanup;
+    }
+
+    printf("SELF-TEST ENCODER LINK OK: udp_loopback latency_us=%.3f session=OK sequence=OK stale=OK source_age=OK state_machine=OK delayed_origin_wait_ms=%.3f\n",
            latency_us, origin_wait_ms);
     ok = 1;
 
@@ -2465,6 +2535,7 @@ static void print_usage(void){
     puts("                 status sem falha e 3 leituras validas de P0B-09.");
     puts("  --self-test valida o parser IPC sem acessar hardware.");
     puts("  --self-test-encoder-link valida UDP local/sessao/sequencia/stale sem hardware.");
+    puts("  --recip-source-max-age-ms <0..100> limita idade total do feedback (controle autoritativo).");
 }
 
 /*
@@ -2552,6 +2623,14 @@ int main(int argc, char **argv){
         if(strcmp(argv[i], "--recip-shadow-tol-mm") == 0 && i + 1 < argc){ recip_shadow.tolerance_mm = atof(argv[++i]); continue; }
         if(strcmp(argv[i], "--recip-shadow-total-mm") == 0 && i + 1 < argc){ recip_shadow.total_mm = atof(argv[++i]); continue; }
         if(strcmp(argv[i], "--recip-shadow-stroke-timeout-s") == 0 && i + 1 < argc){ recip_shadow.stroke_timeout_s = atof(argv[++i]); continue; }
+        if(strcmp(argv[i], "--recip-source-max-age-ms") == 0 && i + 1 < argc){
+            recip_shadow.max_source_age_s = atof(argv[++i]) / 1000.0;
+            if(!isfinite(recip_shadow.max_source_age_s) ||
+               recip_shadow.max_source_age_s <= 0.0 || recip_shadow.max_source_age_s > 0.1){
+                fprintf(stderr,"Idade maxima do encoder deve estar em (0,100] ms.\n");return 1;
+            }
+            continue;
+        }
         if(strcmp(argv[i], "--recip-shadow-forward-sign") == 0 && i + 1 < argc){
             recip_shadow.forward_sign = atoi(argv[++i]);
             recip_shadow.forward_sign_configured = recip_shadow.forward_sign != 0;
@@ -2618,6 +2697,10 @@ int main(int argc, char **argv){
         fprintf(stderr, "Controle/observacao do encoder exige --reciprocating.\n");
         return 1;
     }
+    if(recip_shadow.max_source_age_s > 0.0 && !recip_shadow.action_enabled){
+        fprintf(stderr,"Idade de origem exige controle reciprocante autoritativo.\n");
+        return 1;
+    }
     if(command_only && encoder_calibration){
         fprintf(stderr, "--command-only nao pode ser combinado com --encoder-calibration.\n");
         return 1;
@@ -2631,6 +2714,10 @@ int main(int argc, char **argv){
     ev_logf("START port=%s out=%s schedule=%s rate=%.3f duration=%.3f slave=%d baud=%d parity=%c ipc=%d setup=%d strict_setup=%d encoder_calibration=%d command_only=%d",
             port, out_path, sched_path, rate_hz, duration_s, slave, baud, parity, use_ipc, do_setup,
             strict_setup, encoder_calibration, command_only);
+    if(recip_shadow.max_source_age_s>0.0){
+        ev_logf("RECIP_SOURCE_AGE_POLICY max_age_ms=%.3f includes=acquisition_and_transport clock=RECEIVE_DRIVEN_V1",
+                1000.0*recip_shadow.max_source_age_s);
+    }
     if(encoder_calibration){
         ev_logf(
             "ENCODER_QPC_MODE valid_position=modbus_read_midpoint "
