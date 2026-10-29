@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "run_id": "exemplo-sim-senoidal-v1",
+  "simulation": true,
+  "curve": {
+    "profile": "sine_position",
+    "course_mm": 4.0,
+    "frequency_hz": 0.2,
+    "cycles": 2
+  },
+  "mechanics": {
+    "radius_mm": 10.0,
+    "ratio": 4.0
+  },
+  "serial": {
+    "port": "COM5",
+    "baud": 115200,
+    "parity": "E",
+    "slave_id": 1
+  },
+  "output": {
+    "directory": "C:/LATRIB/SenoidalDemo/DadosDev"
+  },
+  "safety": {
+    "watchdog_s": 40.0,
+    "source_max_age_ms": 100.0,
+    "course_limit_factor": 2.0
+  },
+  "force_normal_n": 10.0,
+  "distance_interval_mm": 1.0
+}

@@ -111,6 +111,15 @@ except Exception as e:
 # orchestrator_runtime centraliza a orquestracao do pipeline externo:
 # inicia/paralisa executaveis C, envia comandos IPC e realiza merge final.
 import orchestrator_runtime as orch
+from sinewave_ui import SinewavePanel
+
+
+def _is_reciprocating_mode():
+    # INTEGRACAO SENOIDAL: classificacao dos DADOS, nao selecao do controlador.
+    # O checkbox novo nao habilita o controlador de inversoes legado.
+    panel = globals().get('sinewave_panel')
+    return bool((panel and panel.selected()) or
+                ('reciprocante_var' in globals() and reciprocante_var.get()))
 
 # Execucao dos loggers C em background (DLG + Drive + merge)
 # Switch de modo: True usa pipeline externo (executaveis C); False usa fluxo da versao anterior em Python.
@@ -1489,7 +1498,7 @@ def _run_auto_tara_before_start(repo_root, exe_info):
     root.update_idletasks()
     final_body = "Coloque a carga e posicione o pino sobre o disco."
     final_button = "Em condicoes de iniciar ensaio"
-    if "reciprocante_var" in globals() and reciprocante_var.get():
+    if _is_reciprocating_mode():
         final_body += (
             "\n\nNo modo reciprocante, o proximo passo e a correcao dinamica "
             "no mesmo curso, sempre a 1 RPM no disco. O ensaio oficial vem depois."
@@ -2127,6 +2136,11 @@ def go_p():
 # - Finaliza o loop da interface Tkinter.
 def fechar_janela():
     global graph_render_job
+    # A finalizacao externa precisa terminar antes de fechar a janela. O
+    # encerramento do processo pai nao e usado como rotina normal de STOP.
+    if globals().get('sinewave_panel') and sinewave_panel.active:
+        sinewave_panel.stop()
+        return
     if monitor_mode_active:
         _stop_monitor_mode()
     try:
@@ -2248,7 +2262,7 @@ def salvar_arquivo():
     # Normaliza nomes para Windows (sem caracteres proibidos).
     identificador_modo = (
         "PoDr"
-        if "reciprocante_var" in globals() and reciprocante_var.get()
+        if _is_reciprocating_mode()
         else "PoD"
     )
     nome_pasta_execucao = orch.sanitize_folder_name(
@@ -2308,7 +2322,7 @@ def salvar_arquivo():
     # Arquivos finais visiveis ao usuario.
     caminho_arquivo_1 = os.path.join(caminho_pasta, f"{prefixo_arquivo}_I.csv")   # metadados do ensaio
     caminho_turn_dist_csv = os.path.join(caminho_pasta, f"{prefixo_arquivo}_DP.csv")
-    sufixo_movimento = "_M.csv" if ("reciprocante_var" in globals() and reciprocante_var.get()) else "_VP.csv"
+    sufixo_movimento = "_M.csv" if (_is_reciprocating_mode()) else "_VP.csv"
     caminho_turn_volta_csv = os.path.join(caminho_pasta, f"{prefixo_arquivo}{sufixo_movimento}")
     caminho_merge_csv = os.path.join(caminho_pasta, f"{prefixo_arquivo}_T.csv")
     caminho_graficos_png = os.path.join(caminho_pasta, f"{prefixo_arquivo}_G.png")
@@ -2495,7 +2509,7 @@ def atualiza_decorrido():
             text=(
                 "Tempo previsto concluido"
                 if theoretical_finished and
-                   "reciprocante_var" in globals() and reciprocante_var.get()
+                   _is_reciprocating_mode()
                 else "Tempo restante"
             )
         )
@@ -2504,7 +2518,7 @@ def atualiza_decorrido():
 
     try:
         if (
-            "reciprocante_var" in globals() and reciprocante_var.get() and
+            _is_reciprocating_mode() and
             external_run_state is not None
         ):
             progress = orch.refresh_reciprocating_progress(external_run_state)
@@ -4202,7 +4216,7 @@ def start_acquisition():
                                "Para iniciar um novo, clique em 'Parar'")
         return
 
-    if _warn_dlg_interference():
+    if not (globals().get('sinewave_panel') and sinewave_panel.selected() and sinewave_panel.simulation.get()) and _warn_dlg_interference():
         return
 
     ###################  VALIDAÇÕES PARA QUE O PROGRAMA INICIE:
@@ -4315,6 +4329,13 @@ def start_acquisition():
                                f"O campo '{nome_caixa_forca}' deve ser um número.")
         return
 
+
+    # INTEGRACAO SENOIDAL: validacao comum reaproveitada. Parametros,
+    # processo e finalizacao ficam no modulo separado, sem ler a tabela
+    # de etapas nem iniciar nosso controlador reciprocante.
+    if globals().get('sinewave_panel') and sinewave_panel.selected():
+        sinewave_panel.start()
+        return
 
     ###############
     ## Verificação reciprocating, se o campo Curso está preenchido
@@ -5414,6 +5435,10 @@ def pause_acquisition():
 # - Modo externo: envia STOP e aguarda fechamento/merge final.
 # - Modo da versao anterior: zera tensao e limpa buffers/plots.
 def stop_acquisition():
+    # Backend externo usa JSONL; nao enviar STOP textual do logger C.
+    if sinewave_panel.active:
+        sinewave_panel.stop()
+        return
     global running, is_paused, ip, timer_started, tempo_pause_inicio, p_dist_target_mm, p_turn_target, x_time_ref_s
     global graSamps, sampsTimestamp, p_strokes, p_atrito_ef, p_atrito_max, p_atrito_min, p_coluna_velocidade
     global p_turn_strokes, p_turn_atrito_ef, p_turn_atrito_max, p_turn_atrito_min, p_turn_coluna_velocidade, p_turn_velocidade_alvo
@@ -5664,7 +5689,7 @@ def update3(frame):
         mode = str(mode).strip().lower()
         if mode not in ("dist", "turn"):
             mode = "dist"
-        is_recip = bool("reciprocante_var" in globals() and reciprocante_var.get())
+        is_recip = bool(_is_reciprocating_mode())
         target_vals = np.array([])
 
         if mode == "turn":
@@ -5933,7 +5958,7 @@ def _plot_g3_mode_axis_view(ax, mode, twin_ax=None):
     if mode not in ("dist", "turn"):
         mode = "dist"
 
-    is_recip = bool("reciprocante_var" in globals() and reciprocante_var.get())
+    is_recip = bool(_is_reciprocating_mode())
     target_vals = np.array([])
     if mode == "turn":
         x_vals = np.array(p_turn_strokes, dtype=float) if len(p_turn_strokes) > 0 else np.array([])
@@ -6113,7 +6138,7 @@ def update_graficos_tab(frame):
 
 def _reload_final_reciprocating_graph_data():
     """Recarrega _DP/_M finais para o PNG reciprocante usar dados reconstruidos."""
-    if not ("reciprocante_var" in globals() and reciprocante_var.get()):
+    if not (_is_reciprocating_mode()):
         return
     if not caminho_turn_dist_csv or not caminho_turn_volta_csv:
         return
@@ -6160,7 +6185,7 @@ def _reload_final_reciprocating_graph_data():
 
 def _reload_final_continuous_graph_data():
     """Recarrega _DP/_VP externos para o PNG continuo usar o resultado final."""
-    if "reciprocante_var" in globals() and reciprocante_var.get():
+    if _is_reciprocating_mode():
         return
     if not caminho_turn_dist_csv or not caminho_turn_volta_csv:
         return
@@ -6412,7 +6437,7 @@ def abrir_config_x():
     global x_auto, x_manual_min, x_auto_total_min, x_time_ref_s
     global x3_auto, x3_manual_mm, x3_manual_strokes, x3_auto_total_mm, aux
     recip_stroke_axis = bool(
-        "reciprocante_var" in globals() and reciprocante_var.get() and
+        _is_reciprocating_mode() and
         str(graph3_mode_var.get() if "graph3_mode_var" in globals() else graph3_mode) == "turn"
     )
 
@@ -7887,6 +7912,9 @@ _request_graph_render(force=True, delay_ms=250)
 #matplotlib.pyplot.show(block=False)
 
 root.protocol("WM_DELETE_WINDOW", fechar_janela)
+
+# Painel isolado: substitui apenas a tabela inferior.
+sinewave_panel = SinewavePanel(globals())
 
 root.mainloop()
 

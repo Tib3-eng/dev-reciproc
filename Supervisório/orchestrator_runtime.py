@@ -253,6 +253,12 @@ class RunState:
     dynamic_offset_n: float = 0.0
     # Estado logico de pausa observado pelo orquestrador.
     paused: bool = False
+    # Backend externo: dados comuns continuam neste snapshot; algoritmo/IPC
+    # ficam em sinewave_integration. Defaults preservam os chamadores antigos.
+    controller_kind: str = 'a5_speed'
+    controller_request: Optional[dict] = None
+    controller_client: object = None
+    motion_events: Optional[list] = None
 
 
 def _processing_dlg_csv(state: RunState) -> str:
@@ -471,6 +477,8 @@ def refresh_reciprocating_progress(state: RunState) -> dict:
     O valor e monotonicamente crescente e vem do mesmo ``path_mm`` usado pelo
     EncoderCore para decidir o termino. Nao integra amostras cruas do encoder.
     """
+    if getattr(state, 'controller_kind', '') == 'sine_external':
+        return state.controller_client.progress()
     target_mm = float(getattr(state, "reciprocating_shadow_total_mm", 0.0) or 0.0)
     progress_mm = float(getattr(state, "reciprocating_progress_mm", 0.0) or 0.0)
     if not state or not getattr(state, "reciprocating", False):
@@ -1942,6 +1950,9 @@ def wait_and_merge(state: RunState) -> int:
         Codigo de retorno do merge.
         - Quando alternativa Python e usado com sucesso, retorna 0.
     """
+    if state.controller_kind == 'sine_external':
+        from sinewave_integration import wait_and_finalize
+        return wait_and_finalize(state)
     if state.reciprocating:
         # A distancia encerra o movimento, mas o Drive permanece parado e os
         # dois loggers continuam por uma curta pos-captura. Isso permite que a
@@ -3020,6 +3031,17 @@ def _rebuild_reciprocating_csv_from_logs(
                         recovery_intervals.append(open_recovery)
                         open_recovery = None
 
+    # Fronteira do novo backend: recebe eventos medidos normalizados, sem
+    # exigir que o programa do colega imite o texto dos logs do a5_speed_logger.
+    external_curve = getattr(state, 'controller_kind', '') == 'sine_external'
+    if external_curve:
+        physical_events = [
+            {'qpc': event['sample_qpc'], 'stroke': event['stroke'], 'idx': event.get('idx'),
+             'extreme_mm': event['position_mm'], 'endpoint_error_mm': None}
+            for event in (state.motion_events or [])
+            if event.get('type') == 'physical_extreme'
+        ]
+
     samples = []
     offset_n = float(getattr(state, "dynamic_offset_n", 0.0) or 0.0)
     last_angle = None
@@ -3145,11 +3167,18 @@ def _rebuild_reciprocating_csv_from_logs(
     for event in sorted(physical_events, key=lambda item: item["stroke"]):
         confirmation_index = nearest_sample_index(event["qpc"])
         sample_index = confirmation_index
-        if confirmation_index is not None and event.get("extreme_mm") is not None:
+        explicit_index = None
+        if external_curve and event.get('idx') is not None:
+            explicit_index = next((i for i, sample in enumerate(samples)
+                                   if sample['idx'] == event['idx']), None)
+            sample_index = explicit_index
+        if explicit_index is None and confirmation_index is not None and event.get("extreme_mm") is not None:
             search_start = max(
                 first_valid,
                 confirmation_index - int(max(20.0, float(getattr(state, "rate_hz", 200.0)))),
             )
+            if external_curve and boundaries:
+                search_start = max(search_start, boundaries[-1]['sample_index'] + 1)
             candidates = [
                 i for i in range(search_start, confirmation_index + 1)
                 if samples[i]["accepted"] and samples[i]["pos"] is not None
@@ -3157,7 +3186,11 @@ def _rebuild_reciprocating_csv_from_logs(
             if candidates:
                 sample_index = min(
                     candidates,
-                    key=lambda i: abs(samples[i]["pos"] - event["extreme_mm"]),
+                    # O perfil senoidal pode repetir o mesmo extremo dentro
+                    # de 1 s. Preferir a ancora mais recente evita juntar
+                    # varios ciclos no primeiro extremo da janela.
+                    key=(lambda i: (abs(samples[i]['pos'] - event['extreme_mm']), -i))
+                    if external_curve else lambda i: abs(samples[i]['pos'] - event['extreme_mm']),
                 )
         if sample_index is not None and sample_index > first_valid:
             boundaries.append({**event, "sample_index": sample_index})
@@ -3188,7 +3221,14 @@ def _rebuild_reciprocating_csv_from_logs(
         max(float(state.reciprocating_course_mm), 1.0e-12)
     ))
     boundaries = [item for item in boundaries if item["sample_index"] < final_sample_index]
-    if getattr(state, "reciprocating_physical_distance_enabled", False):
+    if external_curve:
+        # Em parada parcial, preservar todo _T mas nao chamar o trecho aberto
+        # de stroke/ciclo concluido. A referencia VELOCIDADE_ALVO fica NULL.
+        boundary_events = [event for event in physical_events
+                           if nearest_sample_index(event['qpc']) == final_sample_index]
+        if boundary_events:
+            boundaries.append({**boundary_events[-1], 'sample_index': final_sample_index})
+    elif getattr(state, "reciprocating_physical_distance_enabled", False):
         final_stroke = (
             done_event.get("stroke")
             if done_event and done_event.get("stroke") is not None
@@ -3197,13 +3237,14 @@ def _rebuild_reciprocating_csv_from_logs(
     else:
         boundaries = boundaries[:max(0, expected_strokes - 1)]
         final_stroke = expected_strokes
-    boundaries.append({
-        "sample_index": final_sample_index,
-        "stroke": final_stroke,
-        "endpoint_error_mm": None,
-    })
+    if not external_curve:
+        boundaries.append({
+            "sample_index": final_sample_index,
+            "stroke": final_stroke,
+            "endpoint_error_mm": None,
+        })
 
-    final_output_index = boundaries[-1]["sample_index"]
+    final_output_index = final_sample_index if external_curve else boundaries[-1]["sample_index"]
     output_samples = samples[:final_output_index + 1]
     with open(state.merge_csv, "w", newline="", encoding="utf-8") as ft:
         writer = csv.writer(ft, delimiter=";", lineterminator="\n")
@@ -3227,7 +3268,7 @@ def _rebuild_reciprocating_csv_from_logs(
         edge_pct = max(0.0, min(49.0, float(state.reciprocating_edge_filter_pct)))
     except Exception:
         edge_pct = 0.0
-    target_schedule = list(getattr(state, "target_speed_schedule", None) or [])
+    target_schedule = [] if external_curve else list(getattr(state, "target_speed_schedule", None) or [])
     stroke_ranges = []
     start = first_valid
     for boundary in boundaries:
@@ -3988,6 +4029,10 @@ def stop_run(state: Optional[RunState], manual: bool = False) -> None:
     """
     if not state:
         return
+    if state.controller_kind == 'sine_external':
+        state.manual_stop_requested = bool(manual)
+        state.controller_client.send('stop', reason='operator' if manual else 'supervisor')
+        return
     if manual:
         state.manual_stop_requested = True
     procs = (state.dlg_proc, state.drive_proc)
@@ -4082,6 +4127,8 @@ def pause_run(state: Optional[RunState]) -> None:
     """
     if not state:
         return
+    if state.controller_kind == 'sine_external':
+        raise RuntimeError('Teste senoidal nao suporta pausa/retomada. Use STOP.')
     _send_ipc(state.drive_proc, "PAUSE")
     _send_ipc(state.dlg_proc, "PAUSE")
     state.paused = True
@@ -4097,6 +4144,8 @@ def resume_run(state: Optional[RunState]) -> None:
     """
     if not state:
         return
+    if state.controller_kind == 'sine_external':
+        raise RuntimeError('Teste senoidal nao suporta pausa/retomada. Use STOP.')
     _send_ipc(state.dlg_proc, "RESUME")
     _send_ipc(state.drive_proc, "RESUME")
     state.paused = False

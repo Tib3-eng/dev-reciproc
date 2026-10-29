@@ -291,6 +291,10 @@ Agent behavior
 Multi-exe orchestration
 - Expect multiple executables (one per function). A supervisor program will orchestrate them.
 - Executables should exchange data via files: e.g., calibration tool writes a file that the main DLG logger reads.
+- Senoidal (teste): painel/runner separados em sinewave_ui.py/sinewave_integration.py; contrato JSONL v1 em sinewave_protocol.py. Novo perfil nao inicia a5_speed_logger em paralelo.
+- sinewave/sinewave_runtime.py e o adaptador externo; curve_program.py e a area comentada do colega. Preservar a formula recebida ate correcao dele. HARDWARE_VALIDATED=False; simulacao explicita e padrao, sem COM/DLG, identificada no _I/PNG.
+- Senoidal gera _T/_DP/_M por DLG/CH3 e eventos medidos normalizados. VELOCIDADE_ALVO em _M fica NULL; parada parcial nao inventa stroke completo. Nao alterar os modos atuais ao integrar esse perfil.
+- Distribuir sinewave_controller.exe autocontido em Supervisorio/dist/controladores (pasta real com acento), separado do exe principal. Atualizar o build pelo spec sinewave/build_py/sinewave_controller.spec.
 
 - Grafico 3 tem switch de visualizacao: Distancia (processamento por intervalo em mm) ou Volta (processamento por volta do pino).
 - O ensaio gera dois arquivos finais do grafico 3: _DP.csv (distancia) e _VP.csv (volta) no continuo; no reciprocante gera _DP.csv e _M.csv (stroke).

@@ -1,0 +1,5 @@
+# Versoes usadas na verificacao da integracao, Python 3.12 / Windows.
+# Dependencias do controlador externo; nao representam toda a UI principal.
+numpy==2.4.2
+pymodbus==3.15.0
+pyserial==3.5
